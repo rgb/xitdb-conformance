@@ -675,7 +675,8 @@ All of these look like mistakes and all of them are what Zig does. `overwriting-
 ```
 
 With file ID `0011223344556677`, hash ID `sha1`, hash size 20 and the commit ID `303585f7ed65083c` it makes 438
-bytes, 376 of them after the new database's 62:
+bytes, 376 of them after the new database's 62. A commit ID is random, so the fixture of this script, which came from
+another run, has a different one, and a different checksum after it. Its other bytes are these:
 
 | Offset | Bytes | What |
 |---|---|---|

@@ -83,6 +83,16 @@ const S = struct {
     }
 };
 
+/// a clone of what's under `key`, made with a freeze on its cursor, so that writes through
+/// it copy what's older than that point, even if this transaction made it. it's for the end
+/// of a transaction: writing to the original after this would be two headers for one tree.
+fn cloneFrozen(s: *S, comptime key: []const u8, comptime clone_key: []const u8) !void {
+    try s.op("{{\"op\":\"read_path_slot\",\"on\":\"m\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"" ++ key ++ "\"}}}}}}],\"as\":\"original\"}}", .{});
+    try s.op("{{\"op\":\"write_path\",\"on\":\"m\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"" ++ clone_key ++ "\"}}}}}}],\"as\":\"clone\"}}", .{});
+    try s.op("{{\"op\":\"write\",\"on\":\"clone\",\"data\":{{\"slot\":{{\"var\":\"original\"}}}}}}", .{});
+    try s.op("{{\"op\":\"freeze\",\"on\":\"clone\"}}", .{});
+}
+
 fn begin(w: *Io.Writer, description: []const u8) !S {
     try w.print("{{\n  \"format\": \"xitdb-script/1\",\n  \"description\": \"{s} Written by src/longscripts.zig.\",\n  \"hash_size\": 20,\n  \"hash_id\": \"sha1\",\n  \"file_id\": \"0011223344556677\",\n  \"ops\": [", .{description});
     return .{ .w = w };
@@ -199,6 +209,12 @@ fn deepTries(w: *Io.Writer) !void {
     for (0..14) |level| try putDeep(&s, level, 300 + level);
     try listSlice(&s, 100);
     for (0..30) |i| try listAppend(&s, 13000 + i);
+    // through frozen cursors, which copy what this transaction made before them
+    try cloneFrozen(&s, "list", "list_clone");
+    for (0..100) |i| try s.op("{{\"op\":\"write_path\",\"on\":\"clone\",\"path\":[\"array_list_init\",\"array_list_append\",{{\"write\":{{\"uint\":{d}}}}}]}}", .{14000 + i});
+    for (0..50) |i| try s.op("{{\"op\":\"write_path\",\"on\":\"clone\",\"path\":[\"array_list_init\",{{\"array_list_get\":{d}}},{{\"write\":{{\"uint\":{d}}}}}]}}", .{ i * 2, 15000 + i });
+    try cloneFrozen(&s, "counted", "counted_clone");
+    for (0..60) |i| try s.op("{{\"op\":\"write_path\",\"on\":\"clone\",\"path\":[{{\"hash_map_init\":{{\"counted\":true}}}},{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"clone-{d}\"}}}}}},{{\"write\":{{\"uint\":{d}}}}}]}}", .{ i, i });
     try s.endMoment();
 
     // what came of it. the sizes are 300 - 100 + 20, then 200 more, then 50 more, cut to 100, then 30 more
@@ -223,6 +239,16 @@ fn deepTries(w: *Io.Writer) !void {
     try s.op("{{\"op\":\"read_uint\",\"on\":\"v\",\"expect\":11001,\"note\":\"written on either side of the freeze\"}}", .{});
     try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"list\"}}}}}},{{\"array_list_get\":-1}}],\"as\":\"v\"}}", .{});
     try s.op("{{\"op\":\"read_uint\",\"on\":\"v\",\"expect\":13029}}", .{});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"list_clone\"}}}}}}],\"as\":\"clone\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"clone\",\"expect\":230}}", .{});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"list\"}}}}}},{{\"array_list_get\":0}}],\"as\":\"v\",\"note\":\"the clone's writes didn't reach the original\"}}", .{});
+    try s.op("{{\"op\":\"read_uint\",\"on\":\"v\",\"expect\":7000}}", .{});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"list_clone\"}}}}}},{{\"array_list_get\":0}}],\"as\":\"v\"}}", .{});
+    try s.op("{{\"op\":\"read_uint\",\"on\":\"v\",\"expect\":15000}}", .{});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"counted_clone\"}}}}}}],\"as\":\"clone\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"clone\",\"expect\":140}}", .{});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"counted\"}}}}}}],\"as\":\"counted\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"counted\",\"expect\":80}}", .{});
     try end(w);
 }
 
@@ -298,6 +324,21 @@ fn deepLinked(w: *Io.Writer) !void {
     try s.beginMoment();
     for (0..50) |i| try list.append(11000 + i);
     for (0..20) |i| try list.remove(i + 130);
+    // through a frozen cursor, which copies the nodes this transaction made before it
+    try cloneFrozen(&s, "list", "list_clone");
+    var clone_size = list.size;
+    for (0..60) |i| {
+        try s.op("{{\"op\":\"write_path\",\"on\":\"clone\",\"path\":[\"linked_array_list_init\",\"linked_array_list_append\",{{\"write\":{{\"uint\":{d}}}}}]}}", .{12000 + i});
+        clone_size += 1;
+    }
+    for (0..20) |i| {
+        try s.op("{{\"op\":\"write_path\",\"on\":\"clone\",\"path\":[\"linked_array_list_init\",{{\"linked_array_list_insert\":{d}}},{{\"write\":{{\"uint\":{d}}}}}]}}", .{ (i * 37) % clone_size, 13000 + i });
+        clone_size += 1;
+    }
+    for (0..20) |i| {
+        try s.op("{{\"op\":\"write_path\",\"on\":\"clone\",\"path\":[\"linked_array_list_init\",{{\"linked_array_list_remove\":{d}}}]}}", .{(i * 53) % clone_size});
+        clone_size -= 1;
+    }
     try s.endMoment();
 
     for ([_]u64{ first_size, second_size, third_size, list.size }, 0..) |size, moment| {
@@ -307,6 +348,8 @@ fn deepLinked(w: *Io.Writer) !void {
     }
     try s.op("{{\"op\":\"read_path\",\"on\":\"list\",\"path\":[{{\"linked_array_list_get\":-1}}],\"as\":\"v\"}}", .{});
     try s.op("{{\"op\":\"read_uint\",\"on\":\"v\",\"expect\":11049}}", .{});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"list_clone\"}}}}}}],\"as\":\"clone\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"clone\",\"expect\":{d}}}", .{clone_size});
     try end(w);
 }
 
@@ -370,6 +413,11 @@ fn deepSorted(w: *Io.Writer) !void {
     for (400..430) |i| try sortedPut(&s, i, 4000 + i);
     for (240..260) |i| try sortedRemove(&s, i);
     for (90..100) |i| try setRemove(&s, i);
+    // through a frozen cursor, which copies the nodes this transaction made before it
+    try cloneFrozen(&s, "sorted", "sorted_clone");
+    var buffer: [64]u8 = undefined;
+    for (460..520) |i| try s.op("{{\"op\":\"write_path\",\"on\":\"clone\",\"path\":[{{\"sorted_map_init\":{{}}}},{{\"sorted_map_get\":{{\"value\":\"{s}\"}}}},{{\"write\":{{\"uint\":{d}}}}}]}}", .{ writeSortedKey(&buffer, i), i });
+    for (260..280) |i| try s.op("{{\"op\":\"write_path\",\"on\":\"clone\",\"path\":[{{\"sorted_map_init\":{{}}}},{{\"sorted_map_remove\":\"{s}\"}}]}}", .{writeSortedKey(&buffer, i)});
     try s.endMoment();
 
     // 300 - 60 + 20, then 100 - 40 more, then 60 - 20 more, and 150 - 40, then 50 more, then 10 fewer
@@ -380,9 +428,10 @@ fn deepSorted(w: *Io.Writer) !void {
         try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"set\"}}}}}}],\"as\":\"set\"}}", .{});
         try s.op("{{\"op\":\"count\",\"on\":\"set\",\"expect\":{d}}}", .{counts[1]});
     }
-    var buffer: [64]u8 = undefined;
     try s.op("{{\"op\":\"read_path\",\"on\":\"sorted\",\"path\":[{{\"sorted_map_get\":{{\"value\":\"{s}\"}}}}],\"as\":\"v\"}}", .{writeSortedKey(&buffer, 401)});
     try s.op("{{\"op\":\"read_uint\",\"on\":\"v\",\"expect\":4401,\"note\":\"written on either side of the freeze\"}}", .{});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"sorted_clone\"}}}}}}],\"as\":\"clone\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"clone\",\"expect\":400,\"note\":\"60 more than the map it's a clone of, and 20 fewer\"}}", .{});
     try end(w);
 }
 
