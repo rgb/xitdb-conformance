@@ -95,14 +95,26 @@ It was produced from:
   are harder to read, but they do things in combinations nobody thought of. Those called \`deep-*\` have transactions of
   hundreds of writes, and they're what tells copying from rewriting in place. These and \`iterator-tiers*\` come from
   \`longscripts\`, because they're too long to write by hand.
+- \`valid/<name>.<database>.db\`: for a script with several databases, each one's file. \`other_databases\` in the
+  manifest lists them.
 - \`failing/<name>.json\`: a well-formed script that must fail in every runner. The text after \`expected failure:\` in
   its description is why it fails in Zig, and it has no expected file, as there's nothing to compare.
+
+## Which milestone a script waits for
+
+The package's milestones go by what a script lists, and the highest of these is the one it waits for: \`replication\`
+is M8, \`compaction\` is M7, \`sorted_map\` is M6, \`linked_array_list\` is M5, and \`iterators\`, \`rank\`, \`byte_stream\` or
+\`byte_buffers\` is M4. Anything else runs at M3. A script with \`several_databases\` and no other reason to wait can
+run as soon as the runner can make more than one.
 
 ## Using them
 
 For a script in \`valid/\`, give the implementation a random source that returns the sidecar's non-null commit IDs in
 order. After each top-level op, check the committed size against the sidecar. At the end, none of the commit IDs
 should be left, and the file must equal \`<name>.db\` in every byte.
+
+A script with several databases uses one list of commit IDs for all of them, in the order the sidecar has them, and an
+entry's \`db\` says which database it's about. Every one of them has to equal its expected file.
 
 For a script in \`failing/\`, the run must fail. Any commit IDs will do.
 
@@ -145,7 +157,14 @@ if [ "$MODE" = check ]; then
     for file in "$FIXTURES"/valid/*; do
         case "$file" in
             *.db.sidecar.json) name=$(basename "$file" .db.sidecar.json) ;;
-            *.db) name=$(basename "$file" .db) ;;
+            *.db)
+                # <name>.db, or <name>.<database>.db, which the manifest has to list
+                base=$(basename "$file" .db)
+                name=${base%%.*}
+                if [ "$name" != "$base" ]; then
+                    grep -qF "\"valid/$base.db\"" "$FIXTURES/manifest.json" || fail "$file has no source script"
+                fi
+                ;;
             *.json) name=$(basename "$file" .json) ;;
             *) fail "$file shouldn't be here" ;;
         esac
@@ -193,9 +212,7 @@ for file in "$FIXTURES"/valid/* "$FIXTURES"/failing/*; do
             ;;
         *)
             name=$(basename "$file")
-            name=${name%.sidecar.json}
-            name=${name%.db}
-            name=${name%.json}
+            name=${name%%.*}
             found=no
             for dir in $SOURCES; do
                 [ -f "$dir/$name.json" ] && found=yes
@@ -222,6 +239,10 @@ for dir in $SOURCES; do
         cp "$script" "$copy.json"
         cp "$TMP/$name.db" "$copy.db"
         cp "$TMP/$name.db.sidecar.json" "$copy.db.sidecar.json"
+        for other in "$TMP/$name".*.db; do
+            [ -e "$other" ] || continue
+            cp "$other" "$FIXTURES/valid/$(basename "$other")"
+        done
         echo "wrote $copy"
         changed=yes
     done

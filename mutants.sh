@@ -85,7 +85,7 @@ try_mutant() { # name, old text, new text, which occurrence
         echo "    others:$others"
     fi
     if [ "$noticed" -eq 0 ]; then failed=$((failed + 1)); fi
-    rm -f "$WORK/m.db" "$WORK/m.db.sidecar.json"
+    rm -f "$WORK"/m.*
 }
 
 # the index blocks of array lists and hash maps
@@ -115,6 +115,15 @@ try_mutant is-old-never "return ptr < @max(tx_start, frozen_at);" "return ptr < 
 try_mutant is-old-ignores-freeze-points "return ptr < @max(tx_start, frozen_at);" "_ = frozen_at; return ptr < tx_start;"
 try_mutant is-old-ignores-transaction-start "return ptr < @max(tx_start, frozen_at);" "_ = tx_start; return ptr < frozen_at;"
 try_mutant is-old-off-by-one "return ptr < @max(tx_start, frozen_at);" "return ptr <= @max(tx_start, frozen_at);"
+
+# compaction, whose results should show in the target's bytes
+try_mutant compact-partial-blocks-as-full "if (@as(u128, size) == @as(u128, child_size) * SLOT_COUNT) {" "if (size == size) {"
+try_mutant compact-bytes-not-shared "if (try self.getOffset(slot.value)) |target_offset| {" "if (if (slot.value == slot.value) @as(?u64, null) else try self.getOffset(slot.value)) |target_offset| {"
+try_mutant compact-objects-not-shared "if (try self.getOffset(source_offset)) |target_offset| {" "if (if (source_offset == source_offset) @as(?u64, null) else try self.getOffset(source_offset)) |target_offset| {"
+# replication
+try_mutant replica-always-replaced "return if (trailer.checksum == state.checksum) state.committed_size else 0;" "return if (trailer.checksum == state.checksum and false) state.committed_size else 0;"
+try_mutant replica-never-replaced "return if (trailer.checksum == state.checksum) state.committed_size else 0;" "return if (trailer.checksum == state.checksum or true) state.committed_size else 0;"
+try_mutant first-sync-keeps-latest-root-header ".file_size = end, .root = trailer.root" ".file_size = try self.committedSize(), .root = trailer.root"
 
 if [ "$failed" -gt 0 ]; then
     echo "$failed mutants got past every script"

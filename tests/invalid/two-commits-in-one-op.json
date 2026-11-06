@@ -1,0 +1,10 @@
+{ "format": "xitdb-script/1", "description": "expected failure: which a sidecar has no way to say", "hash_size": 20, "hash_id": null, "file_id": "0000000000000001",
+  "ops": [
+    { "op": "create_database", "name": "o", "file_id": "0000000000000002" },
+    { "op": "use", "name": "o" },
+    { "op": "write_path", "on": "root", "path": [], "as": "other_root" },
+    { "op": "use", "name": "main" },
+    { "op": "write_path", "on": "root", "path": ["array_list_init", { "ctx": { "as": "c", "ops": [
+      { "op": "write", "on": "other_root", "data": { "uint": 1 } }
+    ] } }] }
+  ] }

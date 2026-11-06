@@ -77,8 +77,8 @@ for script in "$OUT"/long/*.json; do
     }
     count=$((count + 1))
 done
-if [ "$count" -ne 6 ]; then
-    echo "longscripts should write 6 scripts, and it wrote $count"
+if [ "$count" -ne 9 ]; then
+    echo "longscripts should write 9 scripts, and it wrote $count"
     exit 1
 fi
 echo "longscripts still writes the $count scripts that are committed"
@@ -149,6 +149,26 @@ echo "== scripts that must fail"
 expect_failures tests/failing
 expect_failures tests/invalid
 
+echo "== both kinds of offset map give the same target"
+count=0
+for script in tests/valid/*.json; do
+    grep -q '"offset_map": *"memory"' "$script" || continue
+    name=$(basename "$script" .json)
+    sed 's/"offset_map": *"memory"/"offset_map": "disk"/' "$script" > "$OUT/disk.json"
+    "$RUN" "$OUT/disk.json" "$OUT/$name.disk.db"
+    "$DET" "$OUT/$name.a.db" "$OUT/$name.disk.db" > /dev/null || {
+        echo "$name: the offset map changed what compaction wrote"
+        exit 1
+    }
+    rm -f "$OUT/$name.disk.db"* "$OUT/$name.disk".*.db
+    count=$((count + 1))
+done
+if [ "$count" -lt 5 ]; then
+    echo "only $count scripts compact with the memory offset map, which is fewer than there should be"
+    exit 1
+fi
+echo "$count scripts give the same files with the disk-backed offset map"
+
 echo "== what the port corrects"
 # what these say about Zig has to stay true, and they have to stay out of everything else
 count=0
@@ -188,14 +208,24 @@ DUMP=zig-out/bin/dump
 count=0
 for script in scripts/*.json tests/valid/*.json tests/generated/*.json; do
     name=$(basename "$script" .json)
-    "$DUMP" "$OUT/$name.a.db" > "$OUT/$name.a.txt"
-    for other in b file memory release; do
-        [ -f "$OUT/$name.$other.db" ] || continue
-        "$DUMP" "$OUT/$name.$other.db" > "$OUT/$name.$other.txt"
-        cmp -s "$OUT/$name.a.txt" "$OUT/$name.$other.txt" || {
-            echo "$name: dump differs between a and $other"
+    # each of the other databases, if it has any, the same way
+    for database in "" $(grep -o '^    "[A-Za-z0-9_]*": {"file_id"' "$OUT/$name.a.db.sidecar.json" | sed 's/^    "\(.*\)".*/\1/' | grep -v '^main$'); do
+        suffix=${database:+.$database}
+        # one can be left in no state to read by a script that means to, and it's there to compare
+        status=0
+        "$DUMP" "$OUT/$name.a$suffix.db" > "$OUT/$name.a$suffix.txt" 2> /dev/null || status=$?
+        if [ "$status" -ne 0 ] && ! grep -qx "$name ${database:-main}" tests/dump/unreadable.txt; then
+            echo "$name: dump can't read ${database:-main}"
             exit 1
-        }
+        fi
+        for other in b file memory release; do
+            [ -f "$OUT/$name.$other$suffix.db" ] || continue
+            "$DUMP" "$OUT/$name.$other$suffix.db" > "$OUT/$name.$other$suffix.txt" 2> /dev/null || true
+            cmp -s "$OUT/$name.a$suffix.txt" "$OUT/$name.$other$suffix.txt" || {
+                echo "$name: dump of ${database:-main} differs between a and $other"
+                exit 1
+            }
+        done
     done
     count=$((count + 1))
 done

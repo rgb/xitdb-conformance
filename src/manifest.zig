@@ -28,6 +28,10 @@ const Features = struct {
     rank: bool = false,
     byte_stream: bool = false,
     byte_buffers: bool = false,
+    several_databases: bool = false,
+    compaction: bool = false,
+    disk_offsets: bool = false,
+    replication: bool = false,
 
     fn addOps(self: *Features, ops: Json) void {
         for (ops.array.items) |item| {
@@ -42,6 +46,15 @@ const Features = struct {
             if (std.mem.eql(u8, name, "rank")) self.rank = true;
             if (std.mem.eql(u8, name, "read_stream")) self.byte_stream = true;
             if (std.mem.eql(u8, name, "read_bytes_into") or op.get("max_size") != null) self.byte_buffers = true;
+            if (std.mem.eql(u8, name, "create_database") or std.mem.eql(u8, name, "use")) self.several_databases = true;
+            if (std.mem.eql(u8, name, "compact")) {
+                self.several_databases = true;
+                self.compaction = true;
+                if (std.mem.eql(u8, op.get("offset_map").?.string, "disk")) self.disk_offsets = true;
+            }
+            for ([_][]const u8{ "replica_state", "replication_start", "committed_size", "read_committed", "apply_replicated" }) |replication_op| {
+                if (std.mem.eql(u8, name, replication_op)) self.replication = true;
+            }
             // what's in a callback counts as well
             if (op.get("ctx")) |ctx| self.addOps(ctx.object.get("ops").?);
             if (op.get("path")) |path| {
@@ -56,7 +69,7 @@ const Features = struct {
     fn print(self: Features, w: *Io.Writer) !void {
         var first = true;
         try w.writeAll("[");
-        inline for (.{ "reopen", "raw_file", "read_only", "iterators", "rank", "byte_stream", "byte_buffers" }) |name| {
+        inline for (.{ "reopen", "raw_file", "read_only", "iterators", "rank", "byte_stream", "byte_buffers", "several_databases", "compaction", "disk_offsets", "replication" }) |name| {
             if (@field(self, name)) {
                 try w.writeAll(if (first) "\"" else ", \"");
                 try w.writeAll(name);
@@ -67,6 +80,29 @@ const Features = struct {
         try w.writeAll("]");
     }
 };
+
+/// the names of the other databases a script makes, which only the top level can do.
+/// a compaction into main or into one made earlier doesn't make one.
+fn otherDatabases(arena: std.mem.Allocator, ops: Json) ![]const []const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    for (ops.array.items) |item| {
+        const op = item.object;
+        const name = op.get("op").?.string;
+        const made = if (std.mem.eql(u8, name, "create_database"))
+            op.get("name").?.string
+        else if (std.mem.eql(u8, name, "compact"))
+            op.get("into").?.string
+        else
+            continue;
+        if (std.mem.eql(u8, made, "main")) continue;
+        var seen = false;
+        for (names.items) |existing| {
+            if (std.mem.eql(u8, existing, made)) seen = true;
+        }
+        if (!seen) try names.append(arena, made);
+    }
+    return names.items;
+}
 
 const Collections = struct {
     array_list: bool = false,
@@ -171,6 +207,14 @@ pub fn main(init: std.process.Init) !void {
         });
         if (passes) {
             try w.print(", \"db\": \"valid/{s}.db\", \"sidecar\": \"valid/{s}.db.sidecar.json\"", .{ name, name });
+            const others = try otherDatabases(arena, script.get("ops").?);
+            if (others.len > 0) {
+                try w.writeAll(", \"other_databases\": {");
+                for (others, 0..) |other, other_index| {
+                    try w.print("{s}\"{s}\": \"valid/{s}.{s}.db\"", .{ if (other_index == 0) "" else ", ", other, name, other });
+                }
+                try w.writeAll("}");
+            }
         }
         try w.writeAll(", \"collections\": ");
         try collections.print(w);

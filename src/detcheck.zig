@@ -17,6 +17,12 @@
 //!
 //! The last one is what the Swift runner relies on: the sidecar's commit IDs are
 //! all it takes to reproduce a file.
+//!
+//! A script with several databases has a sidecar that lists the trailers in each one's
+//! file, and the same goes for each of them, read from next to <a.db> and <b.db>. What
+//! one of those holds can have come from another through replication, so the list is
+//! what says where its commit IDs are, rather than which ops committed. A trailer
+//! that a failed sync cut short is only compared as far as it goes.
 
 const std = @import("std");
 
@@ -45,11 +51,27 @@ const Sidecar = struct {
     initial_size: u64,
     file_size: u64,
     ops: []const Op,
+    // only in a script with several
+    databases: []const Database = &.{},
 
     const Op = struct {
         // null while the database is closed
         committed_size: ?u64,
         commit_id: ?u64,
+        db: ?[]const u8 = null,
+    };
+
+    const Database = struct {
+        name: []const u8,
+        file_id: u64,
+        file_size: u64,
+        trailers: []const Trailer,
+    };
+
+    const Trailer = struct {
+        position: u64,
+        commit_id: u64,
+        file_id: u64,
     };
 };
 
@@ -84,7 +106,31 @@ fn readSidecar(io: Io, arena: Allocator, db_path: []const u8) !Sidecar {
         op.* = .{
             .committed_size = if (committed_size == .null) null else parseU64(committed_size, path),
             .commit_id = if (commit_id == .null) null else parseHexId(commit_id, path),
+            .db = if (item.object.get("db")) |db| db.string else null,
         };
+    }
+
+    var databases: std.ArrayList(Sidecar.Database) = .empty;
+    if (obj.get("databases")) |value| {
+        var iter = value.object.iterator();
+        while (iter.next()) |entry| {
+            const db = entry.value_ptr.object;
+            const items = field(db, "trailers", path).array.items;
+            const trailers = try arena.alloc(Sidecar.Trailer, items.len);
+            for (items, trailers) |item, *trailer| {
+                trailer.* = .{
+                    .position = parseU64(field(item.object, "position", path), path),
+                    .commit_id = parseHexId(field(item.object, "commit_id", path), path),
+                    .file_id = parseHexId(field(item.object, "file_id", path), path),
+                };
+            }
+            try databases.append(arena, .{
+                .name = entry.key_ptr.*,
+                .file_id = parseHexId(field(db, "file_id", path), path),
+                .file_size = parseU64(field(db, "file_size", path), path),
+                .trailers = trailers,
+            });
+        }
     }
 
     return .{
@@ -92,7 +138,101 @@ fn readSidecar(io: Io, arena: Allocator, db_path: []const u8) !Sidecar {
         .initial_size = parseU64(field(obj, "initial_size", path), path),
         .file_size = parseU64(field(obj, "file_size", path), path),
         .ops = ops,
+        .databases = databases.items,
     };
+}
+
+/// <a>.<name>.db, next to <a>.db
+fn pathOf(arena: Allocator, main_path: []const u8, name: []const u8) ![]const u8 {
+    if (std.mem.eql(u8, name, "main")) return main_path;
+    const stem = if (std.mem.endsWith(u8, main_path, ".db")) main_path[0 .. main_path.len - 3] else main_path;
+    return std.mem.concat(arena, u8, &.{ stem, ".", name, ".db" });
+}
+
+fn checkSeveral(io: Io, arena: Allocator, path_a: []const u8, path_b: []const u8, side_a: Sidecar, side_b: Sidecar) !void {
+    if (side_a.ops.len != side_b.ops.len) fail("op counts differ", .{});
+    if (side_a.databases.len != side_b.databases.len) fail("database counts differ", .{});
+    var commits: usize = 0;
+    for (side_a.ops, side_b.ops, 0..) |op_a, op_b, i| {
+        if (!std.mem.eql(u8, op_a.db orelse "main", op_b.db orelse "main")) fail("op {d}: they're about different databases", .{i});
+        if (!std.meta.eql(op_a.committed_size, op_b.committed_size)) fail("op {d}: committed sizes differ", .{i});
+        if ((op_a.commit_id == null) != (op_b.commit_id == null)) fail("op {d}: only one run committed", .{i});
+        if (op_a.commit_id != null) commits += 1;
+    }
+
+    var total: u64 = 0;
+    var differing: u64 = 0;
+    var compared: u64 = 0;
+    for (side_a.databases, side_b.databases) |db_a, db_b| {
+        if (!std.mem.eql(u8, db_a.name, db_b.name)) fail("the databases are {s} and {s}", .{ db_a.name, db_b.name });
+        const name = db_a.name;
+        if (db_a.file_id != db_b.file_id) fail("{s}: file IDs differ", .{name});
+        if (db_a.file_size != db_b.file_size) fail("{s}: file sizes differ: {d} and {d}", .{ name, db_a.file_size, db_b.file_size });
+        if (db_a.trailers.len != db_b.trailers.len) fail("{s}: they have different numbers of trailers", .{name});
+
+        const file_a = try pathOf(arena, path_a, name);
+        const file_b = try pathOf(arena, path_b, name);
+        const a = try Io.Dir.cwd().readFileAlloc(io, file_a, arena, .unlimited);
+        const b = try Io.Dir.cwd().readFileAlloc(io, file_b, arena, .unlimited);
+        if (a.len != db_a.file_size) fail("{s} is {d} bytes, but its sidecar says {d}", .{ file_a, a.len, db_a.file_size });
+        if (b.len != db_b.file_size) fail("{s} is {d} bytes, but its sidecar says {d}", .{ file_b, b.len, db_b.file_size });
+        if (a.len >= FILE_ID_OFFSET + 8) {
+            if (readBe64(a, FILE_ID_OFFSET) != db_a.file_id) fail("{s}: the file ID is not the sidecar's", .{file_a});
+            if (readBe64(b, FILE_ID_OFFSET) != db_b.file_id) fail("{s}: the file ID is not the sidecar's", .{file_b});
+        }
+
+        const may_differ = try arena.alloc(bool, a.len);
+        @memset(may_differ, false);
+        const patched = try arena.dupe(u8, a);
+
+        for (db_a.trailers, db_b.trailers) |trailer_a, trailer_b| {
+            if (trailer_a.position != trailer_b.position) fail("{s}: trailers at {d} and {d}", .{ name, trailer_a.position, trailer_b.position });
+            if (trailer_a.file_id != trailer_b.file_id) fail("{s}: the trailer at {d} has two file IDs", .{ name, trailer_a.position });
+            const position = trailer_a.position;
+            const whole = position + TRAILER_SIZE <= a.len;
+            if (whole) {
+                if (readBe64(a, position + TRAILER_COMMIT_ID_OFFSET) != trailer_a.commit_id) fail("{s}: no commit ID {x:0>16} at {d}", .{ file_a, trailer_a.commit_id, position });
+                if (readBe64(b, position + TRAILER_COMMIT_ID_OFFSET) != trailer_b.commit_id) fail("{s}: no commit ID {x:0>16} at {d}", .{ file_b, trailer_b.commit_id, position });
+                checkTrailer(file_a, a, trailer_a.file_id, position + TRAILER_SIZE);
+                checkTrailer(file_b, b, trailer_b.file_id, position + TRAILER_SIZE);
+            }
+            compared += 1;
+
+            // a trailer can be cut short by a sync that stopped part way
+            const start: usize = @intCast(position + TRAILER_COMMIT_ID_OFFSET);
+            const stop: usize = @intCast(@min(position + TRAILER_SIZE, a.len));
+            if (start >= stop) continue;
+            @memset(may_differ[start..stop], true);
+
+            var tail: [16]u8 = undefined;
+            std.mem.writeInt(u64, tail[0..8], trailer_b.commit_id, .big);
+            const offset: usize = @intCast(position);
+            std.mem.writeInt(u64, tail[8..16], computeChecksum(trailer_a.file_id, position, patched[offset..][0..9], trailer_b.commit_id), .big);
+            @memcpy(patched[start..stop], tail[0 .. stop - start]);
+        }
+
+        for (a, b, may_differ, 0..) |byte_a, byte_b, allowed, offset| {
+            if (byte_a == byte_b) continue;
+            if (!allowed) fail("{s}: byte {d} differs ({x:0>2} and {x:0>2}), and it isn't part of a trailer's commit ID or checksum", .{ name, offset, byte_a, byte_b });
+            differing += 1;
+        }
+        if (!std.mem.eql(u8, patched, b)) {
+            const offset = std.mem.findDiff(u8, patched, b).?;
+            fail("{s}: a with b's commit IDs differs from b at byte {d}", .{ name, offset });
+        }
+        total += a.len;
+    }
+
+    var stdout_buffer: [256]u8 = undefined;
+    var stdout = Io.File.stdout().writerStreaming(io, &stdout_buffer);
+    try stdout.interface.print("ok: {d} databases, {d} bytes, {d} commits, {d} trailers, {d} of their bytes differ, 0 other bytes differ, a + b's commit IDs == b\n", .{
+        side_a.databases.len,
+        total,
+        commits,
+        compared,
+        differing,
+    });
+    try stdout.interface.flush();
 }
 
 /// the ops that did something to the file, for comparing scripts that only differ in reads
@@ -145,10 +285,12 @@ pub fn main(init: std.process.Init) !void {
     const path_a = args[args.len - 2];
     const path_b = args[args.len - 1];
 
-    const a = try Io.Dir.cwd().readFileAlloc(io, path_a, arena, .unlimited);
-    const b = try Io.Dir.cwd().readFileAlloc(io, path_b, arena, .unlimited);
     var side_a = try readSidecar(io, arena, path_a);
     var side_b = try readSidecar(io, arena, path_b);
+    if (side_a.databases.len > 0 or side_b.databases.len > 0) return checkSeveral(io, arena, path_a, path_b, side_a, side_b);
+
+    const a = try Io.Dir.cwd().readFileAlloc(io, path_a, arena, .unlimited);
+    const b = try Io.Dir.cwd().readFileAlloc(io, path_b, arena, .unlimited);
     if (ignore_reads) {
         side_a = try withoutReads(arena, side_a);
         side_b = try withoutReads(arena, side_b);

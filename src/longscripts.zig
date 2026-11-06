@@ -15,6 +15,9 @@
 //!
 //! The `iterator-tiers*` scripts walk collections that are several levels deep, from
 //! starting points on either side of where a block or a node ends.
+//!
+//! The others are the same sort of thing for compaction and replication, which need a
+//! lot of data, or a lot of ops per sync.
 
 const std = @import("std");
 
@@ -592,6 +595,295 @@ fn iteratorTiersSorted(w: *Io.Writer) !void {
     try end(w);
 }
 
+// compaction of array lists, whose partial blocks are copied in their own way
+
+const LIST_SIZES = [_]u64{ 0, 1, 15, 16, 17, 255, 256, 257, 300 };
+const SLICE_SIZES = [_]u64{ 0, 1, 5, 15, 16, 17, 100, 255, 256, 257, 299 };
+
+fn compactPartialBlocks(w: *Io.Writer) !void {
+    var s = try begin(w, "Compacting array lists of sizes either side of where a block fills up, and lists sliced from them, which share their blocks in the source and don't in the target, where what's past a list's end is gone. Then the target goes on being written to.");
+
+    try s.beginMoment();
+    for (LIST_SIZES) |size| {
+        if (size == 0) try s.write("{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"list-0\"}}}}}},\"array_list_init\"", .{});
+        for (0..size) |i| {
+            try s.write("{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"list-{d}\"}}}}}},\"array_list_init\",\"array_list_append\",{{\"write\":{{\"uint\":{d}}}}}", .{ size, i });
+        }
+    }
+    // never written, and running over the end of a block
+    for (0..40) |i| {
+        if (i % 3 == 0) {
+            try s.write("{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"holes\"}}}}}},\"array_list_init\",\"array_list_append\"", .{});
+        } else {
+            try s.write("{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"holes\"}}}}}},\"array_list_init\",\"array_list_append\",{{\"write\":{{\"uint\":{d}}}}}", .{i});
+        }
+    }
+    try s.endMoment();
+
+    // sliced in a later transaction, so that they share what's before it
+    try s.beginMoment();
+    for (SLICE_SIZES) |size| {
+        try s.op("{{\"op\":\"read_path_slot\",\"on\":\"m\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"list-300\"}}}}}}],\"as\":\"original\"}}", .{});
+        try s.write("{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"sliced-{d}\"}}}}}},{{\"write\":{{\"slot\":{{\"var\":\"original\"}}}}}}", .{size});
+        try s.write("{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"sliced-{d}\"}}}}}},\"array_list_init\",{{\"array_list_slice\":{{\"size\":{d}}}}}", .{ size, size });
+    }
+    try s.op("{{\"op\":\"read_path_slot\",\"on\":\"m\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"holes\"}}}}}}],\"as\":\"original\"}}", .{});
+    try s.write("{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"holes-sliced\"}}}}}},{{\"write\":{{\"slot\":{{\"var\":\"original\"}}}}}}", .{});
+    try s.write("{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"holes-sliced\"}}}}}},\"array_list_init\",{{\"array_list_slice\":{{\"size\":20}}}}", .{});
+    try s.endMoment();
+
+    try s.op("{{\"op\":\"compact\",\"into\":\"target\",\"file_id\":\"00000000000000bb\",\"offset_map\":\"memory\"}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"target\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"root\",\"expect\":1,\"note\":\"only the last moment\"}}", .{});
+    try s.readMoment(0);
+    for (LIST_SIZES) |size| {
+        try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"list-{d}\"}}}}}}],\"as\":\"list\"}}", .{size});
+        try s.op("{{\"op\":\"count\",\"on\":\"list\",\"expect\":{d}}}", .{size});
+        if (size > 0) {
+            try s.op("{{\"op\":\"read_path\",\"on\":\"list\",\"path\":[{{\"array_list_get\":-1}}],\"as\":\"v\"}}", .{});
+            try s.op("{{\"op\":\"read_uint\",\"on\":\"v\",\"expect\":{d}}}", .{size - 1});
+        }
+    }
+    for (SLICE_SIZES) |size| {
+        try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"sliced-{d}\"}}}}}}],\"as\":\"list\"}}", .{size});
+        try s.op("{{\"op\":\"count\",\"on\":\"list\",\"expect\":{d}}}", .{size});
+        try s.op("{{\"op\":\"read_path\",\"on\":\"list\",\"path\":[{{\"array_list_get\":{d}}}],\"expect_null\":true}}", .{size});
+        if (size > 0) {
+            try s.op("{{\"op\":\"iterator\",\"on\":\"list\",\"from_index\":-1,\"as\":\"it\"}}", .{});
+            try s.op("{{\"op\":\"next\",\"on\":\"it\",\"as\":\"e\",\"expect_null\":false}}", .{});
+            try s.op("{{\"op\":\"read_uint\",\"on\":\"e\",\"expect\":{d}}}", .{size - 1});
+            try s.op("{{\"op\":\"next\",\"on\":\"it\",\"expect_null\":true}}", .{});
+        }
+    }
+
+    // the slots past the end are gone, so an iterator stops at the end here, in Zig too
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"holes-sliced\"}}}}}}],\"as\":\"list\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"list\",\"expect\":20}}", .{});
+    try s.op("{{\"op\":\"iterator\",\"on\":\"list\",\"as\":\"it\"}}", .{});
+    for (0..20) |i| {
+        if (i % 3 == 0) continue;
+        try s.op("{{\"op\":\"next\",\"on\":\"it\",\"as\":\"e\",\"expect_null\":false}}", .{});
+        try s.op("{{\"op\":\"read_uint\",\"on\":\"e\",\"expect\":{d}}}", .{i});
+    }
+    try s.op("{{\"op\":\"next\",\"on\":\"it\",\"expect_null\":true}}", .{});
+
+    // and it can be written to, in a list that had its blocks to itself
+    try s.beginMoment();
+    for (SLICE_SIZES) |size| {
+        try s.write("{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"sliced-{d}\"}}}}}},\"array_list_init\",\"array_list_append\",{{\"write\":{{\"uint\":{d}}}}}", .{ size, 1000 + size });
+    }
+    try s.endMoment();
+    try s.readMoment(-1);
+    for (SLICE_SIZES) |size| {
+        try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"sliced-{d}\"}}}}}},{{\"array_list_get\":{d}}}],\"as\":\"v\"}}", .{ size, size });
+        try s.op("{{\"op\":\"read_uint\",\"on\":\"v\",\"expect\":{d}}}", .{1000 + size});
+    }
+    try end(w);
+}
+
+// replication
+
+/// a replica sends its state, and the source sends back what it doesn't have yet. `first`
+/// says it isn't a replica of this source yet, so it's replaced.
+fn sync(s: *S, comptime source: []const u8, comptime replica: []const u8, first: bool) !void {
+    try s.op("{{\"op\":\"use\",\"name\":\"" ++ replica ++ "\"}}", .{});
+    try s.op("{{\"op\":\"committed_size\",\"as\":\"have\"}}", .{});
+    try s.op("{{\"op\":\"replica_state\",\"as\":\"state\"}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"" ++ source ++ "\"}}", .{});
+    if (first) {
+        try s.op("{{\"op\":\"replication_start\",\"state\":\"state\",\"as\":\"start\",\"expect\":0}}", .{});
+    } else {
+        try s.op("{{\"op\":\"replication_start\",\"state\":\"state\",\"as\":\"start\",\"expect\":{{\"var\":\"have\"}}}}", .{});
+    }
+    try s.op("{{\"op\":\"committed_size\",\"as\":\"end\"}}", .{});
+    try s.op("{{\"op\":\"read_committed\",\"start\":{{\"var\":\"start\"}},\"end\":{{\"var\":\"end\"}},\"as\":\"sent\"}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"" ++ replica ++ "\"}}", .{});
+    try s.op("{{\"op\":\"apply_replicated\",\"start\":{{\"var\":\"start\"}},\"bytes\":\"sent\"}}", .{});
+    try s.op("{{\"op\":\"committed_size\",\"expect\":{{\"var\":\"end\"}}}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"" ++ source ++ "\"}}", .{});
+}
+
+/// all of what the two have committed is the same, whatever's in their root headers now
+fn expectSameBytes(s: *S, comptime source: []const u8, comptime replica: []const u8) !void {
+    try s.op("{{\"op\":\"use\",\"name\":\"" ++ source ++ "\"}}", .{});
+    try s.op("{{\"op\":\"committed_size\",\"as\":\"end\"}}", .{});
+    try s.op("{{\"op\":\"read_committed\",\"start\":0,\"end\":{{\"var\":\"end\"}},\"as\":\"from_source\"}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"" ++ replica ++ "\"}}", .{});
+    try s.op("{{\"op\":\"read_committed\",\"start\":0,\"end\":{{\"var\":\"end\"}},\"as\":\"from_replica\",\"expect_same\":\"from_source\"}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"" ++ source ++ "\"}}", .{});
+}
+
+fn replicateHistory(w: *Io.Writer) !void {
+    var s = try begin(w, "Replicating a history long enough for its array list to grow to three levels, with a failed transaction every so often and a slice that rolls the history back. The first sync replaces the replica, and the others only send what's new. Then a compacted copy of the source, which is a new file, gets a replica of its own.");
+    try s.op("{{\"op\":\"create_database\",\"name\":\"replica\",\"file_id\":\"00000000000000cc\"}}", .{});
+    try s.op("{{\"op\":\"read_committed\",\"start\":0,\"end\":62,\"as\":\"new_database\",\"note\":\"even a new database can be sent\"}}", .{});
+    try sync(&s, "main", "replica", true);
+
+    for (0..300) |i| {
+        if (i == 200) {
+            try s.op("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[\"array_list_init\",{{\"array_list_slice\":{{\"size\":150}}}}],\"note\":\"rolling the history back\"}}", .{});
+        } else {
+            try s.beginMoment();
+            try s.write("{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"key-{d}\"}}}}}},{{\"write\":{{\"uint\":{d}}}}}", .{ i, i });
+            try s.write("{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"list\"}}}}}},\"array_list_init\",\"array_list_append\",{{\"write\":{{\"uint\":{d}}}}}", .{i});
+            if (i % 50 == 25) {
+                try s.op("{{\"op\":\"fail\"}}", .{});
+                try s.close("]}}],\"expect_error\":\"ScriptAbort\"}");
+            } else {
+                try s.endMoment();
+            }
+        }
+        // each one for a while, and then several at a time
+        if (i < 40 or i % 7 == 0 or i == 200 or i == 299) try sync(&s, "main", "replica", false);
+    }
+    try expectSameBytes(&s, "main", "replica");
+
+    // 196 moments before the slice, cut to 150, and 97 after it
+    try s.op("{{\"op\":\"use\",\"name\":\"replica\"}}", .{});
+    try s.op("{{\"op\":\"close\"}}", .{});
+    try s.op("{{\"op\":\"reopen\",\"note\":\"it can be opened as a database of its own\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"root\",\"expect\":247}}", .{});
+    try s.readMoment(-1);
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"key-299\"}}}}}}],\"as\":\"v\"}}", .{});
+    try s.op("{{\"op\":\"read_uint\",\"on\":\"v\",\"expect\":299}}", .{});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"key-180\"}}}}}}],\"expect_null\":true,\"note\":\"from what the slice took back\"}}", .{});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"key-149\"}}}}}}],\"as\":\"v\"}}", .{});
+    try s.op("{{\"op\":\"read_uint\",\"on\":\"v\",\"expect\":149}}", .{});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"key-25\"}}}}}}],\"expect_null\":true,\"note\":\"from a transaction that failed\"}}", .{});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"list\"}}}}}}],\"as\":\"list\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"list\",\"expect\":247}}", .{});
+
+    // a compacted database is a new file, so a replica of it starts from the beginning
+    try s.op("{{\"op\":\"use\",\"name\":\"main\"}}", .{});
+    try s.op("{{\"op\":\"compact\",\"into\":\"compacted\",\"file_id\":\"00000000000000dd\",\"offset_map\":\"memory\"}}", .{});
+    try s.op("{{\"op\":\"create_database\",\"name\":\"compacted_replica\",\"file_id\":\"00000000000000ee\"}}", .{});
+    try sync(&s, "compacted", "compacted_replica", true);
+    try expectSameBytes(&s, "compacted", "compacted_replica");
+    try s.op("{{\"op\":\"read_path_slot\",\"on\":\"root\",\"path\":[{{\"array_list_get\":-1}}],\"as\":\"last\"}}", .{});
+    try s.op("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[\"array_list_init\",\"array_list_append\",{{\"write\":{{\"slot\":{{\"var\":\"last\"}}}}}}],\"note\":\"and it can keep receiving transactions\"}}", .{});
+    try sync(&s, "compacted", "compacted_replica", false);
+    try expectSameBytes(&s, "compacted", "compacted_replica");
+    try s.op("{{\"op\":\"use\",\"name\":\"compacted_replica\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"root\",\"expect\":2}}", .{});
+    try s.readMoment(-1);
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"key-299\"}}}}}}],\"as\":\"v\"}}", .{});
+    try s.op("{{\"op\":\"read_uint\",\"on\":\"v\",\"expect\":299}}", .{});
+    try end(w);
+}
+
+fn replicateRoots(w: *Io.Writer) !void {
+    var s = try begin(w, "Replicating roots that aren't lists: a map with a hundred keys, grouped writes, a failed transaction, a nested write cursor kept past its transaction, and the other kinds of root. The replica is reopened and read, and compacted, and that gets a replica of its own.");
+    try s.op("{{\"op\":\"create_database\",\"name\":\"replica\",\"file_id\":\"00000000000000cc\"}}", .{});
+    try s.op("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[{{\"hash_map_init\":{{}}}}]}}", .{});
+    try s.op("{{\"op\":\"committed_size\",\"as\":\"before\"}}", .{});
+    try s.op("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[{{\"hash_map_init\":{{}}}}],\"note\":\"initializing an initialized root doesn't start a transaction\"}}", .{});
+    try s.op("{{\"op\":\"committed_size\",\"expect\":{{\"var\":\"before\"}}}}", .{});
+    try s.op("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[\"array_list_init\"],\"expect_error\":\"UnexpectedTag\",\"note\":\"nor can it become another type\"}}", .{});
+    try s.op("{{\"op\":\"committed_size\",\"expect\":{{\"var\":\"before\"}}}}", .{});
+    try sync(&s, "main", "replica", true);
+
+    for (0..100) |i| {
+        try s.op("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[{{\"hash_map_init\":{{}}}},{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"key-{d}\"}}}}}},{{\"write\":{{\"uint\":{d}}}}}]}}", .{ i, i });
+        if (i == 50) try s.op("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[{{\"hash_map_init\":{{}}}},{{\"hash_map_remove\":{{\"sha1\":\"key-25\"}}}}]}}", .{});
+        if (i % 10 == 9) try sync(&s, "main", "replica", false);
+    }
+    try expectSameBytes(&s, "main", "replica");
+
+    try s.op("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[{{\"hash_map_init\":{{}}}},{{\"hash_map_get\":{{\"key\":{{\"sha1\":\"key-1\"}}}}}},{{\"write\":{{\"bytes\":\"key-1\"}}}}]}}", .{});
+    try s.open("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[{{\"hash_map_init\":{{}}}},{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"inner\"}}}}}},{{\"ctx\":{{\"as\":\"c\",\"ops\":[", .{});
+    try s.op("{{\"op\":\"write_path\",\"on\":\"c\",\"path\":[{{\"hash_map_init\":{{}}}}],\"as\":\"c\"}}", .{});
+    try s.op("{{\"op\":\"write_path\",\"on\":\"c\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"foo\"}}}}}},{{\"write\":{{\"bytes\":\"foo\"}}}}]}}", .{});
+    try s.op("{{\"op\":\"write_path\",\"on\":\"c\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"list\"}}}}}},\"array_list_init\",\"array_list_append\",{{\"write\":{{\"uint\":1}}}}]}}", .{});
+    try s.op("{{\"op\":\"write_path\",\"on\":\"c\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"list\"}}}}}},\"array_list_init\",\"array_list_append\",{{\"write\":{{\"uint\":2}}}}]}}", .{});
+    try s.close("]}}]}");
+    try sync(&s, "main", "replica", false);
+
+    // a failed batch leaves nothing behind, and a good one is one commit
+    try s.op("{{\"op\":\"committed_size\",\"as\":\"before\"}}", .{});
+    for ([_]bool{ true, false }) |fails| {
+        try s.open("{{\"op\":\"run_context\",\"ctx\":{{\"as\":\"c\",\"ops\":[", .{});
+        try s.op("{{\"op\":\"write_path\",\"on\":\"c\",\"path\":[{{\"hash_map_init\":{{}}}}],\"as\":\"c\"}}", .{});
+        for (0..100) |i| try s.op("{{\"op\":\"write_path\",\"on\":\"c\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"batch-{d}\"}}}}}},{{\"write\":{{\"uint\":{d}}}}}]}}", .{ i, i });
+        if (fails) {
+            try s.op("{{\"op\":\"fail\"}}", .{});
+            try s.close("]},\"expect_error\":\"ScriptAbort\"}");
+            try s.op("{{\"op\":\"committed_size\",\"expect\":{{\"var\":\"before\"}}}}", .{});
+            try s.op("{{\"op\":\"read_path\",\"on\":\"root\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"batch-0\"}}}}}}],\"expect_null\":true}}", .{});
+        } else {
+            try s.close("]}}");
+        }
+    }
+    try sync(&s, "main", "replica", false);
+    try expectSameBytes(&s, "main", "replica");
+
+    try s.op("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[{{\"hash_map_init\":{{}}}},{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"late\"}}}}}}],\"as\":\"late\",\"note\":\"a nested write cursor can't be written to after its transaction\"}}", .{});
+    try s.op("{{\"op\":\"write\",\"on\":\"late\",\"data\":{{\"uint\":1}},\"expect_error\":\"ExpectedTxStart\"}}", .{});
+    try sync(&s, "main", "replica", false);
+
+    try s.op("{{\"op\":\"use\",\"name\":\"replica\"}}", .{});
+    try s.op("{{\"op\":\"close\"}}", .{});
+    try s.op("{{\"op\":\"reopen\"}}", .{});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"root\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"key-99\"}}}}}}],\"as\":\"v\"}}", .{});
+    try s.op("{{\"op\":\"read_uint\",\"on\":\"v\",\"expect\":99}}", .{});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"root\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"key-25\"}}}}}}],\"expect_null\":true}}", .{});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"root\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"inner\"}}}}}},{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"list\"}}}}}},{{\"array_list_get\":-1}}],\"as\":\"v\"}}", .{});
+    try s.op("{{\"op\":\"read_uint\",\"on\":\"v\",\"expect\":2}}", .{});
+
+    // a replica can be compacted like anything else, and what that makes can be replicated
+    try s.op("{{\"op\":\"compact\",\"into\":\"compacted\",\"file_id\":\"00000000000000dd\",\"offset_map\":\"memory\"}}", .{});
+    try s.op("{{\"op\":\"create_database\",\"name\":\"compacted_replica\",\"file_id\":\"00000000000000ee\"}}", .{});
+    try sync(&s, "compacted", "compacted_replica", true);
+    try expectSameBytes(&s, "compacted", "compacted_replica");
+
+    // the other kinds of root, for which a replica is no different
+    try s.op("{{\"op\":\"create_database\",\"name\":\"s_list\",\"file_id\":\"0000000000000011\"}}", .{});
+    try s.op("{{\"op\":\"create_database\",\"name\":\"r_list\",\"file_id\":\"0000000000000012\"}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"s_list\"}}", .{});
+    try s.op("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[\"array_list_init\",\"array_list_append\",{{\"write\":{{\"uint\":1}}}}]}}", .{});
+    try sync(&s, "s_list", "r_list", true);
+    try s.op("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[\"array_list_init\",\"array_list_append\",{{\"write\":{{\"uint\":2}}}}]}}", .{});
+    try sync(&s, "s_list", "r_list", false);
+
+    try s.op("{{\"op\":\"create_database\",\"name\":\"s_scalar\",\"file_id\":\"0000000000000021\"}}", .{});
+    try s.op("{{\"op\":\"create_database\",\"name\":\"r_scalar\",\"file_id\":\"0000000000000022\"}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"s_scalar\"}}", .{});
+    try s.op("{{\"op\":\"write\",\"on\":\"root\",\"data\":{{\"uint\":42}}}}", .{});
+    try sync(&s, "s_scalar", "r_scalar", true);
+    try s.op("{{\"op\":\"write\",\"on\":\"root\",\"data\":{{\"bytes\":\"this is too long to fit in a slot\"}}}}", .{});
+    try sync(&s, "s_scalar", "r_scalar", false);
+    try s.op("{{\"op\":\"write\",\"on\":\"root\",\"data\":{{\"slot\":null}}}}", .{});
+    try sync(&s, "s_scalar", "r_scalar", false);
+    try s.op("{{\"op\":\"use\",\"name\":\"r_scalar\"}}", .{});
+    try s.op("{{\"op\":\"slot\",\"on\":\"root\",\"expect\":{{\"tag\":\"none\",\"full\":true}}}}", .{});
+
+    try s.op("{{\"op\":\"create_database\",\"name\":\"s_set\",\"file_id\":\"0000000000000031\"}}", .{});
+    try s.op("{{\"op\":\"create_database\",\"name\":\"r_set\",\"file_id\":\"0000000000000032\"}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"s_set\"}}", .{});
+    try s.op("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[{{\"hash_map_init\":{{\"set\":true}}}},{{\"hash_map_get\":{{\"key\":{{\"sha1\":\"a\"}}}}}},{{\"write\":{{\"bytes\":\"a\"}}}}]}}", .{});
+    try sync(&s, "s_set", "r_set", true);
+
+    try s.op("{{\"op\":\"create_database\",\"name\":\"s_sorted\",\"file_id\":\"0000000000000041\"}}", .{});
+    try s.op("{{\"op\":\"create_database\",\"name\":\"r_sorted\",\"file_id\":\"0000000000000042\"}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"s_sorted\"}}", .{});
+    try s.op("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[{{\"sorted_map_init\":{{}}}},{{\"sorted_map_get\":{{\"value\":\"b\"}}}},{{\"write\":{{\"uint\":2}}}}]}}", .{});
+    try sync(&s, "s_sorted", "r_sorted", true);
+    try s.op("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[{{\"sorted_map_init\":{{}}}},{{\"sorted_map_get\":{{\"value\":\"a\"}}}},{{\"write\":{{\"uint\":1}}}}]}}", .{});
+    try sync(&s, "s_sorted", "r_sorted", false);
+    try s.op("{{\"op\":\"use\",\"name\":\"r_sorted\"}}", .{});
+    try s.op("{{\"op\":\"rank\",\"on\":\"root\",\"key\":\"b\",\"expect\":1}}", .{});
+
+    try s.op("{{\"op\":\"create_database\",\"name\":\"s_linked\",\"file_id\":\"0000000000000051\"}}", .{});
+    try s.op("{{\"op\":\"create_database\",\"name\":\"r_linked\",\"file_id\":\"0000000000000052\"}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"s_linked\"}}", .{});
+    try s.op("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[\"linked_array_list_init\",\"linked_array_list_append\",{{\"write\":{{\"uint\":1}}}}]}}", .{});
+    try sync(&s, "s_linked", "r_linked", true);
+    try s.op("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[\"linked_array_list_init\",{{\"linked_array_list_insert\":0}},{{\"write\":{{\"uint\":0}}}}]}}", .{});
+    try sync(&s, "s_linked", "r_linked", false);
+    try s.op("{{\"op\":\"use\",\"name\":\"r_linked\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"root\",\"expect\":2}}", .{});
+    try end(w);
+}
+
 const Script = struct { name: []const u8, write: *const fn (*Io.Writer) anyerror!void };
 
 const SCRIPTS = [_]Script{
@@ -601,6 +893,9 @@ const SCRIPTS = [_]Script{
     .{ .name = "iterator-tiers", .write = iteratorTiers },
     .{ .name = "iterator-tiers-linked", .write = iteratorTiersLinked },
     .{ .name = "iterator-tiers-sorted", .write = iteratorTiersSorted },
+    .{ .name = "compact-partial-blocks", .write = compactPartialBlocks },
+    .{ .name = "replicate-history", .write = replicateHistory },
+    .{ .name = "replicate-roots", .write = replicateRoots },
 };
 
 pub fn main(init: std.process.Init) !void {

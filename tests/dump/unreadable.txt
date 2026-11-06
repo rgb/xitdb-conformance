@@ -1,0 +1,2 @@
+replicate-bad-trailer replica
+replicate-failed-first-sync left_broken

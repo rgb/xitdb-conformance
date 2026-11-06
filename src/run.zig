@@ -233,9 +233,11 @@ fn checkErrorName(name: []const u8, op_name: []const u8, allow_port_differences:
     // reading a gap before the commit raises it on one storage kind and not on the others,
     // and reading a slot set to nothing into a buffer raises it where the port doesn't.
     // only a stream can reach it in a way that means the same everywhere.
-    // and applying bytes at 0 that are too short to be a database raises it everywhere
-    if (isKey(name, "EndOfStream") and !isKey(op_name, "read_stream") and !isKey(op_name, "apply_replicated") and !allow_port_differences) {
-        die("expect_error can only name EndOfStream on read_stream and apply_replicated", .{});
+    // and applying bytes at 0 that are too short to be a database raises it everywhere,
+    // there and from then on when asking that database where its committed bytes end
+    const end_of_stream_means_the_same = isKey(op_name, "read_stream") or isKey(op_name, "apply_replicated") or isKey(op_name, "committed_size") or isKey(op_name, "replica_state");
+    if (isKey(name, "EndOfStream") and !end_of_stream_means_the_same and !allow_port_differences) {
+        die("expect_error can't name EndOfStream on {s}", .{op_name});
     }
     for (ERROR_NAMES) |known| {
         if (isKey(name, known)) return;
@@ -1125,7 +1127,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 target.out.close(self.io);
                 Io.Dir.cwd().deleteFile(self.io, target.out_path) catch {};
             };
-            try target.db.core.flush();
+            if (existing) |store| try store.db.core.flush();
 
             const file_id: ?u64 = if (op.get("file_id")) |v| parseHex64(self.arena, v, "file_id") else null;
             const hash_id: ?xitdb.HashId = if (op.get("hash_id")) |v| parseHashId(self.arena, v) else null;

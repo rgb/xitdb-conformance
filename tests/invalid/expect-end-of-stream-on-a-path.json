@@ -1,4 +1,4 @@
-{ "format": "xitdb-script/1", "description": "expected failure: expect_error can only name EndOfStream on read_stream", "hash_size": 20, "hash_id": null, "file_id": "0000000000000001",
+{ "format": "xitdb-script/1", "description": "expected failure: expect_error can't name EndOfStream on", "hash_size": 20, "hash_id": null, "file_id": "0000000000000001",
   "ops": [
     { "op": "write_path", "on": "root", "path": [], "expect_error": "EndOfStream" }
   ] }

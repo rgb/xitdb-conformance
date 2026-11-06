@@ -43,6 +43,14 @@ const WANT = [_][]const u8{
     "op:reopen",
     "op:raw_append",
     "op:raw_write",
+    "op:create_database",
+    "op:use",
+    "op:compact",
+    "op:replica_state",
+    "op:replication_start",
+    "op:committed_size",
+    "op:read_committed",
+    "op:apply_replicated",
     // path parts
     "part:array_list_init",
     "part:array_list_get",
@@ -145,6 +153,18 @@ const WANT = [_][]const u8{
     "stream_step:position",
     "stream_expect:text",
     "stream_expect:hex",
+    // several databases
+    "create_database:hash_id",
+    "compact:new",
+    "compact:file_id",
+    "compact:hash_id",
+    "compact:memory",
+    "compact:disk",
+    // replication
+    "number:integer",
+    "number:var",
+    "read_committed:expect_same",
+    "apply_replicated:short_by",
     // the top of a script
     "hash_id:text",
     "hash_id:hex",
@@ -200,6 +220,8 @@ const WANT = [_][]const u8{
     "error:TruncatedDatabase",
     "error:EndOfStream",
     "error:StreamTooLong",
+    "error:TargetNotEmpty",
+    "error:InvalidRange",
 };
 
 fn fail(comptime fmt: []const u8, args: anytype) noreturn {
@@ -366,6 +388,24 @@ const Walker = struct {
                 self.bytes("raw", op.get("bytes").?);
             }
             if (op.get("max_size") != null) self.note("read_bytes:", "max_size");
+            if (std.mem.eql(u8, name, "create_database") and op.get("hash_id") != null) self.note("create_database:", "hash_id");
+            if (std.mem.eql(u8, name, "compact")) {
+                self.note("compact:", op.get("offset_map").?.string);
+                if (op.get("file_id") != null) {
+                    self.note("compact:", "new");
+                    self.note("compact:", "file_id");
+                }
+                if (op.get("hash_id") != null) self.note("compact:", "hash_id");
+            }
+            if (std.mem.eql(u8, name, "read_committed")) {
+                self.number(op.get("start").?);
+                self.number(op.get("end").?);
+                if (op.get("expect_same") != null) self.note("read_committed:", "expect_same");
+            }
+            if (std.mem.eql(u8, name, "apply_replicated")) {
+                self.number(op.get("start").?);
+                if (op.get("short_by") != null) self.note("apply_replicated:", "short_by");
+            }
             if (std.mem.eql(u8, name, "iterator")) {
                 if (op.get("from_index")) |v| {
                     self.note("iterator:", if (v.number_string[0] == '-') "from_index_negative" else "from_index");
@@ -387,6 +427,10 @@ const Walker = struct {
                 }
             }
         }
+    }
+
+    fn number(self: *Walker, v: Json) void {
+        self.note("number:", if (v == .number_string) "integer" else "var");
     }
 
     fn script(self: *Walker, doc: ObjectMap) void {

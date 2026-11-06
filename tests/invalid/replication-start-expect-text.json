@@ -1,0 +1,5 @@
+{ "format": "xitdb-script/1", "description": "expected failure: expect must be an integer or", "hash_size": 20, "hash_id": null, "file_id": "0000000000000001",
+  "ops": [
+    { "op": "replica_state", "as": "s" },
+    { "op": "replication_start", "state": "s", "expect": "0" }
+  ] }

@@ -1,0 +1,4 @@
+{ "format": "xitdb-script/1", "description": "expected failure: can only be used at the top level", "hash_size": 20, "hash_id": null, "file_id": "0000000000000001",
+  "ops": [
+    { "op": "run_context", "ctx": { "as": "c", "ops": [{ "op": "committed_size" }] } }
+  ] }
