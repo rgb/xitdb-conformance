@@ -1,0 +1,4 @@
+{ "format": "xitdb-script/1", "description": "expected failure: steps must be an array", "hash_size": 20, "hash_id": null, "file_id": "0000000000000001",
+  "ops": [
+    { "op": "read_stream", "on": "root", "steps": {} }
+  ] }

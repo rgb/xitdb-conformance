@@ -1,7 +1,9 @@
-//! detcheck <a.db> <b.db>
+//! detcheck [--ignore-reads] <a.db> <b.db>
 //!
 //! Checks that two runs of one script produced the same file apart from the
-//! random commit IDs. Each file is read together with its sidecar. It fails unless:
+//! random commit IDs. Each file is read together with its sidecar. With
+//! --ignore-reads the two scripts can differ in ops that neither commit nor change
+//! the committed size, so it's a check that those changed nothing. It fails unless:
 //!
 //! 1. the sidecars agree on the file ID, the sizes, and which ops committed;
 //! 2. each sidecar's commit IDs are the ones in its file's trailers;
@@ -93,6 +95,20 @@ fn readSidecar(io: Io, arena: Allocator, db_path: []const u8) !Sidecar {
     };
 }
 
+/// the ops that did something to the file, for comparing scripts that only differ in reads
+fn withoutReads(arena: Allocator, sidecar: Sidecar) !Sidecar {
+    var kept: std.ArrayList(Sidecar.Op) = .empty;
+    var previous: ?u64 = sidecar.initial_size;
+    for (sidecar.ops) |op| {
+        if (op.commit_id == null and std.meta.eql(op.committed_size, previous)) continue;
+        try kept.append(arena, op);
+        previous = op.committed_size;
+    }
+    var result = sidecar;
+    result.ops = kept.items;
+    return result;
+}
+
 fn readBe64(bytes: []const u8, offset: u64) u64 {
     return std.mem.readInt(u64, bytes[@intCast(offset)..][0..8], .big);
 }
@@ -121,17 +137,22 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
 
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len != 3) {
-        std.debug.print("usage: detcheck <a.db> <b.db>\n", .{});
+    const ignore_reads = args.len == 4 and std.mem.eql(u8, args[1], "--ignore-reads");
+    if (args.len != 3 and !ignore_reads) {
+        std.debug.print("usage: detcheck [--ignore-reads] <a.db> <b.db>\n", .{});
         std.process.exit(2);
     }
-    const path_a = args[1];
-    const path_b = args[2];
+    const path_a = args[args.len - 2];
+    const path_b = args[args.len - 1];
 
     const a = try Io.Dir.cwd().readFileAlloc(io, path_a, arena, .unlimited);
     const b = try Io.Dir.cwd().readFileAlloc(io, path_b, arena, .unlimited);
-    const side_a = try readSidecar(io, arena, path_a);
-    const side_b = try readSidecar(io, arena, path_b);
+    var side_a = try readSidecar(io, arena, path_a);
+    var side_b = try readSidecar(io, arena, path_b);
+    if (ignore_reads) {
+        side_a = try withoutReads(arena, side_a);
+        side_b = try withoutReads(arena, side_b);
+    }
 
     // 1. the sidecars agree, and describe these files
     if (side_a.file_id != side_b.file_id) fail("file IDs differ", .{});

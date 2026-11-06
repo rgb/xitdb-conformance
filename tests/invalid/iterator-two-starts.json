@@ -1,0 +1,4 @@
+{ "format": "xitdb-script/1", "description": "expected failure: an iterator starts from an index or from a key", "hash_size": 20, "hash_id": null, "file_id": "0000000000000001",
+  "ops": [
+    { "op": "iterator", "on": "root", "from_index": 0, "from_key": "a", "as": "it" }
+  ] }

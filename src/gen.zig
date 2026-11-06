@@ -1,6 +1,12 @@
-//! gen <seed> <out.script> [--ops <top-level ops>]
+//! gen <seed> <out.script> [--ops <top-level ops>] [--reads]
 //!
 //! Writes a valid random script. The same seed always gives the same script.
+//!
+//! With --reads the script also has iterators, streams and reads into buffers along
+//! the way. They have a random source of their own, so that they change nothing else
+//! that's written, and the same seed gives the same writes with or without them. Reads
+//! don't change bytes, so the two scripts should give the same file, and the gate
+//! checks that they do.
 //!
 //! The model of the database that a generator needs is the database: this drives
 //! the real engine as it writes, in memory. It looks at what's there to choose
@@ -143,6 +149,10 @@ fn Gen(comptime HashInt: type) type {
         tx_concat: bool = false,
         // cursors before this one in `kept` are not used any more in this transaction
         first_safe_kept: usize = 0,
+        // whether to add the reads that --reads adds, what they choose with, and what they call things
+        reads: bool,
+        read_rng: Rng,
+        read_names: usize = 1_000_000_000,
 
         // names
 
@@ -1006,9 +1016,7 @@ fn Gen(comptime HashInt: type) type {
             try self.writeSomething(target);
         }
 
-        /// reads something and says what it should find
-        fn readSomething(self: *Self, on_name: []const u8, cursor: anytype) anyerror!void {
-            var p: PathB = .{};
+        fn randomReadPath(self: *Self, cursor: anytype, p: *PathB) void {
             var levels: usize = 0;
             while (levels < 5 and (levels == 0 or self.rng.chance(70))) : (levels += 1) {
                 const tag = peekTag(cursor, p.parts.items);
@@ -1028,8 +1036,233 @@ fn Gen(comptime HashInt: type) type {
                     },
                     else => break,
                 }
-                self.add(&p, step.parts.items[0], step.text.items);
+                self.add(p, step.parts.items[0], step.text.items);
             }
+        }
+
+        // what --reads adds. these use their own random source and names, and nothing
+        // else that's written depends on them.
+
+        fn extraRead(self: *Self, on_name: []const u8, cursor: anytype) anyerror!void {
+            const saved_rng = self.rng;
+            const saved_names = self.names;
+            self.rng = self.read_rng;
+            self.names = self.read_names;
+            defer {
+                self.read_rng = self.rng;
+                self.read_names = self.names;
+                self.rng = saved_rng;
+                self.names = saved_names;
+            }
+
+            var p: PathB = .{};
+            if (self.rng.chance(70)) self.randomReadPath(cursor, &p);
+            try self.beginOp();
+            try self.w.print("{{\"op\":\"read_path\",\"on\":\"{s}\",\"path\":[{s}]", .{ on_name, p.text.items });
+            const result = cursor.readPath(Ctx, p.parts.items) catch |err| {
+                if (!expectable(err)) fail("the engine raised {s}, which a script can't expect", .{@errorName(err)});
+                try self.w.print(",\"expect_error\":\"{s}\"}}", .{@errorName(err)});
+                return;
+            };
+            const found = result orelse {
+                try self.w.writeAll(",\"expect_null\":true}");
+                return;
+            };
+            const name = self.fresh("r");
+            try self.w.print(",\"as\":\"{s}\",\"expect_null\":false}}", .{name});
+            try self.readThoroughly(name, found, 0);
+        }
+
+        fn readThoroughly(self: *Self, name: []const u8, cursor: RO, level: usize) anyerror!void {
+            const slot = try cursor.slot();
+            switch (slot.tag) {
+                .bytes, .short_bytes => {
+                    try self.readIntoBuffer(name, cursor, slot);
+                    try self.readWithLimit(name, cursor);
+                    try self.stream(name, cursor);
+                },
+                .none => {
+                    try self.beginOp();
+                    try self.w.print("{{\"op\":\"read_bytes_into\",\"on\":\"{s}\",\"size\":0,\"expect\":\"\"}}", .{name});
+                    try self.iterate(name, cursor, slot.tag, level);
+                },
+                .array_list, .linked_array_list, .hash_map, .hash_set, .counted_hash_map, .counted_hash_set, .sorted_map, .sorted_set => {
+                    try self.iterate(name, cursor, slot.tag, level);
+                    if (slot.tag == .sorted_map or slot.tag == .sorted_set) try self.rank(name, cursor);
+                },
+                .kv_pair, .sorted_kv_pair => if (level < 3) {
+                    const pair = try cursor.readKeyValuePair();
+                    const key_name = self.fresh("r");
+                    const value_name = self.fresh("r");
+                    try self.beginOp();
+                    try self.w.print("{{\"op\":\"read_key_value_pair\",\"on\":\"{s}\",\"key_as\":\"{s}\",\"value_as\":\"{s}\"}}", .{ name, key_name, value_name });
+                    try self.readThoroughly(key_name, pair.key_cursor, level + 1);
+                    try self.readThoroughly(value_name, pair.value_cursor, level + 1);
+                },
+                .uint, .int, .float => {
+                    try self.beginOp();
+                    try self.w.print("{{\"op\":\"iterator\",\"on\":\"{s}\",\"as\":\"{s}\",\"expect_error\":\"UnexpectedTag\"}}", .{ name, self.fresh("i") });
+                },
+                else => {},
+            }
+        }
+
+        fn writeFormatTag(self: *Self, format_tag: ?[2]u8) anyerror!void {
+            if (format_tag) |tag| {
+                try self.w.print(",\"expect_format_tag\":{{\"hex\":\"{s}\"}}", .{self.hex(&tag)});
+            } else {
+                try self.w.writeAll(",\"expect_format_tag\":null");
+            }
+        }
+
+        fn readIntoBuffer(self: *Self, name: []const u8, cursor: RO, slot: Slot) anyerror!void {
+            _ = slot;
+            const len = (try cursor.readBytesObjectAlloc(self.arena, null)).value.len;
+            const size: usize = switch (self.rng.below(3)) {
+                0 => len,
+                1 => len + @as(usize, @intCast(self.rng.below(9))),
+                else => @as(usize, @intCast(self.rng.below(len + 1))),
+            };
+            const buffer = self.arena.alloc(u8, size) catch oom();
+            try self.beginOp();
+            try self.w.print("{{\"op\":\"read_bytes_into\",\"on\":\"{s}\",\"size\":{d}", .{ name, size });
+            if (cursor.readBytesObject(buffer)) |got| {
+                try self.w.print(",\"expect\":{s}", .{self.bytesJson(got.value)});
+                try self.writeFormatTag(got.format_tag);
+            } else |err| {
+                if (err != error.StreamTooLong) fail("the engine raised {s} for a buffer", .{@errorName(err)});
+                try self.w.writeAll(",\"expect_error\":\"StreamTooLong\"");
+            }
+            try self.endOp();
+        }
+
+        fn readWithLimit(self: *Self, name: []const u8, cursor: RO) anyerror!void {
+            const len = (try cursor.readBytesObjectAlloc(self.arena, null)).value.len;
+            const max_size: usize = if (self.rng.chance(50)) len else @as(usize, @intCast(self.rng.below(len + 2)));
+            try self.beginOp();
+            try self.w.print("{{\"op\":\"read_bytes\",\"on\":\"{s}\",\"max_size\":{d}", .{ name, max_size });
+            if (cursor.readBytesObjectAlloc(self.arena, max_size)) |got| {
+                try self.w.print(",\"expect\":{s}", .{self.bytesJson(got.value)});
+            } else |err| {
+                if (err != error.StreamTooLong) fail("the engine raised {s} with a limit", .{@errorName(err)});
+                try self.w.writeAll(",\"expect_error\":\"StreamTooLong\"");
+            }
+            try self.endOp();
+        }
+
+        /// whether this is a stream the port gives the same as Zig (SCRIPT-FORMAT.md, section 10)
+        fn streamable(self: *Self, cursor: RO) anyerror!bool {
+            const slot = try cursor.slot();
+            if (slot.tag != .short_bytes) return slot.tag != .none;
+            const position = cursor.slot_ptr.position orelse return false;
+            if (position == 20) return true;
+            var reader = self.db.core.reader();
+            try reader.seekTo(position);
+            var bytes: [9]u8 = undefined;
+            try reader.interface.readSliceAll(&bytes);
+            const current: Slot = @bitCast(std.mem.readInt(u72, &bytes, .big));
+            return current.eql(slot);
+        }
+
+        fn stream(self: *Self, name: []const u8, cursor_value: RO) anyerror!void {
+            if (!try self.streamable(cursor_value)) return;
+            var cursor = cursor_value;
+            const len = (try cursor.readBytesObjectAlloc(self.arena, null)).value.len;
+            const buffer_sizes = [_]usize{ 0, 1, 7, 64 };
+            const buffer_size = buffer_sizes[@intCast(self.rng.below(buffer_sizes.len))];
+            const buffer = self.arena.alloc(u8, buffer_size) catch oom();
+
+            try self.beginOp();
+            try self.w.print("{{\"op\":\"read_stream\",\"on\":\"{s}\"", .{name});
+            if (buffer_size > 0) try self.w.print(",\"buffer_size\":{d}", .{buffer_size});
+            try self.w.writeAll(",\"steps\":[");
+            var reader = try cursor.reader(buffer);
+            var ended = false;
+            const steps = 1 + self.rng.below(6);
+            for (0..steps) |i| {
+                if (i > 0) try self.w.writeAll(",");
+                const size: usize = @intCast(self.rng.below(len + 3));
+                const dest = self.arena.alloc(u8, size) catch oom();
+                switch (self.rng.below(4)) {
+                    0 => {
+                        const offset = self.rng.below(len + 3);
+                        try reader.seekTo(offset);
+                        try self.w.print("{{\"seek\":{d}}}", .{offset});
+                    },
+                    1 => {
+                        const got = try reader.interface.readSliceShort(dest);
+                        try self.w.print("{{\"read\":{d},\"expect\":{s}}}", .{ size, self.bytesJson(dest[0..got]) });
+                    },
+                    2 => {
+                        reader.interface.readSliceAll(dest) catch |err| {
+                            if (err != error.EndOfStream) fail("the engine raised {s} in a stream", .{@errorName(err)});
+                            try self.w.print("{{\"read_all\":{d}}}", .{size});
+                            ended = true;
+                            break;
+                        };
+                        try self.w.print("{{\"read_all\":{d},\"expect\":{s}}}", .{ size, self.bytesJson(dest) });
+                    },
+                    else => try self.w.print("{{\"position\":{d}}}", .{reader.logicalPos()}),
+                }
+            }
+            try self.w.writeAll("]");
+            if (ended) try self.w.writeAll(",\"expect_error\":\"EndOfStream\"");
+            try self.endOp();
+        }
+
+        fn rank(self: *Self, name: []const u8, cursor: RO) anyerror!void {
+            const k = self.sortedKey();
+            const map = try DB.SortedMap(.read_only).init(cursor);
+            try self.beginOp();
+            try self.w.print("{{\"op\":\"rank\",\"on\":\"{s}\",\"key\":{s},\"expect\":{d}}}", .{ name, k.json, try map.rank(k.bytes) });
+        }
+
+        fn iterate(self: *Self, name: []const u8, cursor: RO, tag: Tag, level: usize) anyerror!void {
+            const is_list = tag == .array_list or tag == .linked_array_list;
+            const is_sorted = tag == .sorted_map or tag == .sorted_set;
+            const iter_name = self.fresh("i");
+            var iter: RO.Iter = undefined;
+            try self.beginOp();
+            try self.w.print("{{\"op\":\"iterator\",\"on\":\"{s}\",\"as\":\"{s}\"", .{ name, iter_name });
+            const start = self.rng.below(100);
+            if (start < 40 and (is_list or is_sorted)) {
+                const count = try cursor.count();
+                const index = self.indexIn(count + 3);
+                try self.w.print(",\"from_index\":{d}", .{index});
+                iter = switch (tag) {
+                    .array_list => try RO.Iter.initArrayListFromIndex(cursor, index),
+                    .linked_array_list => try RO.Iter.initLinkedArrayListFromIndex(cursor, index),
+                    else => try RO.Iter.initSortedFromIndex(cursor, index),
+                };
+            } else if (start < 70 and is_sorted) {
+                const k = self.sortedKey();
+                try self.w.print(",\"from_key\":{s}", .{k.json});
+                iter = try RO.Iter.initSortedFromKey(cursor, k.bytes);
+            } else {
+                iter = try cursor.iterator();
+            }
+            try self.endOp();
+
+            // not always to the end, but past where a block ends if it can
+            const steps = 1 + self.rng.below(40);
+            for (0..steps) |_| {
+                const next = try iter.next();
+                try self.beginOp();
+                const element = next orelse {
+                    try self.w.print("{{\"op\":\"next\",\"on\":\"{s}\",\"expect_null\":true}}", .{iter_name});
+                    break;
+                };
+                const element_name = self.fresh("r");
+                try self.w.print("{{\"op\":\"next\",\"on\":\"{s}\",\"as\":\"{s}\",\"expect_null\":false}}", .{ iter_name, element_name });
+                try self.checkCursor(element_name, element, 0);
+                if (level < 3 and self.rng.chance(15)) try self.readThoroughly(element_name, element, level + 1);
+            }
+        }
+
+        /// reads something and says what it should find
+        fn readSomething(self: *Self, on_name: []const u8, cursor: anytype) anyerror!void {
+            var p: PathB = .{};
+            self.randomReadPath(cursor, &p);
 
             try self.beginOp();
             try self.w.print("{{\"op\":\"read_path\",\"on\":\"{s}\",\"path\":[{s}]", .{ on_name, p.text.items });
@@ -1096,6 +1329,10 @@ fn Gen(comptime HashInt: type) type {
         fn body(self: *Self, base: usize) anyerror!void {
             const n = 1 + self.rng.below(if (self.depth == 1) 12 else 4);
             for (0..n) |_| {
+                if (self.reads and self.read_rng.chance(25)) {
+                    const on = self.at(base);
+                    try self.extraRead(on.name, on.cursor);
+                }
                 const r = self.rng.below(100);
                 if (r < 36) {
                     try self.writeSomething(base);
@@ -1234,6 +1471,7 @@ fn Gen(comptime HashInt: type) type {
         }
 
         fn topLevelOp(self: *Self) anyerror!void {
+            if (self.reads and self.read_rng.chance(40)) try self.extraRead("root", self.db.rootCursor());
             const before = try self.db.committedSize();
             self.tx_dirty = false;
             self.tx_cloned = false;
@@ -1319,7 +1557,7 @@ fn Gen(comptime HashInt: type) type {
     };
 }
 
-fn run(comptime HashInt: type, io: Io, arena: Allocator, gpa: Allocator, seed: u64, ops: u64, out_path: []const u8) !void {
+fn run(comptime HashInt: type, io: Io, arena: Allocator, gpa: Allocator, seed: u64, ops: u64, reads: bool, out_path: []const u8) !void {
     const G = Gen(HashInt);
     const hash_size = @bitSizeOf(HashInt) / 8;
 
@@ -1337,9 +1575,10 @@ fn run(comptime HashInt: type, io: Io, arena: Allocator, gpa: Allocator, seed: u
     var out_writer = out.writerStreaming(io, &out_buffer);
     const w = &out_writer.interface;
 
-    try w.print("{{\n  \"format\": \"{s}\",\n  \"description\": \"Generated by gen from seed {d}.\",\n  \"hash_size\": {d},\n  \"hash_id\": {s},\n  \"file_id\": \"{x:0>16}\",\n  \"ops\": [", .{
+    try w.print("{{\n  \"format\": \"{s}\",\n  \"description\": \"Generated by gen from seed {d}{s}.\",\n  \"hash_size\": {d},\n  \"hash_id\": {s},\n  \"file_id\": \"{x:0>16}\",\n  \"ops\": [", .{
         SCRIPT_FORMAT,
         seed,
+        if (reads) ", with reads" else "",
         hash_size,
         if (hash_size == 20) "\"sha1\"" else "null",
         file_id,
@@ -1348,7 +1587,7 @@ fn run(comptime HashInt: type, io: Io, arena: Allocator, gpa: Allocator, seed: u
     var buffer = Io.Writer.Allocating.init(gpa);
     defer buffer.deinit();
 
-    var g: G = .{ .io = io, .arena = arena, .rng = rng, .w = w, .buffer = &buffer, .read_only_allowed = read_only_allowed, .linked_allowed = linked_allowed, .sorted_allowed = sorted_allowed, .history = history };
+    var g: G = .{ .io = io, .arena = arena, .rng = rng, .w = w, .buffer = &buffer, .read_only_allowed = read_only_allowed, .linked_allowed = linked_allowed, .sorted_allowed = sorted_allowed, .history = history, .reads = reads, .read_rng = .{ .state = seed ^ 0x5245414453 } };
     g.db = try G.DB.init(io, .{ .buffer = &buffer, .file_id = file_id });
 
     try g.generate(ops);
@@ -1362,21 +1601,27 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
 
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len != 3 and args.len != 5) {
-        std.debug.print("usage: gen <seed> <out.script> [--ops <top-level ops>]\n", .{});
+    if (args.len < 3) {
+        std.debug.print("usage: gen <seed> <out.script> [--ops <top-level ops>] [--reads]\n", .{});
         std.process.exit(2);
     }
     const seed = std.fmt.parseInt(u64, args[1], 10) catch fail("the seed must be a number", .{});
     var ops: u64 = 15;
-    if (args.len == 5) {
-        if (!std.mem.eql(u8, args[3], "--ops")) fail("the only option is --ops", .{});
-        ops = std.fmt.parseInt(u64, args[4], 10) catch fail("--ops must be a number", .{});
+    var reads = false;
+    var arg_index: usize = 3;
+    while (arg_index < args.len) : (arg_index += 1) {
+        if (std.mem.eql(u8, args[arg_index], "--reads")) {
+            reads = true;
+        } else if (std.mem.eql(u8, args[arg_index], "--ops") and arg_index + 1 < args.len) {
+            arg_index += 1;
+            ops = std.fmt.parseInt(u64, args[arg_index], 10) catch fail("--ops must be a number", .{});
+        } else fail("the options are --ops and --reads", .{});
     }
 
     // a few scripts use a short hash, written in hex
     if (seed % 8 == 7) {
-        try run(u64, io, arena, init.gpa, seed, ops, args[2]);
+        try run(u64, io, arena, init.gpa, seed, ops, reads, args[2]);
     } else {
-        try run(u160, io, arena, init.gpa, seed, ops, args[2]);
+        try run(u160, io, arena, init.gpa, seed, ops, reads, args[2]);
     }
 }

@@ -182,14 +182,16 @@ after the callback or transaction that bound it has ended. Each name holds one o
 - a read-write cursor,
 - a read-only cursor,
 - a slot, or null, from a slot-reading op,
-- a null cursor, from a `read_path` that found nothing.
+- a null cursor, from a `read_path` or a `next` that found nothing,
+- an iterator.
 
 `root` is reserved and can't be bound. Each use of it means a new `db.rootCursor()`, and it can only be used as a
 cursor.
 
 These are script failures ([section 10](#10-valid-scripts-and-script-failures)): using a name that isn't bound,
-using a null cursor for anything, using a slot as a cursor or a cursor as a slot, and using a read-only cursor where
-a read-write one is needed, as those methods don't exist on read-only cursors in Zig.
+using a null cursor for anything, using a slot as a cursor or a cursor as a slot, using an iterator as anything but an
+iterator, and using a read-only cursor where a read-write one is needed, as those methods don't exist on read-only
+cursors in Zig.
 
 ### What a cursor holds
 
@@ -255,11 +257,20 @@ left out. `expect` and its relatives are checked after the call and are describe
 | `read_uint` | `on`, `expect?` | `on.readUint()` | |
 | `read_int` | `on`, `expect?` | `on.readInt()` | |
 | `read_float` | `on`, `expect?` | `on.readFloat()` | |
-| `read_bytes` | `on`, `expect?`, `expect_format_tag?` | `on.readBytesObjectAlloc(allocator, null)` | |
+| `read_bytes` | `on`, `max_size?`, `expect?`, `expect_format_tag?` | `on.readBytesObjectAlloc(allocator, max_size)`, with `null` if `max_size` is left out | |
+| `read_bytes_into` | `on`, `size`, `expect?`, `expect_format_tag?` | `on.readBytesObject(buffer)`, with a buffer of `size` bytes | |
+| `read_stream` | `on`, `buffer_size?`, `steps` | see below | |
 | `count` | `on`, `expect?` | `on.count()` | |
+| `iterator` | `on`, `from_index?` or `from_key?`, `as` | see below | `as`: an iterator |
+| `next` | `on`, `as?`, `expect_null?` | `on.next()`, `on` being an iterator | `as`: a read-only cursor, or a null cursor |
+| `rank` | `on`, `key`, `expect?` | the `rank` of a `SortedMap(.read_only)` or `SortedSet(.read_only)` on the cursor. It's the number of keys less than `key`, which needn't be there | |
 
 `write_path`, `write`, `write_if_empty`, `writer`, `freeze` and `read_only` need a read-write cursor. The others
-take either kind.
+take either kind. `size`, `buffer_size` and the sizes in `read_stream`'s steps go up to 2²⁴. These reads change no
+bytes.
+
+`read_bytes` and `read_bytes_into` raise `StreamTooLong` when the value is longer than `max_size` or `size`, and a
+format tag doesn't count towards that. A slot with nothing in it fits in any `max_size`, and in a `size` of 0.
 
 **`writer`** is one op from opening the writer to finishing it, so nothing else can happen in between:
 
@@ -274,6 +285,48 @@ try w.finish();
 
 `steps` can be empty, which writes a zero-length `bytes` record: unlike `write`, `writer` never produces
 `short_bytes`, however few bytes there are.
+
+**`read_stream`** is one op from opening the reader to the last step, as `writer` is:
+
+```zig
+var r = try on.reader(buffer); // of buffer_size bytes, which is 0 if left out
+// for each step, in order:
+//   {"read": 10, "expect?": BYTES}      r.interface.readSliceShort(dest[0..10]), which stops early at the end of the value
+//   {"read_all": 10, "expect?": BYTES}  r.interface.readSliceAll(dest[0..10]), which raises EndOfStream if there are fewer
+//   {"seek": 3}                         r.seekTo(3), which can go past the end, as far as 2^64 - 1
+//   {"position": 3}                     r.logicalPos() must be 3, or it's a script failure
+```
+
+`expect` is compared with what the read gave, so `{"read": 10, "expect": "abc"}` passes for a value with three bytes
+left. A format tag isn't part of a value's stream. A failed step ends the op, as there's no way to go on with the same
+reader afterwards. What a stream gives doesn't depend on `buffer_size`, so a runner whose reader has no such thing
+ignores it. `tests/valid/reads-stream.json` holds Zig to that with several sizes.
+
+A stream raises `UnexpectedTag` on anything but a byte value. Three uses of it are for the port to correct
+([section 10](#what-the-port-corrects)), and a valid script doesn't contain them: on a slot with nothing in it, and on a
+`short_bytes` slot from a cursor with no position, or whose slot has since been overwritten.
+
+**`iterator`** makes an iterator on `on`:
+
+| Field | Call | On |
+|---|---|---|
+| neither | `on.iterator()` | any collection |
+| `from_index` | `ArrayList.iteratorFrom`, `LinkedArrayList.iteratorFrom`, or `SortedMap.iteratorFromIndex` and the set's | array lists, linked array lists, sorted maps and sets. It counts from the end if negative, and gives nothing if it's out of range |
+| `from_key` | `SortedMap.iteratorFrom` and the set's | sorted maps and sets. It starts at the first key that isn't less than this one |
+
+Any of them on a slot with nothing in it gives an iterator that gives nothing. On a slot of any other kind they raise
+`UnexpectedTag`. Which call a runner makes depends on the tag it finds, and the wrappers add only a check of the tag,
+which raises the same error.
+
+**Unlike a cursor, an iterator isn't a value.** There's one per `iterator` op, and `next` moves it, however it's reached.
+What it gives is always a read-only cursor. It's the entry itself for a map, a `kv_pair` or `sorted_kv_pair` that needs
+`read_key_value_pair`. In a sorted set it's a `short_bytes` or `bytes` slot, which is the key. After the last one, `next`
+goes on giving null. A hash map's order is its trie's, by the lowest nibble of the hash first.
+
+An iterator goes by the cursor's snapshot, or the last commit for a root cursor, like the reads in
+[section 4](#what-a-cursor-holds). One kept across a commit goes on seeing what it saw, since committed data isn't
+changed. One made during a transaction mustn't be used after a write in that same transaction, which is an undefined
+use ([section 10](#an-undefined-use)).
 
 **Closing and reopening** model a process stopping and another one starting, with whatever a crash did to the file in
 between. These four ops only appear at the top level, and only `reopen` can have `expect_error`.
@@ -309,9 +362,9 @@ still works, and truncating silently does nothing, so bytes past the committed s
 
 | Field | Passes when |
 |---|---|
-| `expect` on `read_uint`, `read_int`, `count` | the integer is equal |
+| `expect` on `read_uint`, `read_int`, `count`, `rank` | the integer is equal |
 | `expect` on `read_float` | the bit pattern is equal ([floats](#floats)) |
-| `expect` on `read_bytes` | the bytes are equal ([bytes](#bytes)) |
+| `expect` on `read_bytes`, `read_bytes_into` | the bytes are equal ([bytes](#bytes)) |
 | `expect` on `slot`, `read_path_slot` | an object with at least one of `tag`, `value`, `full`: each given field is equal. It fails on a null slot |
 | `expect_format_tag` | a [format tag](#format-tags) that is equal, or `null` for no tag. Left out, the tag isn't checked |
 | `expect_null` | `true`: the result is null. `false`: it isn't. Left out, either is fine |
@@ -397,9 +450,11 @@ Truncating is all a rollback does, so it doesn't undo a write that landed before
 | `InvalidVersion` | `reopen`: a version other than 1 |
 | `InvalidHashSize` | `reopen`: a hash size in the header other than the one stated |
 | `TruncatedDatabase` | `reopen`: a committed size past the end of the file |
+| `EndOfStream` | `read_stream`: a `read_all` that wants more than there is. It can't be named on any other op |
+| `StreamTooLong` | `read_bytes`, `read_bytes_into`: a value longer than `max_size` or `size` |
 
-The engine has more errors than these, like `EndOfStream` and `KeyOffsetExceeded`. Reaching them takes an undefined
-use, a corrupt file, or a call scripts can't make.
+The engine has more errors than these, like `KeyOffsetExceeded`. Reaching them takes an undefined use, a corrupt file,
+or a call scripts can't make.
 
 ## 8. Transactions and commit IDs
 
@@ -470,7 +525,7 @@ The checksum is computed by the engine and isn't in the sidecar. It should come 
 ## 10. Valid scripts and script failures
 
 ```
-run <script> <out.db> [--kind buffered_file|file|memory]
+run <script> <out.db> [--kind buffered_file|file|memory] [--allow-port-differences]
 ```
 
 The Zig runner truncates `<out.db>`, runs the script, and writes the file and the sidecar. The default kind is
@@ -526,10 +581,11 @@ needn't handle them. They are kept out like this:
 |---|---|---|
 | Using a cursor or a slot from a transaction that was rolled back | reads whatever is at that offset by then, which can be anything | `run` fails |
 | Writing a slot whose tag is `index`, `kv_pair` or `sorted_kv_pair` | follows it as if it had been built there, which ends in errors like `KeyOffsetExceeded` | `run` fails |
-| Reading, before the commit, a gap left by a `writer` that seeked past the end | zeros on `file` and `memory`. On `buffered_file`, `EndOfStream` until the gap has been flushed, and zeros after that. The committed bytes are the same on all three | `EndOfStream` can't be expected, and `check.sh` runs every script on all three kinds. A read that gets zeros everywhere isn't caught |
+| Reading, before the commit, a gap left by a `writer` that seeked past the end | zeros on `file` and `memory`. On `buffered_file`, `EndOfStream` until the gap has been flushed, and zeros after that. The committed bytes are the same on all three | `EndOfStream` can only be expected on `read_stream`, and `check.sh` runs every script on all three kinds. A read that gets zeros everywhere isn't caught |
 | On a read-only file, a transaction with a callback, or one that would fail anyway | `file` raises `WriteFailed` at the first write, without running the rest. `buffered_file` runs the rest and only fails at the commit, so it raises `KeyNotFound` for a path that fails by itself, runs the callback, and raises `ScriptAbort` for a callback that fails | `run` fails on the callback. `check.sh` runs every script on both kinds, which catches the rest |
 | A write into committed bytes (section 11) of something that points into the current transaction, if the transaction is then rolled back or the root header is later set back past it | committed data is left pointing past the end of the file. Reading it raises `EndOfStream`, or `OutOfMemory` for a wild length, and once more data has landed at that offset, the read succeeds and returns those bytes as if they were the value | `gen` doesn't let such a transaction fail. `run` can't see it, so a hand-written script has to take care: writing an inline value is fine, as `overwriting-committed-bytes` does |
 | **Two headers for one tree.** An init copies a linked list's or sorted map's header if it's old, and the copy shares the tree. That's only safe if the nodes are old too, or nothing can see the old header any more. There are three ways it goes wrong, all in one transaction. After `linked_array_list_concat`, the old header points at a node that's newer than the transaction's start, so it's rewritten in place, and the old header can still be reached through a slot read before or copied after, a cursor kept from before, or a stale snapshot. After a freeze on a cursor to a collection that a cursor that isn't frozen can also reach. And after a skipped init on a tree, followed by an init | the header disagrees with its tree. A read past the end raises `InvalidBTreeNode`, and some raise `InvalidEnumTag`. An append panics, or crashes in a release build | `gen` keeps away from all three. `run` can't see them, so a hand-written script has to take care. `tests/undefined/` shows them |
+| Using an iterator after a write in the transaction that made it. It holds copies of the blocks it's part way through, and reads the others when it gets to them | what's been rewritten in place shows up if the iterator hadn't read that block yet, and doesn't if it had | `run` fails. A hand-written script also has to take care with one kept past a write into committed bytes (section 11), which `run` can't see |
 | A trie 64 levels deep, at a hash size above 32. Two keys need to share their lowest 64 nibbles, which for real hashes would take a 256-bit collision | a depth counter overflows, which panics in a debug build | `run` is a debug build |
 
 `tests/undefined/wrappers.zig` shows that the collection wrappers alone can reach two headers for one tree, without the
@@ -541,6 +597,20 @@ path API. What it does depends on the collection, since only the trees index a n
 | `sorted_map`, `sorted_set` | a read by index raises `InvalidBTreeNode`. A remove can underflow the count, which panics, and wraps in a release build |
 | `counted_hash_map`, `counted_hash_set` | a remove can underflow the count in the same way. Nothing else depends on the count |
 | `array_list`, `hash_map`, `hash_set` | no crash, only what's written to one showing up in the other |
+
+### What the port corrects
+
+The user has decided that the port differs from Zig in these reads from the start, so a valid script can't use them
+(findings 8, 9 and 21 in `director/zig-findings.md`). A second runner doesn't need to do anything about them, and `run`
+fails on a script that uses them, unless it's given `--allow-port-differences`. `tests/port-differs/` has a pair of
+scripts for each, one with what Zig does and one with what the port does.
+
+| Use | Zig | The port |
+|---|---|---|
+| `read_bytes_into` with a `size` above 0, on a slot with nothing in it | `EndOfStream` | it's empty |
+| `read_stream` on a slot with nothing in it | `UnexpectedTag` | an empty stream |
+| `read_stream` on a `short_bytes` slot from a cursor with no position, which is a key from `{"sorted_map_get": {"key": ...}}` or from `read_key_value_pair` on a set's entry | `ExpectedSlotPosition` | it gives the value |
+| `read_stream` on a `short_bytes` slot that has since been overwritten | the length from the cursor and the bytes from the file, so neither value | it gives what the cursor holds |
 
 **Storage kinds don't otherwise change the bytes.** `check.sh` holds every script in this repository to that, across
 all three kinds, in debug and release builds.
@@ -582,6 +652,13 @@ All of these look like mistakes and all of them are what Zig does. `overwriting-
 11. **Opening a file doesn't clean it up.** Bytes past the committed size stay until a write, and a free init on a
    read-only file doesn't report that it couldn't truncate them. Only the committed size in the root header is ever
    read: the root slot next to it can be garbage, and the root comes from the trailer anyway.
+12. **An iterator can give an element past the end of a sliced array list.** It stops after giving as many elements as
+   the list has, rather than at the end of the list. It skips an element that was never written, and a slice leaves
+   the old elements in their blocks. So after `[unwritten, 1, 2, 3]` is sliced to a size of 2, it gives 1 and 2, while
+   `{"array_list_get": 2}` says there's nothing there. `iterator-after-slice` pins this.
+13. **An element appended and never written isn't the same in the two lists.** In an array list it's empty, so an
+   iterator skips it. In a linked array list it's marked as written with nothing (`lib.zig:2094`), so an iterator gives
+   it.
 
 ## 12. Worked example
 
@@ -621,11 +698,8 @@ The sidecar for this run is the one in section 9.
 
 ## 13. Not in this version
 
-These are Zig API that scripts can't call yet. Adding reads later won't change the bytes any existing script
-produces.
+These are Zig API that scripts can't call yet.
 
-- Iterators (`iterator`, `iteratorFrom`, `iteratorFromIndex`) and `rank`.
-- Streaming reads (`Cursor.reader`), and reads into a caller's buffer.
 - A byte writer left open across other ops, which is the only other way to reach `WriteFailed`, and the only way to
   reach `UnexpectedWriterPosition`.
 - Compaction and replication.
@@ -643,3 +717,13 @@ ones, it needs:
 - the five error names they added (section 7);
 - `null` as a `committed_size` in a sidecar, and to expect a `committed_size` to go down after `reopen` (section 9);
 - to compare the whole file at the end, as before, including any bytes past the last committed size.
+
+**Reads were added**, and they change no bytes. A runner written before them runs every earlier script unchanged. To
+run the new ones, it needs:
+
+- the ops `iterator`, `next`, `rank`, `read_bytes_into` and `read_stream`, and `max_size` on `read_bytes` (section 5);
+- iterators as a new kind of thing a name holds, which `next` changes (sections 4 and 5);
+- the error names `EndOfStream` and `StreamTooLong` (section 7).
+
+The manifest lists what each script uses as `iterators`, `rank`, `byte_stream` and `byte_buffers`. The last is
+`read_bytes_into` and `max_size`.

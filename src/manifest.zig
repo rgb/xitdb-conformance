@@ -24,20 +24,39 @@ const Features = struct {
     reopen: bool = false,
     raw_file: bool = false,
     read_only: bool = false,
+    iterators: bool = false,
+    rank: bool = false,
+    byte_stream: bool = false,
+    byte_buffers: bool = false,
 
-    fn addOp(self: *Features, op: std.json.ObjectMap) void {
-        const name = op.get("op").?.string;
-        if (std.mem.eql(u8, name, "close") or std.mem.eql(u8, name, "reopen")) self.reopen = true;
-        if (std.mem.eql(u8, name, "raw_append") or std.mem.eql(u8, name, "raw_write")) self.raw_file = true;
-        if (op.get("read_only")) |v| {
-            if (v == .bool and v.bool) self.read_only = true;
+    fn addOps(self: *Features, ops: Json) void {
+        for (ops.array.items) |item| {
+            const op = item.object;
+            const name = op.get("op").?.string;
+            if (std.mem.eql(u8, name, "close") or std.mem.eql(u8, name, "reopen")) self.reopen = true;
+            if (std.mem.eql(u8, name, "raw_append") or std.mem.eql(u8, name, "raw_write")) self.raw_file = true;
+            if (op.get("read_only")) |v| {
+                if (v == .bool and v.bool) self.read_only = true;
+            }
+            if (std.mem.eql(u8, name, "iterator") or std.mem.eql(u8, name, "next")) self.iterators = true;
+            if (std.mem.eql(u8, name, "rank")) self.rank = true;
+            if (std.mem.eql(u8, name, "read_stream")) self.byte_stream = true;
+            if (std.mem.eql(u8, name, "read_bytes_into") or op.get("max_size") != null) self.byte_buffers = true;
+            // what's in a callback counts as well
+            if (op.get("ctx")) |ctx| self.addOps(ctx.object.get("ops").?);
+            if (op.get("path")) |path| {
+                for (path.array.items) |part| {
+                    if (part != .object) continue;
+                    if (part.object.get("ctx")) |ctx| self.addOps(ctx.object.get("ops").?);
+                }
+            }
         }
     }
 
     fn print(self: Features, w: *Io.Writer) !void {
         var first = true;
         try w.writeAll("[");
-        inline for (.{ "reopen", "raw_file", "read_only" }) |name| {
+        inline for (.{ "reopen", "raw_file", "read_only", "iterators", "rank", "byte_stream", "byte_buffers" }) |name| {
             if (@field(self, name)) {
                 try w.writeAll(if (first) "\"" else ", \"");
                 try w.writeAll(name);
@@ -156,7 +175,7 @@ pub fn main(init: std.process.Init) !void {
         try w.writeAll(", \"collections\": ");
         try collections.print(w);
         var features: Features = .{};
-        for (script.get("ops").?.array.items) |op| features.addOp(op.object);
+        features.addOps(script.get("ops").?);
         try w.writeAll(", \"features\": ");
         try features.print(w);
         try w.writeAll("}");

@@ -48,6 +48,16 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(gen_exe);
 
+    const longscripts_exe = b.addExecutable(.{
+        .name = "longscripts",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/longscripts.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(longscripts_exe);
+
     const coverage_exe = b.addExecutable(.{
         .name = "coverage",
         .root_module = b.createModule(.{

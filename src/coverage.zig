@@ -33,7 +33,12 @@ const WANT = [_][]const u8{
     "op:read_int",
     "op:read_float",
     "op:read_bytes",
+    "op:read_bytes_into",
+    "op:read_stream",
     "op:count",
+    "op:iterator",
+    "op:next",
+    "op:rank",
     "op:close",
     "op:reopen",
     "op:raw_append",
@@ -121,6 +126,25 @@ const WANT = [_][]const u8{
     "writer_step:write",
     "writer_step:seek",
     "writer:format_tag",
+    // reads
+    "read_bytes:max_size",
+    "iterator:plain",
+    "iterator:from_index",
+    "iterator:from_index_negative",
+    "iterator:from_key",
+    "from_key:text",
+    "from_key:hex",
+    "from_key:hex_empty",
+    "rank_key:text",
+    "rank_key:hex",
+    "rank_key:hex_empty",
+    "stream:buffer_size",
+    "stream_step:read",
+    "stream_step:read_all",
+    "stream_step:seek",
+    "stream_step:position",
+    "stream_expect:text",
+    "stream_expect:hex",
     // the top of a script
     "hash_id:text",
     "hash_id:hex",
@@ -174,6 +198,8 @@ const WANT = [_][]const u8{
     "error:InvalidVersion",
     "error:InvalidHashSize",
     "error:TruncatedDatabase",
+    "error:EndOfStream",
+    "error:StreamTooLong",
 };
 
 fn fail(comptime fmt: []const u8, args: anytype) noreturn {
@@ -338,6 +364,27 @@ const Walker = struct {
             }
             if (std.mem.eql(u8, name, "raw_append") or std.mem.eql(u8, name, "raw_write")) {
                 self.bytes("raw", op.get("bytes").?);
+            }
+            if (op.get("max_size") != null) self.note("read_bytes:", "max_size");
+            if (std.mem.eql(u8, name, "iterator")) {
+                if (op.get("from_index")) |v| {
+                    self.note("iterator:", if (v.number_string[0] == '-') "from_index_negative" else "from_index");
+                } else if (op.get("from_key")) |v| {
+                    self.note("iterator:", "from_key");
+                    self.bytes("from_key", v);
+                } else {
+                    self.note("iterator:", "plain");
+                }
+            }
+            if (std.mem.eql(u8, name, "rank")) self.bytes("rank_key", op.get("key").?);
+            if (std.mem.eql(u8, name, "read_stream")) {
+                if (op.get("buffer_size") != null) self.note("stream:", "buffer_size");
+                for (op.get("steps").?.array.items) |step| {
+                    for (step.object.keys()) |key| {
+                        if (!std.mem.eql(u8, key, "expect")) self.note("stream_step:", key);
+                    }
+                    if (step.object.get("expect")) |v| self.bytes("stream_expect", v);
+                }
             }
         }
     }

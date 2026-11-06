@@ -1,12 +1,13 @@
 #!/bin/sh
 # The gate for this repository. It stops at the first problem.
 #
-# 1. everything builds, and gen still writes the scripts that are committed;
+# 1. everything builds, gen and longscripts still write the scripts that are committed,
+#    and reads change no bytes;
 # 2. every script runs, twice, and the two files differ only in the commit ID and
 #    checksum of each trailer (see src/detcheck.zig for exactly what's checked);
 # 3. the storage kind and the optimization level make no difference to the bytes;
 # 4. every script in tests/failing and tests/invalid fails, for the reason in its
-#    description;
+#    description, and tests/port-differs still shows what it says about the Zig original;
 # 5. dump gives the same text across all of those, doesn't depend on layout, and
 #    reports what it can't read;
 # 6. bench refuses to give numbers from a debug build, and still runs;
@@ -37,6 +38,50 @@ RELEASE_RUN=out/release/bin/run
 
 echo "== the generated scripts"
 ./gen-fixed.sh --check
+
+echo "== reads change no bytes"
+# the same seed gives the same writes with or without reads
+count=0
+for script in tests/generated/reads-*.json; do
+    seed=$(basename "$script" .json)
+    seed=${seed#reads-}
+    zig-out/bin/gen "$seed" "$OUT/plain.json"
+    "$RUN" "$script" "$OUT/reads.db"
+    "$RUN" "$OUT/plain.json" "$OUT/plain.db"
+    "$DET" --ignore-reads "$OUT/reads.db" "$OUT/plain.db" > /dev/null || {
+        echo "seed $seed: the script with reads writes a different file from the one without"
+        exit 1
+    }
+    count=$((count + 1))
+done
+echo "$count scripts give the same file with and without their reads"
+# and that check can fail: two different seeds
+zig-out/bin/gen 101 "$OUT/plain.json"
+zig-out/bin/gen 102 "$OUT/other.json"
+"$RUN" "$OUT/plain.json" "$OUT/plain.db"
+"$RUN" "$OUT/other.json" "$OUT/other.db"
+if "$DET" --ignore-reads "$OUT/plain.db" "$OUT/other.db" > /dev/null 2>&1; then
+    echo "detcheck --ignore-reads accepted two different scripts"
+    exit 1
+fi
+echo "detcheck --ignore-reads notices when it isn't only reads"
+
+echo "== the long scripts"
+zig-out/bin/longscripts "$OUT/long"
+count=0
+for script in "$OUT"/long/*.json; do
+    name=$(basename "$script")
+    cmp -s "$script" "tests/valid/$name" || {
+        echo "longscripts no longer writes tests/valid/$name. Run zig-out/bin/longscripts tests/valid"
+        exit 1
+    }
+    count=$((count + 1))
+done
+if [ "$count" -ne 6 ]; then
+    echo "longscripts should write 6 scripts, and it wrote $count"
+    exit 1
+fi
+echo "longscripts still writes the $count scripts that are committed"
 
 echo "== determinism: each script run twice"
 for script in scripts/*.json tests/valid/*.json tests/generated/*.json; do
@@ -103,6 +148,40 @@ expect_failures() { # folder
 echo "== scripts that must fail"
 expect_failures tests/failing
 expect_failures tests/invalid
+
+echo "== what the port corrects"
+# what these say about Zig has to stay true, and they have to stay out of everything else
+count=0
+for script in tests/port-differs/*.zig.json; do
+    name=$(basename "$script" .zig.json)
+    port=tests/port-differs/$name.port.json
+    [ -f "$port" ] || {
+        echo "$name has no script for what the port does"
+        exit 1
+    }
+    "$RUN" "$script" "$OUT/differs.db" --allow-port-differences
+    status=0
+    "$RUN" "$port" "$OUT/differs.db" --allow-port-differences 2> /dev/null || status=$?
+    if [ "$status" -ne 1 ]; then
+        echo "$name: what the port does shouldn't pass on the Zig original, and its exit status is $status"
+        exit 1
+    fi
+    for refused in "$script" "$port"; do
+        status=0
+        "$RUN" "$refused" "$OUT/differs.db" 2> "$OUT/differs.err" || status=$?
+        if [ "$status" -ne 1 ] || ! grep -qE "the port corrects|expect_error can" "$OUT/differs.err"; then
+            echo "$refused should be refused without --allow-port-differences, and its exit status is $status:"
+            head -n 2 "$OUT/differs.err"
+            exit 1
+        fi
+    done
+    count=$((count + 1))
+done
+if [ "$count" -ne 4 ]; then
+    echo "tests/port-differs should have 4 behaviours, and it has $count"
+    exit 1
+fi
+echo "$count behaviours: Zig does what they say, and a valid script can't use them"
 
 echo "== dump"
 DUMP=zig-out/bin/dump

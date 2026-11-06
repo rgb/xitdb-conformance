@@ -1,4 +1,4 @@
-//! run <script> <out.db> [--kind buffered_file|file|memory]
+//! run <script> <out.db> [--kind buffered_file|file|memory] [--allow-port-differences]
 //!
 //! Executes a conformance script (see SCRIPT-FORMAT.md) against the Zig
 //! implementation and writes the database to <out.db> and the sidecar to
@@ -12,6 +12,11 @@
 //! Exits with 0 on success, 1 when the script fails (it isn't valid, an error
 //! nothing handled, or an expectation not met), and 2 on a usage error. Output
 //! files must not be used after a nonzero exit.
+//!
+//! The Swift port deliberately differs from Zig in a few reads (SCRIPT-FORMAT.md,
+//! section 10), so a valid script can't use them, and this refuses to run one that
+//! does. --allow-port-differences lets through the scripts in tests/port-differs,
+//! which exist to show what each implementation does there.
 
 const std = @import("std");
 const xitdb = @import("xitdb");
@@ -49,7 +54,12 @@ const ERROR_NAMES = [_][]const u8{
     "InvalidVersion",
     "InvalidHashSize",
     "TruncatedDatabase",
+    "EndOfStream",
+    "StreamTooLong",
 };
+
+/// only a read the port corrects can raise this, so only --allow-port-differences lets a script name it
+const PORT_DIFFERENCE_ERROR_NAMES = [_][]const u8{"ExpectedSlotPosition"};
 
 // where the runner is in the script, for messages only
 
@@ -210,7 +220,18 @@ fn checkBindable(name: []const u8, what: []const u8) void {
     if (isKey(name, "root")) die("\"root\" can't be bound", .{});
 }
 
-fn checkErrorName(name: []const u8) void {
+fn checkErrorName(name: []const u8, op_name: []const u8, allow_port_differences: bool) void {
+    if (allow_port_differences) {
+        for (PORT_DIFFERENCE_ERROR_NAMES) |known| {
+            if (isKey(name, known)) return;
+        }
+    }
+    // reading a gap before the commit raises it on one storage kind and not on the others,
+    // and reading a slot set to nothing into a buffer raises it where the port doesn't.
+    // only a stream can reach it in a way that means the same everywhere.
+    if (isKey(name, "EndOfStream") and !isKey(op_name, "read_stream") and !allow_port_differences) {
+        die("expect_error can only name EndOfStream on read_stream", .{});
+    }
     for (ERROR_NAMES) |known| {
         if (isKey(name, known)) return;
     }
@@ -241,7 +262,12 @@ const OpKind = enum {
     read_int,
     read_float,
     read_bytes,
+    read_bytes_into,
+    read_stream,
     count,
+    iterator,
+    next,
+    rank,
     close,
     reopen,
     raw_append,
@@ -263,7 +289,12 @@ fn opFields(kind: OpKind) []const []const u8 {
         .read_only => &.{ "op", "note", "expect_error", "on", "as" },
         .read_key_value_pair => &.{ "op", "note", "expect_error", "on", "key_as", "value_as", "expect_hash" },
         .read_uint, .read_int, .read_float, .count => &.{ "op", "note", "expect_error", "on", "expect" },
-        .read_bytes => &.{ "op", "note", "expect_error", "on", "expect", "expect_format_tag" },
+        .read_bytes => &.{ "op", "note", "expect_error", "on", "max_size", "expect", "expect_format_tag" },
+        .read_bytes_into => &.{ "op", "note", "expect_error", "on", "size", "expect", "expect_format_tag" },
+        .read_stream => &.{ "op", "note", "expect_error", "on", "buffer_size", "steps" },
+        .iterator => &.{ "op", "note", "expect_error", "on", "from_index", "from_key", "as" },
+        .next => &.{ "op", "note", "expect_error", "on", "as", "expect_null" },
+        .rank => &.{ "op", "note", "expect_error", "on", "key", "expect" },
         .close => &.{ "op", "note" },
         .reopen => &.{ "op", "note", "expect_error", "read_only", "hash_size" },
         .raw_append => &.{ "op", "note", "bytes" },
@@ -292,6 +323,7 @@ const Options = struct {
     file_id: u64,
     hash_id: ?xitdb.HashId,
     out_path: []const u8,
+    allow_port_differences: bool,
 };
 
 fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
@@ -308,6 +340,8 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         // the trailer's size, and where the commit ID is inside it
         const TRAILER_SIZE = 25;
         const TRAILER_COMMIT_ID_OFFSET = 9;
+        // where a root cursor says it is, though it reads the root again each time
+        const ROOT_HEADER_START = 20;
 
         const Binding = union(enum) {
             rw: RW,
@@ -315,12 +349,17 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             slot: ?Slot,
             // what `read_path` found nothing for
             null_cursor,
+            // an iterator changes as it's used, so it's held by pointer and never copied
+            iter_rw: *RW.Iter,
+            iter_ro: *RO.Iter,
         };
 
         const Entry = struct {
             binding: Binding,
             // the top-level op it was bound in, to find uses after a rollback
             born: usize,
+            // how many writes had been run by then, to find changes under an iterator
+            writes: u64,
         };
 
         /// the callback of a `ctx` path part. the callback's cursor is bound to
@@ -366,6 +405,10 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         // the top-level op being run, and the ones that rolled back
         top_index: usize = 0,
         rolled_back: std.AutoHashMapUnmanaged(usize, void) = .empty,
+        // how many writes have been run, and how many had been when each top-level op ended
+        writes: u64 = 0,
+        writes_after_op: std.ArrayList(u64) = .empty,
+        allow_port_differences: bool = false,
         // the storage behind a `root` reference by pointer
         root_cursor: RW = undefined,
 
@@ -386,7 +429,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             checkKeys(op, opFields(kind_of_op), name);
 
             if (op.get("note")) |note| _ = asString(note, "note");
-            if (op.get("expect_error")) |err| checkErrorName(asString(err, "expect_error"));
+            if (op.get("expect_error")) |err| checkErrorName(asString(err, "expect_error"), name, self.allow_port_differences);
             switch (kind_of_op) {
                 .run_context, .db_freeze, .fail => {},
                 .close, .reopen, .raw_append, .raw_write => {
@@ -451,10 +494,27 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     _ = parseHex64(self.arena, v, "expect");
                 },
                 .read_bytes => {
-                    if (op.get("expect")) |v| _ = parseBytes(self.arena, v, "expect");
-                    if (op.get("expect_format_tag")) |v| {
-                        if (v != .null) _ = parseFixedBytes(2, self.arena, v, "expect_format_tag");
-                    }
+                    if (op.get("max_size")) |v| _ = asInt(u64, v, "max_size");
+                    self.validateBytesExpectation(op);
+                },
+                .read_bytes_into => {
+                    _ = checkedSize(required(op, "size", name), "size");
+                    self.validateBytesExpectation(op);
+                },
+                .read_stream => {
+                    if (op.get("buffer_size")) |v| _ = checkedSize(v, "buffer_size");
+                    for (asArray(required(op, "steps", name), "steps")) |step_value| self.validateStreamStep(step_value);
+                },
+                .iterator => {
+                    checkBindable(asString(required(op, "as", name), "as"), "as");
+                    if (op.get("from_index") != null and op.get("from_key") != null) die("an iterator starts from an index or from a key, and not both", .{});
+                    if (op.get("from_index")) |v| _ = parseIndex(v, "from_index");
+                    if (op.get("from_key")) |v| _ = parseBytes(self.arena, v, "from_key");
+                },
+                .next => checkBindableField(op, "as"),
+                .rank => {
+                    _ = parseBytes(self.arena, required(op, "key", name), "key");
+                    if (op.get("expect")) |v| _ = asInt(u64, v, "expect");
                 },
                 .close => {},
                 .reopen => {
@@ -472,6 +532,39 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             }
         }
 
+        fn validateBytesExpectation(self: *Self, op: ObjectMap) void {
+            if (op.get("expect")) |v| _ = parseBytes(self.arena, v, "expect");
+            if (op.get("expect_format_tag")) |v| {
+                if (v != .null) _ = parseFixedBytes(2, self.arena, v, "expect_format_tag");
+            }
+        }
+
+        fn validateStreamStep(self: *Self, step_value: Json) void {
+            const step = asObject(step_value, "a stream step");
+            if (step.get("seek")) |v| {
+                checkKeys(step, &.{"seek"}, "a seek step");
+                _ = asInt(u64, v, "seek");
+            } else if (step.get("position")) |v| {
+                checkKeys(step, &.{"position"}, "a position step");
+                _ = asInt(u64, v, "position");
+            } else if (step.get("read")) |v| {
+                checkKeys(step, &.{ "read", "expect" }, "a read step");
+                _ = checkedSize(v, "read");
+                if (step.get("expect")) |bytes| _ = parseBytes(self.arena, bytes, "expect");
+            } else if (step.get("read_all")) |v| {
+                checkKeys(step, &.{ "read_all", "expect" }, "a read_all step");
+                _ = checkedSize(v, "read_all");
+                if (step.get("expect")) |bytes| _ = parseBytes(self.arena, bytes, "expect");
+            } else die("a stream step must be \"read\", \"read_all\", \"seek\" or \"position\"", .{});
+        }
+
+        /// a size that gets allocated, which a script has no need to make huge
+        fn checkedSize(v: Json, what: []const u8) usize {
+            const size = asInt(usize, v, what);
+            if (size > MAX_SEEK) die("{s} can't go past {d}, got {d}", .{ what, @as(u64, MAX_SEEK), size });
+            return size;
+        }
+
         fn validateSlotExpectation(op: ObjectMap) void {
             const want = asObject(op.get("expect") orelse return, "expect");
             checkKeys(want, &.{ "tag", "value", "full" }, "expect");
@@ -484,7 +577,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         // names
 
         fn bind(self: *Self, name: []const u8, binding: Binding) void {
-            self.env.put(self.arena, name, .{ .binding = binding, .born = self.top_index }) catch die("out of memory", .{});
+            self.env.put(self.arena, name, .{ .binding = binding, .born = self.top_index, .writes = self.writes }) catch die("out of memory", .{});
         }
 
         fn entryFor(self: *Self, name: []const u8) *Entry {
@@ -509,6 +602,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 .ro => die("\"{s}\" is a read-only cursor", .{name}),
                 .slot => die("\"{s}\" is a slot, not a cursor", .{name}),
                 .null_cursor => die("\"{s}\" is a null cursor", .{name}),
+                .iter_rw, .iter_ro => die("\"{s}\" is an iterator, not a cursor", .{name}),
             };
         }
 
@@ -523,6 +617,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 .ro => die("\"{s}\" is a read-only cursor", .{name}),
                 .slot => die("\"{s}\" is a slot, not a cursor", .{name}),
                 .null_cursor => die("\"{s}\" is a null cursor", .{name}),
+                .iter_rw, .iter_ro => die("\"{s}\" is an iterator, not a cursor", .{name}),
             };
         }
 
@@ -533,11 +628,21 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 .rw, .ro => binding,
                 .slot => die("\"{s}\" is a slot, not a cursor", .{name}),
                 .null_cursor => die("\"{s}\" is a null cursor", .{name}),
+                .iter_rw, .iter_ro => die("\"{s}\" is an iterator, not a cursor", .{name}),
             };
         }
 
         fn wrap(cursor: anytype) Binding {
             return if (@TypeOf(cursor) == RW) .{ .rw = cursor } else .{ .ro = cursor };
+        }
+
+        fn wrapIterator(iter: anytype) Binding {
+            return if (@TypeOf(iter) == *RW.Iter) .{ .iter_rw = iter } else .{ .iter_ro = iter };
+        }
+
+        /// the behaviours a valid script can't use, because the port corrects them
+        fn portDiffers(self: *Self, what: []const u8) void {
+            if (!self.allow_port_differences) die("{s} is a behaviour the port corrects, so a valid script can't use it", .{what});
         }
 
         // values
@@ -740,6 +845,18 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             if (v.bool != is_null) die("expected a {s} result, got a {s} one", .{ if (v.bool) "null" else "non-null", if (is_null) "null" else "non-null" });
         }
 
+        fn checkBytes(self: *Self, op: ObjectMap, got: anytype) void {
+            if (op.get("expect")) |v| {
+                const want = parseBytes(self.arena, v, "expect");
+                if (!std.mem.eql(u8, got.value, want)) die("expected bytes \"{s}\", got \"{s}\"", .{ want, got.value });
+            }
+            if (op.get("expect_format_tag")) |v| {
+                const want: ?[2]u8 = if (v == .null) null else parseFixedBytes(2, self.arena, v, "expect_format_tag");
+                if (want == null and got.format_tag != null) die("expected no format tag, got one", .{});
+                if (want != null and (got.format_tag == null or !std.mem.eql(u8, &want.?, &got.format_tag.?))) die("expected a different format tag", .{});
+            }
+        }
+
         fn checkSlot(op: ObjectMap, slot: ?Slot) void {
             const v = op.get("expect") orelse return;
             const want = v.object;
@@ -794,6 +911,73 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         fn openAs(self: *Self, comptime OtherHashInt: type) !void {
             _ = try xitdb.Database(kind, OtherHashInt).init(self.io, self.initOpts(self.out, null, null));
             die("the database opened with a hash size that isn't the script's, which is an undefined use", .{});
+        }
+
+        fn makeIterator(self: *Self, cursor: anytype, op: ObjectMap) !@TypeOf(cursor).Iter {
+            const Iter = @TypeOf(cursor).Iter;
+            if (op.get("from_key")) |v| return Iter.initSortedFromKey(cursor, parseBytes(self.arena, v, "from_key"));
+            if (op.get("from_index")) |v| {
+                const index = parseIndex(v, "from_index");
+                // each collection has its own call for this, and the others raise UnexpectedTag from any of them
+                return switch ((try cursor.slot()).tag) {
+                    .array_list => Iter.initArrayListFromIndex(cursor, index),
+                    .linked_array_list => Iter.initLinkedArrayListFromIndex(cursor, index),
+                    else => Iter.initSortedFromIndex(cursor, index),
+                };
+            }
+            return cursor.iterator();
+        }
+
+        /// an iterator keeps copies of the blocks it's part way through and reads the others
+        /// when it gets to them. so whatever is rewritten in place while it's running might
+        /// show or not, and that's nothing a second implementation should have to match.
+        fn checkIteratorUse(self: *Self, name: []const u8, entry: *const Entry) void {
+            const writes_by_then = if (entry.born == self.top_index) self.writes else self.writes_after_op.items[entry.born];
+            if (writes_by_then != entry.writes) die("iterator \"{s}\" is being used after a write in the transaction that made it, which is an undefined use", .{name});
+        }
+
+        /// Cursor.reader takes a short value's length from the cursor and its bytes from
+        /// the file, and needs the slot's position for that
+        fn checkStreamable(self: *Self, cursor: anytype) !void {
+            const slot = try cursor.slot();
+            switch (slot.tag) {
+                .none => self.portDiffers("streaming a slot set to nothing"),
+                .short_bytes => {
+                    const position = cursor.slot_ptr.position orelse return self.portDiffers("streaming a short value from a cursor with no position");
+                    if (position == ROOT_HEADER_START) return;
+                    var reader = self.db.core.reader();
+                    try reader.seekTo(position);
+                    var bytes: [9]u8 = undefined;
+                    try reader.interface.readSliceAll(&bytes);
+                    const current: Slot = @bitCast(std.mem.readInt(u72, &bytes, .big));
+                    if (!current.eql(slot)) self.portDiffers("streaming a short value after its slot has been overwritten");
+                },
+                else => {},
+            }
+        }
+
+        fn streamStep(self: *Self, reader: anytype, step: ObjectMap) !void {
+            if (step.get("seek")) |v| {
+                try reader.seekTo(asInt(u64, v, "seek"));
+            } else if (step.get("position")) |v| {
+                const want = asInt(u64, v, "position");
+                const got = reader.logicalPos();
+                if (got != want) die("expected the stream to be at {d}, but it's at {d}", .{ want, got });
+            } else {
+                const all = step.get("read_all");
+                const size = asInt(usize, all orelse step.get("read").?, "read");
+                const bytes = self.arena.alloc(u8, size) catch die("out of memory", .{});
+                var got: []const u8 = bytes;
+                if (all != null) {
+                    try reader.interface.readSliceAll(bytes);
+                } else {
+                    got = bytes[0..try reader.interface.readSliceShort(bytes)];
+                }
+                if (step.get("expect")) |v| {
+                    const want = parseBytes(self.arena, v, "expect");
+                    if (!std.mem.eql(u8, got, want)) die("expected the stream to give \"{s}\", and it gave \"{s}\"", .{ want, got });
+                }
+            }
         }
 
         fn writeRaw(self: *Self, offset: u64, bytes: []const u8) !void {
@@ -858,6 +1042,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     self.may_have_leftovers = true;
                 },
                 .write_path => {
+                    self.writes += 1;
                     const cursor = self.rwValue(cursorName(op));
                     const path = self.parsePath(op.get("path").?);
                     if (self.read_only_file != null) {
@@ -869,14 +1054,17 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     if (op.get("as")) |as| self.bind(as.string, .{ .rw = next });
                 },
                 .write => {
+                    self.writes += 1;
                     const data = self.parseData(op.get("data").?);
                     try self.rwPointer(cursorName(op)).write(data);
                 },
                 .write_if_empty => {
+                    self.writes += 1;
                     const data = self.parseData(op.get("data").?);
                     try self.rwPointer(cursorName(op)).writeIfEmpty(data);
                 },
                 .writer => {
+                    self.writes += 1;
                     const format_tag: ?[2]u8 = if (op.get("format_tag")) |tag| parseFixedBytes(2, self.arena, tag, "format_tag") else null;
                     var writer = try self.rwPointer(cursorName(op)).writer(&.{});
                     writer.format_tag = format_tag;
@@ -974,18 +1162,72 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     }
                 },
                 .read_bytes => {
+                    const max_size: ?usize = if (op.get("max_size")) |v| asInt(usize, v, "max_size") else null;
                     const got = switch (self.anyCursor(cursorName(op))) {
-                        inline .rw, .ro => |c| try c.readBytesObjectAlloc(self.arena, null),
+                        inline .rw, .ro => |c| try c.readBytesObjectAlloc(self.arena, max_size),
+                        else => unreachable,
+                    };
+                    self.checkBytes(op, got);
+                },
+                .read_bytes_into => {
+                    const size = asInt(usize, op.get("size").?, "size");
+                    const buffer = self.arena.alloc(u8, size) catch die("out of memory", .{});
+                    const got = switch (self.anyCursor(cursorName(op))) {
+                        inline .rw, .ro => |c| blk: {
+                            if (size > 0 and (try c.slot()).tag == .none) self.portDiffers("reading a slot set to nothing into a buffer that isn't empty");
+                            break :blk try c.readBytesObject(buffer);
+                        },
+                        else => unreachable,
+                    };
+                    self.checkBytes(op, got);
+                },
+                .read_stream => {
+                    const buffer_size: usize = if (op.get("buffer_size")) |v| asInt(usize, v, "buffer_size") else 0;
+                    const buffer = self.arena.alloc(u8, buffer_size) catch die("out of memory", .{});
+                    switch (self.anyCursor(cursorName(op))) {
+                        inline .rw, .ro => |c| {
+                            var cursor = c;
+                            try self.checkStreamable(cursor);
+                            var reader = try cursor.reader(buffer);
+                            for (op.get("steps").?.array.items) |step| try self.streamStep(&reader, step.object);
+                        },
+                        else => unreachable,
+                    }
+                },
+                .iterator => {
+                    switch (self.anyCursor(cursorName(op))) {
+                        inline .rw, .ro => |c| {
+                            const iter = self.arena.create(@TypeOf(c).Iter) catch die("out of memory", .{});
+                            iter.* = try self.makeIterator(c, op);
+                            self.bind(op.get("as").?.string, wrapIterator(iter));
+                        },
+                        else => unreachable,
+                    }
+                },
+                .next => {
+                    const name = cursorName(op);
+                    if (isKey(name, "root")) die("\"root\" is a cursor, not an iterator", .{});
+                    const entry = self.entryFor(name);
+                    const result: ?RO = switch (entry.binding) {
+                        inline .iter_rw, .iter_ro => |iter| blk: {
+                            self.checkIteratorUse(name, entry);
+                            break :blk try iter.next();
+                        },
+                        else => die("\"{s}\" is not an iterator", .{name}),
+                    };
+                    checkNull(op, result == null);
+                    if (op.get("as")) |as| self.bind(as.string, if (result) |c| .{ .ro = c } else .null_cursor);
+                },
+                .rank => {
+                    const key = parseBytes(self.arena, op.get("key").?, "key");
+                    const got = switch (self.anyCursor(cursorName(op))) {
+                        .rw => |c| try (try DB.SortedMap(.read_only).init(c.readOnly())).rank(key),
+                        .ro => |c| try (try DB.SortedMap(.read_only).init(c)).rank(key),
                         else => unreachable,
                     };
                     if (op.get("expect")) |v| {
-                        const want = parseBytes(self.arena, v, "expect");
-                        if (!std.mem.eql(u8, got.value, want)) die("expected bytes \"{s}\", got \"{s}\"", .{ want, got.value });
-                    }
-                    if (op.get("expect_format_tag")) |v| {
-                        const want: ?[2]u8 = if (v == .null) null else parseFixedBytes(2, self.arena, v, "expect_format_tag");
-                        if (want == null and got.format_tag != null) die("expected no format tag, got one", .{});
-                        if (want != null and (got.format_tag == null or !std.mem.eql(u8, &want.?, &got.format_tag.?))) die("expected a different format tag", .{});
+                        const want = asInt(u64, v, "expect");
+                        if (got != want) die("expected rank {d}, got {d}", .{ want, got });
                     }
                 },
                 .count => {
@@ -1019,6 +1261,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 self.top_index = i;
                 const before: ?u64 = if (self.closed) null else try self.db.committedSize();
                 self.execOp(op.object) catch |err| die("unexpected error {s}, which started at {s}", .{ @errorName(err), error_loc_buf[0..error_loc_len] });
+                self.writes_after_op.append(self.arena, self.writes) catch die("out of memory", .{});
                 const after: ?u64 = if (self.closed) null else try self.db.committedSize();
 
                 // an error handled here was fatal to the op, so if it was a
@@ -1049,7 +1292,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         }
 
         fn runScript(opts: Options) !void {
-            var validator: Self = .{ .arena = opts.arena, .validating = true };
+            var validator: Self = .{ .arena = opts.arena, .validating = true, .allow_port_differences = opts.allow_port_differences };
             validator.validateOps(opts.ops);
 
             const io = opts.io;
@@ -1060,7 +1303,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             defer buffer.deinit();
 
             var db: DB = undefined;
-            var self: Self = .{ .arena = opts.arena, .db = &db, .io = io, .out = out, .out_path = opts.out_path, .buffer = &buffer };
+            var self: Self = .{ .arena = opts.arena, .db = &db, .io = io, .out = out, .out_path = opts.out_path, .buffer = &buffer, .allow_port_differences = opts.allow_port_differences };
             db = try DB.init(io, self.initOpts(out, opts.file_id, opts.hash_id));
             const initial_size = try db.committedSize();
 
@@ -1107,7 +1350,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: run <script> <out.db> [--kind buffered_file|file|memory]\n", .{});
+    std.debug.print("usage: run <script> <out.db> [--kind buffered_file|file|memory] [--allow-port-differences]\n", .{});
     std.process.exit(2);
 }
 
@@ -1116,11 +1359,17 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
 
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len != 3 and args.len != 5) usage();
+    if (args.len < 3) usage();
     var kind: xitdb.DatabaseKind = .buffered_file;
-    if (args.len == 5) {
-        if (!std.mem.eql(u8, args[3], "--kind")) usage();
-        kind = std.meta.stringToEnum(xitdb.DatabaseKind, args[4]) orelse usage();
+    var allow_port_differences = false;
+    var arg_index: usize = 3;
+    while (arg_index < args.len) : (arg_index += 1) {
+        if (std.mem.eql(u8, args[arg_index], "--allow-port-differences")) {
+            allow_port_differences = true;
+        } else if (std.mem.eql(u8, args[arg_index], "--kind") and arg_index + 1 < args.len) {
+            arg_index += 1;
+            kind = std.meta.stringToEnum(xitdb.DatabaseKind, args[arg_index]) orelse usage();
+        } else usage();
     }
 
     const text = try Io.Dir.cwd().readFileAlloc(io, args[1], arena, .unlimited);
@@ -1156,6 +1405,7 @@ pub fn main(init: std.process.Init) !void {
                 .file_id = file_id,
                 .hash_id = hash_id,
                 .out_path = args[2],
+                .allow_port_differences = allow_port_differences,
             };
             switch (hash_size) {
                 8 => try Runner(k, u64).runScript(common),

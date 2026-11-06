@@ -87,10 +87,14 @@ It was produced from:
 - \`manifest.json\`: every script, what it needs, and whether it should pass or fail. \`collections\` says which of
   \`array_list\`, \`hash_map\`, \`linked_array_list\` and \`sorted_map\` its path parts use, whether or not they're
   reached. \`features\` says which of these it uses: \`reopen\` (closing and reopening), \`raw_file\` (writing to the
-  file directly while it's closed) and \`read_only\` (opening it read-only, which the memory storage kind can't do).
+  file directly while it's closed), \`read_only\` (opening it read-only, which the memory storage kind can't do),
+  \`iterators\` (\`iterator\` and \`next\`), \`rank\`, \`byte_stream\` (\`read_stream\`) and \`byte_buffers\`
+  (\`read_bytes_into\`, and \`max_size\` on \`read_bytes\`).
 - \`valid/<name>.json\`: a script that passes, with \`<name>.db\`, the file Zig wrote, and \`<name>.db.sidecar.json\`, its
-  committed sizes and commit IDs. Those called \`gen-<seed>\` come from the generator \`gen\`, and are harder to read,
-  but they do things in combinations nobody thought of.
+  committed sizes and commit IDs. Those called \`gen-<seed>\` and \`reads-<seed>\` come from the generator \`gen\`, and
+  are harder to read, but they do things in combinations nobody thought of. Those called \`deep-*\` have transactions of
+  hundreds of writes, and they're what tells copying from rewriting in place. These and \`iterator-tiers*\` come from
+  \`longscripts\`, because they're too long to write by hand.
 - \`failing/<name>.json\`: a well-formed script that must fail in every runner. The text after \`expected failure:\` in
   its description is why it fails in Zig, and it has no expected file, as there's nothing to compare.
 
