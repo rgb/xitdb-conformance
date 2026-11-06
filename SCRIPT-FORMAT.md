@@ -495,8 +495,8 @@ all three kinds, in debug and release builds.
 
 ## 11. Behaviour a runner must not fix
 
-All of these look like mistakes and all of them are what Zig does. `tests/valid/overwriting-committed-bytes.json`,
-`tests/valid/path-api-edges.json` and `tests/valid/every-construct.json` pin them down.
+All of these look like mistakes and all of them are what Zig does. `overwriting-committed-bytes`, `path-api-edges` and
+`every-construct` in `tests/valid/` pin them down, with `-linked` and `-sorted` versions for those collections.
 
 1. **The path API doesn't protect committed bytes.** A collection's init part is what copies it into the
    transaction, and nothing makes a path run one. A path that skips it writes straight into the committed collection,
