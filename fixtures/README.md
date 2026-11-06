@@ -5,7 +5,7 @@ What the Zig implementation of xitdb does, for a Swift port to match byte for by
 
 It was produced from:
 
-- conformance repository: commit `82e12c59e212a894d44b684fda523e2fff89e81b`
+- conformance repository: commit `b8b54fb8d9097fa1ad6156935f25ff18f47ed38e`
 - xitdb, the Zig original: commit `6b93af1af3a260399fa0a0b1b268ded2cbf5eec5`
 - Zig 0.17.1, with the runner `run` built in debug mode and using the `buffered_file` storage kind
 
@@ -14,7 +14,9 @@ It was produced from:
 ## What's here
 
 - `manifest.json`: every script, what it needs, and whether it should pass or fail. `collections` says which of
-  `array_list`, `hash_map`, `linked_array_list` and `sorted_map` its path parts use, whether or not they're reached.
+  `array_list`, `hash_map`, `linked_array_list` and `sorted_map` its path parts use, whether or not they're
+  reached. `features` says which of these it uses: `reopen` (closing and reopening), `raw_file` (writing to the
+  file directly while it's closed) and `read_only` (opening it read-only, which the memory storage kind can't do).
 - `valid/<name>.json`: a script that passes, with `<name>.db`, the file Zig wrote, and `<name>.db.sidecar.json`, its
   committed sizes and commit IDs.
 - `failing/<name>.json`: a well-formed script that must fail in every runner. The text after `expected failure:` in
