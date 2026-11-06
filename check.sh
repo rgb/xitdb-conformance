@@ -7,7 +7,8 @@
 # 3. the storage kind and the optimization level make no difference to the bytes;
 # 4. every script in tests/failing and tests/invalid fails, for the reason in its
 #    description;
-# 5. the fixtures haven't drifted from what the scripts produce now;
+# 5. the fixtures haven't drifted from what the scripts produce now, and that check
+#    notices drift;
 # 6. detcheck itself notices a changed byte.
 
 set -eu
@@ -80,8 +81,79 @@ echo "== scripts that must fail"
 expect_failures tests/failing
 expect_failures tests/invalid
 
+flip_byte() { # file, byte offset. flips every bit of that byte
+    old=$(od -An -tu1 -j "$2" -N 1 "$1" | tr -d ' ')
+    printf "$(printf '\\%03o' $((old ^ 255)))" | dd of="$1" bs=1 seek="$2" conv=notrunc 2> /dev/null
+}
+
 echo "== the fixtures"
 ./fixtures.sh --check
+
+echo "== the fixture check notices drift"
+COPY="$OUT/fixtures-copy"
+fresh_copy() {
+    rm -rf "$COPY"
+    cp -R fixtures "$COPY"
+}
+edit_file() { # file, sed expression
+    sed "$2" "$1" > "$1.edited"
+    mv "$1.edited" "$1"
+}
+expect_drift() { # what was changed in the copy, expected message
+    if FIXTURES="$COPY" ./fixtures.sh --check > "$OUT/drift.out" 2>&1; then
+        echo "the fixture check accepted $1"
+        exit 1
+    fi
+    if ! grep -qF -- "$2" "$OUT/drift.out"; then
+        echo "the fixture check rejected $1 for the wrong reason:"
+        cat "$OUT/drift.out"
+        exit 1
+    fi
+    echo "$1 is rejected"
+}
+fresh_copy
+flip_byte "$COPY/valid/worked-example.db" 400
+expect_drift "a changed byte in an expected file" "worked-example has drifted"
+fresh_copy
+flip_byte "$COPY/valid/worked-example.db" 422
+expect_drift "a commit ID that doesn't match its checksum" "worked-example has drifted"
+fresh_copy
+edit_file "$COPY/valid/worked-example.db.sidecar.json" 's/"committed_size": 438/"committed_size": 439/'
+expect_drift "a wrong size in a sidecar" "worked-example has drifted"
+fresh_copy
+edit_file "$COPY/valid/worked-example.db.sidecar.json" 's/"initial_size": 62,/"initial_size":  62,/'
+expect_drift "a change to a sidecar's layout" "worked-example's sidecar has drifted"
+fresh_copy
+printf ' ' >> "$COPY/valid/worked-example.json"
+expect_drift "a changed script" "worked-example differs from the script"
+fresh_copy
+rm "$COPY/valid/worked-example.db"
+expect_drift "a missing expected file" "worked-example has no expected file"
+fresh_copy
+rm "$COPY/valid/worked-example.json"
+expect_drift "a missing script" "worked-example is missing"
+fresh_copy
+rm "$COPY/failing/wrong-uint.json"
+expect_drift "a missing failing script" "wrong-uint is missing"
+fresh_copy
+touch "$COPY/valid/not-a-script.json"
+expect_drift "an extra script" "has no source script"
+fresh_copy
+touch "$COPY/failing/not-a-script.json"
+expect_drift "an extra failing script" "has no source script"
+fresh_copy
+edit_file "$COPY/manifest.json" 's/"name": "hash-size-8", \(.*\)"collections": \["hash_map"\]/"name": "hash-size-8", \1"collections": []/'
+expect_drift "wrong collections in the manifest" "manifest.json has drifted"
+fresh_copy
+edit_file "$COPY/manifest.json" 's/"zig_commit": "[0-9a-f]*"/"zig_commit": "0000"/'
+expect_drift "a wrong Zig commit in the manifest" "manifest.json has drifted"
+fresh_copy
+edit_file "$COPY/manifest.json" 's/"conformance_commit": "[0-9a-f]*"/"conformance_commit": "0123456789"/'
+expect_drift "a conformance commit from elsewhere" "isn't in this branch's history"
+fresh_copy
+printf ' ' >> "$COPY/README.md"
+expect_drift "a changed README" "README.md has drifted"
+rm -rf "$COPY"
 
 echo "== detcheck notices changes"
 A="$OUT/01-list-root-hash-map.a.db"
@@ -90,9 +162,7 @@ expect_detcheck_failure() { # byte offset, what's there, expected message
     corrupt="$OUT/corrupt.db"
     cp "$B" "$corrupt"
     cp "$B.sidecar.json" "$corrupt.sidecar.json"
-    # flip every bit of that byte
-    old=$(od -An -tu1 -j "$1" -N 1 "$B" | tr -d ' ')
-    printf "$(printf '\\%03o' $((old ^ 255)))" | dd of="$corrupt" bs=1 seek="$1" conv=notrunc 2> /dev/null
+    flip_byte "$corrupt" "$1"
     if "$DET" "$A" "$corrupt" > /dev/null 2> "$OUT/det.err"; then
         echo "detcheck accepted a change in $2"
         exit 1

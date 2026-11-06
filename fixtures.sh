@@ -15,7 +15,8 @@ cd "$(dirname "$0")"
 RUN=$PWD/zig-out/bin/run
 DET=$PWD/zig-out/bin/detcheck
 MANIFEST=$PWD/zig-out/bin/manifest
-FIXTURES=fixtures
+# check.sh points this at a copy to show that --check notices drift
+FIXTURES=${FIXTURES:-fixtures}
 ZIG_ORIGINAL=../../xitdb
 
 MODE=update
