@@ -7,9 +7,10 @@
 # 3. the storage kind and the optimization level make no difference to the bytes;
 # 4. every script in tests/failing and tests/invalid fails, for the reason in its
 #    description;
-# 5. the fixtures haven't drifted from what the scripts produce now, and that check
+# 5. the hand-written scripts use everything in the format;
+# 6. the fixtures haven't drifted from what the scripts produce now, and that check
 #    notices drift;
-# 6. detcheck itself notices a changed byte.
+# 7. detcheck itself notices a changed byte.
 
 set -eu
 cd "$(dirname "$0")"
@@ -99,6 +100,29 @@ flip_byte() { # file, byte offset. flips every bit of that byte
     old=$(od -An -tu1 -j "$2" -N 1 "$1" | tr -d ' ')
     printf "$(printf '\\%03o' $((old ^ 255)))" | dd of="$1" bs=1 seek="$2" conv=notrunc 2> /dev/null
 }
+
+echo "== coverage of the format by the hand-written scripts"
+COVERAGE=zig-out/bin/coverage
+"$COVERAGE" scripts/*.json tests/valid/*.json
+# it can fail both ways: too little used, and something used that isn't on its list
+status=0
+"$COVERAGE" tests/valid/worked-example.json 2> "$OUT/coverage.err" || status=$?
+if [ "$status" -ne 1 ] || ! grep -qF "nothing uses op:writer" "$OUT/coverage.err"; then
+    echo "coverage should have noticed what one script doesn't use"
+    exit 1
+fi
+echo "coverage notices what's missing"
+cat > "$OUT/coverage-extra.json" <<'SCRIPT'
+{ "format": "xitdb-script/1", "hash_size": 20, "hash_id": null, "file_id": "0000000000000001",
+  "ops": [{ "op": "slot", "on": "root", "expect": { "tag": "index" } }] }
+SCRIPT
+status=0
+"$COVERAGE" scripts/*.json tests/valid/*.json "$OUT/coverage-extra.json" 2> "$OUT/coverage.err" || status=$?
+if [ "$status" -ne 1 ] || ! grep -qF "expect_tag:index is used, but it isn't on this tool's list" "$OUT/coverage.err"; then
+    echo "coverage should have noticed something that isn't on its list"
+    exit 1
+fi
+echo "coverage notices what's not on its list"
 
 echo "== the fixtures"
 ./fixtures.sh --check

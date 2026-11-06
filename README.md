@@ -17,6 +17,7 @@ independent of the Swift code.
   are committed, which `gen-fixed.sh` writes, and `gen-live.sh <how many>` runs as many fresh seeds as you like.
 - `fixtures/`: every script with what Zig produces for it, which the Swift package copies into its test resources.
   `fixtures.sh` regenerates it, and `src/manifest.zig` lists what each script needs.
+- `src/coverage.zig`: `coverage <script>...`, which checks that the scripts use everything in the format.
 - `check.sh`: the gate. It builds everything and checks all of the above, in debug and release builds and across
   all three storage kinds.
 

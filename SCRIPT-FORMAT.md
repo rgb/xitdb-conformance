@@ -13,9 +13,9 @@ Every script a second runner is given has been accepted by `run`, which checks a
 running any of it ([section 10](#10-valid-scripts-and-script-failures)). So the rules below on how things are
 written are promises to a second runner, and it needn't enforce them.
 
-`scripts/` holds the hand-written scripts, and between them `scripts/` and `tests/valid/` run every op, every path
-part and the forms of value in section 2. The file format itself is described in
-`../director/research/file-format.md`.
+`scripts/` holds the hand-written scripts, and between them `scripts/` and `tests/valid/` use every op, path part, form
+of value and error name in this document, which `src/coverage.zig` checks in the gate. The file format itself is
+described in `../director/research/file-format.md`.
 
 ## 1. The document
 

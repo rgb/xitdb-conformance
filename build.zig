@@ -47,4 +47,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(gen_exe);
+
+    const coverage_exe = b.addExecutable(.{
+        .name = "coverage",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/coverage.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(coverage_exe);
 }
