@@ -13,8 +13,9 @@ Every script a second runner is given has been accepted by `run`, which checks a
 running any of it ([section 10](#10-valid-scripts-and-script-failures)). So the rules below on how things are
 written are promises to a second runner, and it needn't enforce them.
 
-`scripts/` holds the hand-written scripts, and between them `scripts/` and `tests/valid/` run every op, path part
-and form of value in this document. The file format itself is described in `../director/research/file-format.md`.
+`scripts/` holds the hand-written scripts, and between them `scripts/` and `tests/valid/` run every op, every path
+part and the forms of value in section 2. The file format itself is described in
+`../director/research/file-format.md`.
 
 ## 1. The document
 
@@ -44,8 +45,8 @@ the database commits an empty root with commit ID 0, which gives the 62-byte fil
 Fields may be in any order, and a field never appears twice. Every op may have a `note` field, a string that is
 ignored.
 
-**A runner must fail on a field, op, path part or tag it doesn't know.** Ignoring one would silently weaken the
-check, for instance when a later version of the format adds an op.
+**A runner must fail on a `format` it doesn't know, and when it reaches a field, op, path part or tag it doesn't
+know.** Ignoring one would silently weaken the check.
 
 ## 2. Values
 
@@ -71,12 +72,13 @@ Either form, wherever this document says *bytes*:
 
 - a JSON string: the UTF-8 encoding of the string after JSON unescaping. Nothing is normalized: `"é"` is
   the 3 bytes `65 cc 81`, not the 2 bytes of `é`. In Swift, take `.utf8` of the string, and compare bytes rather
-  than `String`s, because `String` equality treats those two as equal.
+  than `String`s, because `String` equality treats those two as equal. U+FEFF isn't used in this form, because
+  Swift's `JSONSerialization` drops one from the start of a string: those bytes are written as hex.
 - `{"hex": "610062"}`: an even number of lowercase hex digits, the bytes in order. The empty string is allowed.
 
 Whether a value ends up inline in its slot (`short_bytes`) or in a record of its own (`bytes`) is the engine's
-decision, based on the value's bytes and whether it has a format tag. A script can't ask for either, except that
-`writer` always produces `bytes`.
+decision, based on the value's bytes and whether it has a format tag. The only ways a script can ask for either are
+that `writer` always produces `bytes`, and a literal slot can be `short_bytes`.
 
 ### Format tags
 
@@ -115,6 +117,9 @@ Write data and `linked_array_list_concat` take a slot, which is one of:
   is, whatever it means.
 - `null`: no slot. Only write data takes one, being `?Slot` in Zig. A `{"var": NAME}` that holds null counts as
   `null`, and that is a script failure in `linked_array_list_concat`.
+
+A slot with the tag `index`, `kv_pair` or `sorted_kv_pair` is part of a collection's structure rather than a value.
+It can be read into a name, but writing it is an undefined use ([section 10](#10-valid-scripts-and-script-failures)).
 
 The tag names used elsewhere, in `expect`, are those of the `Tag` enum: `none`, `index`, `array_list`,
 `linked_array_list`, `hash_map`, `kv_pair`, `bytes`, `short_bytes`, `uint`, `int`, `float`, `hash_set`,
@@ -201,9 +206,11 @@ The snapshot:
 - `write_path` starts by reading the slot at the cursor's position again, if it has one, so its result sees the
   present.
 
-The freeze point, which is the `frozen_at` of a Zig cursor:
+The freeze point, which is the `frozen_at` of a Zig cursor, is a file position. Writes through the cursor copy
+anything written before it, instead of changing it in place, even if the current transaction wrote it
+(`isOld`, `lib.zig:840`). A cursor with no freeze point copies only what's older than the transaction.
 
-- `freeze` sets it on the cursor it's called on.
+- `freeze` sets it to the current end of the file, on the cursor it's called on.
 - The result of `write_path`, the cursors from `read_key_value_pair` and the cursor given to a callback take it from
   the cursor they were made through. A cursor from `run_context` starts with none.
 - Cursors from `read_path` and `read_only` don't have one. They're read-only, so it wouldn't matter.
@@ -211,14 +218,18 @@ The freeze point, which is the `frozen_at` of a Zig cursor:
 
 **A root cursor is the exception**, read-write or read-only: everything it does reads the root from the last commit,
 so it's never stale. That means it doesn't see a transaction in progress either: `count` on a root list inside a
-callback gives the count from before the transaction.
+callback gives the count from before the transaction. `root` is one, and so is `read_only` on one, but `read_path` on
+one isn't, even with an empty path: it gives a cursor pinned to that commit.
 
 ### What a kept cursor can do
 
 `write_path` returns a root cursor if its path ended at the root, as a lone `hash_map_init` does, and every write
 through that cursor is a transaction of its own. Any other cursor from a finished transaction can still be read.
-Writing through it fails with `ExpectedTxStart` between transactions, and doing so during a later transaction is
-an undefined use ([section 10](#10-valid-scripts-and-script-failures)).
+Writing through it fails with `ExpectedTxStart` between transactions, and works during a later transaction, where it
+overwrites committed bytes ([section 11](#11-behaviour-a-runner-must-not-fix)).
+
+Using a cursor or a slot from a transaction that was rolled back is an undefined use
+([section 10](#10-valid-scripts-and-script-failures)).
 
 ## 5. Ops
 
@@ -300,9 +311,9 @@ cursor ends with the callback, as far as the outer result goes.
 The callback runs when the path reaches it, and only then. If an earlier part fails, it doesn't run. In a read
 path, `ctx` fails with `WriteNotAllowed` without running. Ops inside a callback are evaluated when they run.
 
-Callbacks nest to any depth. A callback's `as` is different from the `as` of every callback written around it, and
-it can be the same as one that isn't. A cursor kept in a callback can be written through from a callback nested in
-it, or after it has ended, for as long as the transaction lasts.
+Callbacks nest up to 64 deep. Each one is 5 levels of JSON, and Swift's JSON parsers stop at 512 levels. A callback's
+`as` is different from the `as` of every callback written around it, and it can be the same as one that isn't. A
+cursor kept in a callback can be written through from a callback nested in it, or after it has ended.
 
 ## 7. Errors
 
@@ -333,10 +344,13 @@ and those stay.
   ```
 
   `hash_map_get` creates the entry for `b`, then `array_list_get` fails. After the commit `b` exists with an empty
-  value. A freeze, and the advance of `tx_start` by `linked_array_list_concat`, aren't undone either.
+  value. A freeze isn't undone either, and nor is what `linked_array_list_concat` does to the engine's `tx_start`, the
+  position before which it treats all data as old (`lib.zig:1194`).
+
+Truncating is all a rollback does, so it doesn't undo a write that landed before the transaction's start (section 11).
 
 **Error names** are Zig's: `@errorName`, without `error.`. A second runner maps its own errors to these names.
-The ones scripts expect:
+`expect_error` names one of these, and no others:
 
 | Name | From |
 |---|---|
@@ -349,8 +363,8 @@ The ones scripts expect:
 | `PathPartMustBeAtEnd` | a `ctx` part that isn't last |
 | `ScriptAbort` | the `fail` op. It isn't an engine error, but it travels like one |
 
-The engine has more errors than these, like `EndOfStream` and `InvalidEnumTag`. Reaching them takes an undefined use,
-a corrupt file, or a call scripts can't make, so no script expects them.
+The engine has more errors than these, like `EndOfStream` and `KeyOffsetExceeded`. Reaching them takes an undefined
+use, a corrupt file, or a call scripts can't make.
 
 ## 8. Transactions and commit IDs
 
@@ -429,7 +443,7 @@ The Zig runner truncates `<out.db>`, runs the script, and writes the file and th
 | 1 | the script isn't valid or it failed, or a file couldn't be opened. The output files must not be used |
 | 2 | wrong command line |
 
-A panic in the engine means an undefined use or an engine bug. No script accepted by `check.sh` causes one.
+A panic in the engine means an undefined use or an engine bug, and no script in this repository causes one.
 
 A second runner reads a script and a sidecar. How it's started is up to it, and it needn't write a sidecar. The three
 kinds of problem below matter to it differently.
@@ -439,7 +453,8 @@ kinds of problem below matter to it differently.
 Being well-formed is everything sections 1 to 6 say about how a script is written. `run` checks all of it, for the
 whole script, before it creates the database. That includes ops that are never reached, fields that would only be
 looked at if a call finished, and the bodies of callbacks that never run. `run` also fails on a duplicate field,
-`1.0`, `1e0`, `-0`, a trailing comma and a byte order mark. `tests/invalid/` has a script for each of these rules.
+`1.0`, `1e0`, `-0`, a trailing comma and a byte order mark. `tests/invalid/` has scripts it has to reject, and these
+include the undefined uses it can catch.
 
 So a script `run` has accepted is well-formed everywhere. A second runner can decode all of it up front or take it
 piece by piece, and need not reject any of the above. Swift's JSON parsers accept several of them, and it doesn't
@@ -460,6 +475,9 @@ The runner stops there. **A second runner must do this too.** Each script in `te
 fail in every runner. The text after `expected failure:` in each one's `description` is the reason in Zig's message;
 message wording isn't part of this format.
 
+These scripts have no sidecar, because a failed run leaves no file to compare. Some commit before they fail, so the
+random source has to return something, and any values will do.
+
 ### An undefined use
 
 Things a well-formed script could say, whose results aren't defined. Scripts don't contain them, and a second runner
@@ -467,41 +485,47 @@ needn't handle them. They are kept out like this:
 
 | Use | What Zig does | How it's kept out |
 |---|---|---|
-| Writing, during a transaction, through a cursor kept from an earlier one | overwrites committed bytes in place | `run` fails, as it does with the next one, though the engine wouldn't |
-| Using a cursor or a slot from a transaction that was rolled back | reads whatever is at that offset by then | `run` fails |
-| Reading, before the commit, a gap left by a `writer` that seeked past the end | `EndOfStream` on `buffered_file`, zeros on `file` and `memory`, with the same committed bytes on all three | `check.sh` runs every script on all three kinds |
-| Two keys sharing their lowest 64 nibbles, at a hash size above 32 | a depth counter overflows, which panics in a debug build | `run` is a debug build. Real hashes would need a 256-bit collision |
+| Using a cursor or a slot from a transaction that was rolled back | reads whatever is at that offset by then, which can be anything | `run` fails |
+| Writing a slot whose tag is `index`, `kv_pair` or `sorted_kv_pair` | follows it as if it had been built there, which ends in errors like `KeyOffsetExceeded` | `run` fails |
+| Reading, before the commit, a gap left by a `writer` that seeked past the end | zeros on `file` and `memory`. On `buffered_file`, `EndOfStream` until the gap has been flushed, and zeros after that. The committed bytes are the same on all three | `EndOfStream` can't be expected, and `check.sh` runs every script on all three kinds. A read that gets zeros everywhere isn't caught |
+| A trie 64 levels deep, at a hash size above 32. Two keys need to share their lowest 64 nibbles, which for real hashes would take a 256-bit collision | a depth counter overflows, which panics in a debug build | `run` is a debug build |
 
 **Storage kinds don't otherwise change the bytes.** `check.sh` holds every script in this repository to that, across
 all three kinds, in debug and release builds.
 
 ## 11. Behaviour a runner must not fix
 
-All of these look like mistakes and all of them are what Zig does. `tests/valid/path-api-edges.json` and
-`tests/valid/every-construct.json` pin them down.
+All of these look like mistakes and all of them are what Zig does. `tests/valid/overwriting-committed-bytes.json`,
+`tests/valid/path-api-edges.json` and `tests/valid/every-construct.json` pin them down.
 
-1. **A remove ends the path.** `hash_map_remove` and `sorted_map_remove` return without looking at the parts after
+1. **The path API doesn't protect committed bytes.** A collection's init part is what copies it into the
+   transaction, and nothing makes a path run one. A path that skips it writes straight into the committed collection,
+   so earlier moments change: a list grows, an element changes, a map gets a key. A write through a cursor kept from
+   an earlier transaction does the same, however many new cursors were made from it in between. Neither is an error,
+   and a rollback doesn't undo them, because truncating only removes bytes past the commit. The collection wrappers
+   don't do this, because they always run the init part. Storage kinds agree on the result.
+2. **A remove ends the path.** `hash_map_remove` and `sorted_map_remove` return without looking at the parts after
    them, with no error. A `write` after one does nothing, and a `ctx` after one doesn't run.
-2. **`write_path` doesn't update the cursor it's called on** (section 4), so a callback that only uses `write_path`
+3. **`write_path` doesn't update the cursor it's called on** (section 4), so a callback that only uses `write_path`
    on its own cursor returns its old slot.
-3. **A failed path keeps what it wrote** if the error is handled in a callback (section 7). For example,
+4. **A failed path keeps what it wrote** if the error is handled in a callback (section 7). For example,
    `{"sorted_map_get": {"key": "b"}}` followed by `{"write": ...}` fails with `CursorNotWriteable` after inserting
    `b`.
-4. **`sorted_map_get_index` only works in a read path.** It's the one getter that fails with `WriteNotAllowed` in
+5. **`sorted_map_get_index` only works in a read path.** It's the one getter that fails with `WriteNotAllowed` in
    a write path.
-5. **A sorted map's key can be written one way but not the other.** Through `{"sorted_map_get": {"key": ...}}` the
+6. **A sorted map's key can be written one way but not the other.** Through `{"sorted_map_get": {"key": ...}}` the
    cursor has no position, so writing fails with `CursorNotWriteable`. Through `read_key_value_pair` on a
    `{"sorted_map_get": {"kv_pair": ...}}` cursor, it has one, so writing works, and writing a different key would
    break the order.
-6. **Asking a set for a pair changes the entry.** `{"sorted_map_get": {"kv_pair": ...}}` in a write path moves a
+7. **Asking a set for a pair changes the entry.** `{"sorted_map_get": {"kv_pair": ...}}` in a write path moves a
    key-only entry into a `sorted_kv_pair`, even in a `sorted_set`.
-7. **Writing `none` sets `full`, and keeps the value.** `{"write": {"slot": {"tag": "none", "value": 5}}}` writes
+8. **Writing `none` sets `full`, and keeps the value.** `{"write": {"slot": {"tag": "none", "value": 5}}}` writes
    tag `none`, `full` set, value 5.
-8. **Nothing stops a stale snapshot being used** (section 4). `read_uint` on a cursor whose slot has since been
+9. **Nothing stops a stale snapshot being used** (section 4). `read_uint` on a cursor whose slot has since been
    written reports `UnexpectedTag` if the old slot wasn't a `uint`, and `write_if_empty` overwrites a value it can't
    see.
-9. **A freeze doesn't leave a callback** (section 6). A cursor that the outer `write_path` returns isn't frozen,
-   even if its callback froze the cursor it was given.
+10. **A freeze doesn't leave a callback** (section 6). The cursor the outer `write_path` returns has the freeze point
+   of the cursor it was called on, whatever its callback did to the cursor it was given.
 
 ## 12. Worked example
 
