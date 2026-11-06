@@ -264,7 +264,7 @@ left out. `expect` and its relatives are checked after the call and are describe
 | `count` | `on`, `expect?` | `on.count()` | |
 | `iterator` | `on`, `from_index?` or `from_key?`, `as` | see below | `as`: an iterator |
 | `next` | `on`, `as?`, `expect_null?` | `on.next()`, `on` being an iterator | `as`: a read-only cursor, or a null cursor |
-| `rank` | `on`, `key`, `expect?` | the `rank` of a `SortedMap(.read_only)` or `SortedSet(.read_only)` on the cursor. It's the number of keys less than `key`, which needn't be there | |
+| `rank` | `on`, `key`, `expect?` | the `rank` of a `SortedMap(.read_only)` or `SortedSet(.read_only)` on the cursor. It's the number of keys less than `key`, which needn't be there. It's 0 on a slot with nothing in it, and it raises `UnexpectedTag` on a slot that isn't a sorted map or set, going by the tag alone | |
 
 `write_path`, `write`, `write_if_empty`, `writer`, `freeze` and `read_only` need a read-write cursor. The others
 take either kind. `size`, `buffer_size` and the sizes in `read_stream`'s steps go up to 2²⁴. These reads change no
