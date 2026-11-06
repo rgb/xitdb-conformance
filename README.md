@@ -11,7 +11,8 @@ independent of the Swift code.
 - `scripts/`: hand-written scripts for the hard parts of the format.
 - `tests/valid/`: scripts that run the rest of the format, including its corners.
 - `tests/failing/`: well-formed scripts that must fail in every runner, each for the reason in its description.
-- `tests/invalid/`: scripts that `run` must reject before running them. A second runner never sees these.
+- `tests/invalid/`: scripts that `run` must reject, before running them or, for an undefined use, when it gets there.
+  A second runner never sees these.
 - `check.sh`: the gate. It builds everything and checks all of the above, in debug and release builds and across
   all three storage kinds.
 

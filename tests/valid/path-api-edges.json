@@ -95,9 +95,12 @@
       ] } }
     ] },
     { "op": "read_only", "on": "root", "as": "root_read", "note": "a read-only root cursor is never stale either" },
+    { "op": "read_path", "on": "root", "path": [], "as": "root_snapshot", "note": "but read_path gives a cursor pinned to this commit, even with an empty path" },
     { "op": "count", "on": "root_read", "expect": 2 },
+    { "op": "count", "on": "root_snapshot", "expect": 2 },
     { "op": "write_path", "on": "root", "path": ["array_list_init", "array_list_append", { "write": { "uint": 3 } }] },
     { "op": "count", "on": "root_read", "expect": 3 },
+    { "op": "count", "on": "root_snapshot", "expect": 2 },
     { "op": "writer", "on": "first", "steps": [{ "write": "x" }], "expect_error": "ExpectedTxStart", "note": "the transaction is over" },
     { "op": "write_path", "on": "first", "path": [], "as": "first", "note": "an empty path needs no transaction" },
     { "op": "read_uint", "on": "first", "expect": 8 }

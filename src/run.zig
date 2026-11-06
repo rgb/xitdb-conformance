@@ -29,6 +29,23 @@ const SIDECAR_FORMAT = "xitdb-sidecar/1";
 /// every storage kind, and away from overflowing the writer's position.
 const MAX_SEEK = 1 << 24;
 
+/// callbacks nest this deep at most. each one is 5 levels of JSON, and Swift's JSON
+/// parsers stop at 512 levels, while this runner's stack lasts for about 300 callbacks.
+const MAX_CALLBACK_DEPTH = 64;
+
+/// what expect_error can name. the engine has other errors, but reaching them takes
+/// an undefined use or a corrupt file, so a script has no business expecting them.
+const ERROR_NAMES = [_][]const u8{
+    "KeyNotFound",
+    "UnexpectedTag",
+    "WriteNotAllowed",
+    "CursorNotWriteable",
+    "ExpectedTxStart",
+    "NestedTopLevelWrite",
+    "PathPartMustBeAtEnd",
+    "ScriptAbort",
+};
+
 // where the runner is in the script, for messages only
 
 var loc_buf: [4096]u8 = undefined;
@@ -106,7 +123,7 @@ fn asInt(comptime T: type, v: Json, what: []const u8) T {
 }
 
 fn required(obj: ObjectMap, key: []const u8, what: []const u8) Json {
-    return obj.get(key) orelse die("{s} needs a \"{s}\" field", .{ what, key });
+    return obj.get(key) orelse die("{s} needs a field called {s}", .{ what, key });
 }
 
 fn checkKeys(obj: ObjectMap, allowed: []const []const u8, what: []const u8) void {
@@ -151,7 +168,11 @@ fn parseHex64(arena: Allocator, v: Json, what: []const u8) u64 {
 /// a byte string: a JSON string (its UTF-8 encoding) or {"hex": "..."}
 fn parseBytes(arena: Allocator, v: Json, what: []const u8) []const u8 {
     switch (v) {
-        .string => |s| return s,
+        .string => |s| {
+            // JSONSerialization in Swift silently drops one of these from the start of a string
+            if (std.mem.find(u8, s, "\xef\xbb\xbf") != null) die("{s}: U+FEFF can't be in a string, so write these bytes as hex", .{what});
+            return s;
+        },
         .object => |o| {
             checkKeys(o, &.{"hex"}, what);
             return parseHex(arena, asString(required(o, "hex", what), what), what);
@@ -182,6 +203,13 @@ fn checkName(name: []const u8, what: []const u8) void {
 fn checkBindable(name: []const u8, what: []const u8) void {
     checkName(name, what);
     if (isKey(name, "root")) die("\"root\" can't be bound", .{});
+}
+
+fn checkErrorName(name: []const u8) void {
+    for (ERROR_NAMES) |known| {
+        if (isKey(name, known)) return;
+    }
+    die("expect_error can't name \"{s}\"", .{name});
 }
 
 /// an optional field that binds a name
@@ -256,8 +284,6 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         const Data = DB.WriteableData;
         const HASH_SIZE = @bitSizeOf(HashInt) / 8;
 
-        // where the root cursor points, which is the root header
-        const ROOT_POSITION = 20;
         // the trailer's size, and where the commit ID is inside it
         const TRAILER_SIZE = 25;
         const TRAILER_COMMIT_ID_OFFSET = 9;
@@ -272,7 +298,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
 
         const Entry = struct {
             binding: Binding,
-            // the top-level op it was bound in, for finding undefined uses
+            // the top-level op it was bound in, to find uses after a rollback
             born: usize,
         };
 
@@ -329,7 +355,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             checkKeys(op, opFields(kind_of_op), name);
 
             if (op.get("note")) |note| _ = asString(note, "note");
-            if (op.get("expect_error")) |err| checkName(asString(err, "expect_error"), "expect_error");
+            if (op.get("expect_error")) |err| checkErrorName(asString(err, "expect_error"));
             if (kind_of_op != .run_context and kind_of_op != .db_freeze and kind_of_op != .fail) {
                 checkName(asString(required(op, "on", name), "on"), "on");
             }
@@ -466,19 +492,6 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             return if (@TypeOf(cursor) == RW) .{ .rw = cursor } else .{ .ro = cursor };
         }
 
-        /// writing to a cursor kept from an earlier transaction overwrites committed
-        /// bytes. the engine allows it, so stop it here to keep it out of any fixture.
-        fn checkNotStale(self: *Self, name: []const u8) void {
-            if (isKey(name, "root") or self.db.tx_start == null) return;
-            const entry = self.env.get(name) orelse return;
-            switch (entry.binding) {
-                .rw => |c| if (entry.born != self.top_index and c.slot_ptr.position != ROOT_POSITION) {
-                    die("\"{s}\" comes from an earlier transaction and can't be written to in this one, which is an undefined use", .{name});
-                },
-                else => {},
-            }
-        }
-
         // values
 
         fn parseHash(self: *Self, v: Json) HashInt {
@@ -535,7 +548,18 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
 
         fn parseData(self: *Self, v: Json) Data {
             const only = onlyKey(asObject(v, "write data"), "write data");
-            if (isKey(only.key, "slot")) return .{ .slot = self.parseSlot(only.value) };
+            if (isKey(only.key, "slot")) {
+                const slot = self.parseSlot(only.value);
+                if (slot) |s| {
+                    switch (s.tag) {
+                        // part of a collection's structure. written anywhere, the engine
+                        // would follow it as if it had been built there, which is an undefined use
+                        .index, .kv_pair, .sorted_kv_pair => die("a slot with the tag {s} can't be written, which is an undefined use", .{@tagName(s.tag)}),
+                        else => {},
+                    }
+                }
+                return .{ .slot = slot };
+            }
             if (isKey(only.key, "uint")) return .{ .uint = asInt(u64, only.value, "uint") };
             if (isKey(only.key, "int")) return .{ .int = asInt(i64, only.value, "int") };
             if (isKey(only.key, "float")) return .{ .float = @bitCast(parseHex64(self.arena, only.value, "float")) };
@@ -648,6 +672,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             const ops = asArray(required(o, "ops", "a callback"), "ops");
             if (self.validating) {
                 checkBindable(name, "a callback's as");
+                if (self.enclosing.items.len == MAX_CALLBACK_DEPTH) die("callbacks can't nest more than {d} deep", .{@as(u32, MAX_CALLBACK_DEPTH)});
                 for (self.enclosing.items) |enclosing| {
                     if (isKey(enclosing, name)) die("callback name \"{s}\" is already used by a callback around this one", .{name});
                 }
@@ -714,33 +739,22 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
 
             switch (kind_of_op) {
                 .write_path => {
-                    const name = cursorName(op);
-                    const cursor = self.rwValue(name);
+                    const cursor = self.rwValue(cursorName(op));
                     const path = self.parsePath(op.get("path").?);
-                    if (path.len > 0) self.checkNotStale(name);
                     const next = try cursor.writePath(Ctx, path);
                     if (op.get("as")) |as| self.bind(as.string, .{ .rw = next });
                 },
                 .write => {
-                    const name = cursorName(op);
                     const data = self.parseData(op.get("data").?);
-                    const cursor = self.rwPointer(name);
-                    self.checkNotStale(name);
-                    try cursor.write(data);
+                    try self.rwPointer(cursorName(op)).write(data);
                 },
                 .write_if_empty => {
-                    const name = cursorName(op);
                     const data = self.parseData(op.get("data").?);
-                    const cursor = self.rwPointer(name);
-                    self.checkNotStale(name);
-                    try cursor.writeIfEmpty(data);
+                    try self.rwPointer(cursorName(op)).writeIfEmpty(data);
                 },
                 .writer => {
-                    const name = cursorName(op);
                     const format_tag: ?[2]u8 = if (op.get("format_tag")) |tag| parseFixedBytes(2, self.arena, tag, "format_tag") else null;
-                    const cursor = self.rwPointer(name);
-                    self.checkNotStale(name);
-                    var writer = try cursor.writer(&.{});
+                    var writer = try self.rwPointer(cursorName(op)).writer(&.{});
                     writer.format_tag = format_tag;
                     for (op.get("steps").?.array.items) |step_value| {
                         const step = onlyKey(step_value.object, "a writer step");

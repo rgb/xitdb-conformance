@@ -1,7 +1,0 @@
-{ "format": "xitdb-script/1", "description": "expected failure: comes from an earlier transaction", "hash_size": 20, "hash_id": null, "file_id": "0000000000000001",
-  "ops": [
-    { "op": "write_path", "on": "root", "path": ["array_list_init", "array_list_append", { "write": { "uint": 1 } }], "as": "kept" },
-    { "op": "write_path", "on": "root", "path": ["array_list_init", "array_list_append", { "ctx": { "as": "c", "ops": [
-      { "op": "write_path", "on": "kept", "path": [{ "write": { "uint": 99 } }] }
-    ] } }] }
-  ] }

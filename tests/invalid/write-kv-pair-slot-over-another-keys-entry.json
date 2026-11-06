@@ -1,0 +1,6 @@
+{ "format": "xitdb-script/1", "description": "expected failure: a slot with the tag kv_pair can't be written", "hash_size": 20, "hash_id": null, "file_id": "0000000000000001",
+  "ops": [
+    { "op": "write_path", "on": "root", "path": [{ "hash_map_init": {} }, { "hash_map_get": { "value": { "sha1": "a" } } }, { "write": { "uint": 1 } }] },
+    { "op": "read_path_slot", "on": "root", "path": [{ "hash_map_get": { "kv_pair": { "sha1": "a" } } }], "as": "pair" },
+    { "op": "write_path", "on": "root", "path": [{ "hash_map_get": { "kv_pair": { "sha1": "b" } } }, { "write": { "slot": { "var": "pair" } } }] }
+  ] }
