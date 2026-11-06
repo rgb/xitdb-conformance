@@ -5,8 +5,8 @@ What the Zig implementation of xitdb does, for a Swift port to match byte for by
 
 It was produced from:
 
-- conformance repository: commit `a940d88b253eda630e2e37e02ce513a901fd3fec`
-- xitdb, the Zig original: commit `6b93af1af3a260399fa0a0b1b268ded2cbf5eec5`
+- conformance repository: commit `d54c7c8eabd99d9f714c00f736a174076f5a3cc0`
+- xitdb, the Zig original: commit `6b93af1af3a260399fa0a0b1b268ded2cbf5eec5`, or the one the manifest gives for that fixture as its `zig_commit`
 - Zig 0.17.1, with the runner `run` built in debug mode and using the `buffered_file` storage kind
 
 `SCRIPT-FORMAT.md` in the conformance repository describes the scripts, and how to run them.
