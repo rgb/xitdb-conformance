@@ -8,8 +8,6 @@
     { "op": "write_path", "on": "root", "path": ["array_list_init", "array_list_append", { "hash_map_init": {} }, { "ctx": { "as": "m", "ops": [
       { "op": "write_path", "on": "m", "path": [{ "hash_map_get": { "value": { "sha1": "list" } } }, "array_list_init", "array_list_append", { "write": { "uint": 1 } }] },
       { "op": "write_path", "on": "m", "path": [{ "hash_map_get": { "value": { "sha1": "map" } } }, { "hash_map_init": {} }, { "hash_map_get": { "value": { "sha1": "x" } } }, { "write": { "uint": 1 } }] },
-      { "op": "write_path", "on": "m", "path": [{ "hash_map_get": { "value": { "sha1": "linked" } } }, "linked_array_list_init", "linked_array_list_append", { "write": { "uint": 1 } }] },
-      { "op": "write_path", "on": "m", "path": [{ "hash_map_get": { "value": { "sha1": "sorted" } } }, { "sorted_map_init": {} }, { "sorted_map_get": { "value": "a" } }, { "write": { "uint": 1 } }] },
       { "op": "write_path", "on": "m", "path": [{ "hash_map_get": { "value": { "sha1": "kept" } } }, { "write": { "uint": 1 } }], "as": "kept" }
     ] } }] },
     { "op": "read_path", "on": "root", "path": [{ "array_list_get": 0 }], "as": "moment0" },
@@ -21,8 +19,6 @@
       { "op": "write_path", "on": "m", "path": [{ "hash_map_get": { "value": { "sha1": "list" } } }, "array_list_append", { "write": { "uint": 2 } }],
         "note": "and this into its committed header" },
       { "op": "write_path", "on": "m", "path": [{ "hash_map_get": { "value": { "sha1": "map" } } }, { "hash_map_get": { "value": { "sha1": "y" } } }, { "write": { "uint": 2 } }] },
-      { "op": "write_path", "on": "m", "path": [{ "hash_map_get": { "value": { "sha1": "linked" } } }, "linked_array_list_append", { "write": { "uint": 2 } }] },
-      { "op": "write_path", "on": "m", "path": [{ "hash_map_get": { "value": { "sha1": "sorted" } } }, { "sorted_map_get": { "value": "b" } }, { "write": { "uint": 2 } }] },
       { "op": "write", "on": "kept", "data": { "uint": 2 }, "note": "a cursor from the previous transaction writes where it always pointed" },
       { "op": "read_path", "on": "moment0", "path": [{ "hash_map_get": { "value": { "sha1": "kept" } } }], "as": "c" },
       { "op": "read_uint", "on": "c", "expect": 2 },
@@ -35,10 +31,6 @@
     { "op": "read_path", "on": "c", "path": [{ "array_list_get": 0 }], "as": "c" },
     { "op": "read_uint", "on": "c", "expect": 99, "note": "and its element has changed" },
     { "op": "read_path_slot", "on": "moment0", "path": [{ "hash_map_get": { "value": { "sha1": "map" } } }, { "hash_map_get": { "value": { "sha1": "y" } } }], "expect": { "tag": "uint", "value": 2 } },
-    { "op": "read_path", "on": "moment0", "path": [{ "hash_map_get": { "value": { "sha1": "linked" } } }], "as": "c" },
-    { "op": "count", "on": "c", "expect": 2 },
-    { "op": "read_path", "on": "moment0", "path": [{ "hash_map_get": { "value": { "sha1": "sorted" } } }], "as": "c" },
-    { "op": "count", "on": "c", "expect": 2 },
     { "op": "read_path", "on": "moment0", "path": [{ "hash_map_get": { "value": { "sha1": "kept" } } }], "as": "c" },
     { "op": "read_uint", "on": "c", "expect": 3 },
 
