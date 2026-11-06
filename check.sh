@@ -431,7 +431,9 @@ expect_report() { # text that should be in the report
     fi
     echo "it says: $1"
 }
-valid_fixtures=$(find fixtures/valid -name '*.db.sidecar.json' | wc -l | tr -d ' ')
+# what's from another Zig commit isn't compared with this one
+from_elsewhere=$(grep -c '^[^#]' tests/zig-commits.txt || true)
+valid_fixtures=$(($(find fixtures/valid -name '*.db.sidecar.json' | wc -l | tr -d ' ') - from_elsewhere))
 failing_fixtures=$(find fixtures/failing -name '*.json' | wc -l | tr -d ' ')
 generated=$(find tests/generated -name '*.json' | wc -l | tr -d ' ')
 expect_report "$valid_fixtures with the same bytes, 0 with different bytes, 0 that fail"

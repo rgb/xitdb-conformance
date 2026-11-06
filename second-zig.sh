@@ -86,28 +86,37 @@ echo "the harness at $(git rev-parse --short=10 HEAD) of this repository"
 
 echo
 echo "== fixtures that should pass"
+# what a script may use was decided by the original, and what's run here is what a commit does
+# with it, so the guard is off. a stream of a sorted key with no position, say, is one that the
+# original can't do and refuses, and that a corrected commit can.
 same=0
 different=0
 failed=0
-different_names=
-failed_names=
+skipped=0
 for script in "$FIXTURES"/valid/*.json; do
     case "$script" in *.sidecar.json) continue ;; esac
     name=$(basename "$script" .json)
-    if ! "$BIN/run" "$script" "$WORK/runs/$name.db" > /dev/null 2> "$WORK/runs/$name.err"; then
+    # an expected file from yet another commit has nothing to say about this one
+    recorded=$(sed -n "s/^$name \([0-9a-f]*\)\$/\1/p" tests/zig-commits.txt)
+    if [ -n "$recorded" ] && [ "$recorded" != "$COMMIT" ]; then
+        skipped=$((skipped + 1))
+        continue
+    fi
+    if ! "$BIN/run" "$script" "$WORK/runs/$name.db" --allow-port-differences > /dev/null 2> "$WORK/runs/$name.err"; then
         failed=$((failed + 1))
-        failed_names="$failed_names $name"
         echo "fails: $name: $(head -n 1 "$WORK/runs/$name.err" | cut -c1-160)"
     elif "$BIN/detcheck" "$WORK/runs/$name.db" "$FIXTURES/valid/$name.db" > /dev/null 2> "$WORK/runs/$name.err"; then
         same=$((same + 1))
     else
         different=$((different + 1))
-        different_names="$different_names $name"
         echo "different: $name: $(head -n 1 "$WORK/runs/$name.err" | sed 's/^detcheck: FAILED: //' | cut -c1-120)"
     fi
     rm -f "$WORK/runs/$name".*
 done
 echo "$same with the same bytes, $different with different bytes, $failed that fail"
+if [ "$skipped" -gt 0 ]; then
+    echo "$skipped not compared, as their expected files are from another commit"
+fi
 
 echo
 echo "== fixtures that should fail"
@@ -116,7 +125,7 @@ now_pass=0
 for script in "$FIXTURES"/failing/*.json; do
     name=$(basename "$script" .json)
     code=0
-    "$BIN/run" "$script" "$WORK/runs/failing.db" > /dev/null 2>&1 || code=$?
+    "$BIN/run" "$script" "$WORK/runs/failing.db" --allow-port-differences > /dev/null 2>&1 || code=$?
     if [ "$code" -eq 1 ]; then
         still=$((still + 1))
     else
