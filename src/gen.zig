@@ -1150,6 +1150,16 @@ fn Gen(comptime HashInt: type) type {
             try self.endOp();
         }
 
+        fn isPastEndOfList(iter: *RO.Iter) bool {
+            const levels = iter.core.stack.slice();
+            var position: u64 = 0;
+            for (levels, 0..) |level, i| {
+                const index: u64 = if (i == levels.len - 1) level.index - 1 else level.index;
+                position = position * 16 + index;
+            }
+            return position >= iter.core.size;
+        }
+
         /// whether this is a stream the port gives the same as Zig (SCRIPT-FORMAT.md, section 10)
         fn streamable(self: *Self, cursor: RO) anyerror!bool {
             const slot = try cursor.slot();
@@ -1247,6 +1257,8 @@ fn Gen(comptime HashInt: type) type {
             const steps = 1 + self.rng.below(40);
             for (0..steps) |_| {
                 const next = try iter.next();
+                // what the port doesn't give (SCRIPT-FORMAT.md, section 10), so a script can't ask for it
+                if (next != null and tag == .array_list and isPastEndOfList(&iter)) break;
                 try self.beginOp();
                 const element = next orelse {
                     try self.w.print("{{\"op\":\"next\",\"on\":\"{s}\",\"expect_null\":true}}", .{iter_name});

@@ -28,7 +28,7 @@ fn fail(comptime fmt: []const u8, args: anytype) noreturn {
 
 const Workload = enum { map_insert, list_append, map_transactions };
 
-const Result = struct { write_ms: f64, read_ms: f64, file_size: u64 };
+const Result = struct { write_ms: f64, read_ms: f64, iterate_ms: f64, file_size: u64 };
 
 fn nowNs(io: Io) i96 {
     return Io.Clock.awake.now(io).toNanoseconds();
@@ -132,6 +132,36 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
             }
         }
 
+        fn iteratePhase(db: *DB, workload: Workload, n: u64, hashes: []const HashInt) !void {
+            const moment = (try db.rootCursor().readPath(void, &.{.{ .array_list_get = -1 }})) orelse fail("there is no last moment", .{});
+            var iter = try moment.iterator();
+            var count: u64 = 0;
+            switch (workload) {
+                .map_insert, .map_transactions => {
+                    const keys = if (workload == .map_insert) n else 10 * n;
+                    var sum: u64 = 0;
+                    while (try iter.next()) |entry| {
+                        const pair = try entry.readKeyValuePair();
+                        const value = try pair.value_cursor.readUint();
+                        if (value >= keys) fail("an entry holds {d}, and there are only {d} keys", .{ value, keys });
+                        if (pair.hash != hashes[@intCast(value)]) fail("the entry holding {d} doesn't have that key's hash", .{value});
+                        count += 1;
+                        sum += value;
+                    }
+                    if (count != keys) fail("{d} entries, and {d} keys were written", .{ count, keys });
+                    if (sum != keys * (keys - 1) / 2) fail("the values add up to {d}", .{sum});
+                },
+                .list_append => {
+                    while (try iter.next()) |element| {
+                        const value = try element.readUint();
+                        if (value != count) fail("element {d} holds {d}", .{ count, value });
+                        count += 1;
+                    }
+                    if (count != n) fail("{d} elements, and {d} were written", .{ count, n });
+                },
+            }
+        }
+
         fn once(io: Io, gpa: Allocator, workload: Workload, n: u64, hashes: []const HashInt) !Result {
             var buffer = Io.Writer.Allocating.init(gpa);
             defer buffer.deinit();
@@ -164,9 +194,14 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
             try readPhase(&db, workload, n, hashes);
             const read_end = nowNs(io);
 
+            const iterate_start = nowNs(io);
+            try iteratePhase(&db, workload, n, hashes);
+            const iterate_end = nowNs(io);
+
             return .{
                 .write_ms = elapsedMs(write_start, write_end),
                 .read_ms = elapsedMs(read_start, read_end),
+                .iterate_ms = elapsedMs(iterate_start, iterate_end),
                 .file_size = file_size,
             };
         }
@@ -174,19 +209,23 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
         fn run(io: Io, gpa: Allocator, w: *Io.Writer, workload: Workload, n: u64, hashes: []const HashInt) !void {
             var write_times: [RUNS]f64 = undefined;
             var read_times: [RUNS]f64 = undefined;
+            var iterate_times: [RUNS]f64 = undefined;
             var file_size: u64 = 0;
             for (0..RUNS) |run_index| {
                 const result = try once(io, gpa, workload, n, hashes);
                 write_times[run_index] = result.write_ms;
                 read_times[run_index] = result.read_ms;
+                iterate_times[run_index] = result.iterate_ms;
                 // the commit IDs are random, but the size can't depend on them
                 if (run_index > 0 and result.file_size != file_size) fail("{s} gave file sizes {d} and {d}", .{ @tagName(workload), file_size, result.file_size });
                 file_size = result.file_size;
             }
             std.mem.sort(f64, &write_times, {}, std.sort.asc(f64));
             std.mem.sort(f64, &read_times, {}, std.sort.asc(f64));
+            std.mem.sort(f64, &iterate_times, {}, std.sort.asc(f64));
             try printLine(w, workload, "write", kind, n, write_times[RUNS / 2], file_size);
             try printLine(w, workload, "read", kind, n, read_times[RUNS / 2], file_size);
+            try printLine(w, workload, "iterate", kind, n, iterate_times[RUNS / 2], file_size);
             try w.flush();
         }
     };

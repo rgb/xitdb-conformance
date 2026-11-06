@@ -177,8 +177,8 @@ for script in tests/port-differs/*.zig.json; do
     done
     count=$((count + 1))
 done
-if [ "$count" -ne 4 ]; then
-    echo "tests/port-differs should have 4 behaviours, and it has $count"
+if [ "$count" -ne 5 ]; then
+    echo "tests/port-differs should have 5 behaviours, and it has $count"
     exit 1
 fi
 echo "$count behaviours: Zig does what they say, and a valid script can't use them"
@@ -288,11 +288,11 @@ if [ "$status" -ne 1 ] || ! grep -qF "its numbers would mean nothing" "$OUT/benc
 fi
 "$BENCH" --divide 1000 > "$OUT/bench.txt"
 lines=$(wc -l < "$OUT/bench.txt" | tr -d ' ')
-if [ "$lines" -ne 14 ]; then
-    echo "bench should print 14 lines, and it printed $lines"
+if [ "$lines" -ne 21 ]; then
+    echo "bench should print 21 lines, and it printed $lines"
     exit 1
 fi
-echo "bench refuses a debug build, and prints its 14 lines"
+echo "bench refuses a debug build, and prints its 21 lines"
 # the file size is what the Swift side is held to, so bench has to mean what it says.
 # these scripts are its workloads, spelled out as the spec spells them.
 for line in "map_insert 100 memory" "map_insert 100 buffered_file" "map_insert 10 file" "list_append 1000 memory" "list_append 1000 buffered_file" "map_transactions 2 memory" "map_transactions 2 buffered_file"; do

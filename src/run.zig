@@ -2,8 +2,10 @@
 //!
 //! Executes a conformance script (see SCRIPT-FORMAT.md) against the Zig
 //! implementation and writes the database to <out.db> and the sidecar to
-//! <out.db>.sidecar.json. Every script op maps to one call of xitdb's API, and
-//! the only state added here is the table of names that ops refer to.
+//! <out.db>.sidecar.json. Any other database a script makes goes next to it, as
+//! <out>.<name>.db. Every script op maps to one call of xitdb's API, and the only
+//! state added here is the table of names that ops refer to, and which database
+//! is the current one.
 //!
 //! The whole script is validated before the database is created, so a script
 //! this runner accepts is well-formed everywhere, including in ops that are
@@ -56,6 +58,8 @@ const ERROR_NAMES = [_][]const u8{
     "TruncatedDatabase",
     "EndOfStream",
     "StreamTooLong",
+    "TargetNotEmpty",
+    "InvalidRange",
 };
 
 /// only a read the port corrects can raise this, so only --allow-port-differences lets a script name it
@@ -229,8 +233,9 @@ fn checkErrorName(name: []const u8, op_name: []const u8, allow_port_differences:
     // reading a gap before the commit raises it on one storage kind and not on the others,
     // and reading a slot set to nothing into a buffer raises it where the port doesn't.
     // only a stream can reach it in a way that means the same everywhere.
-    if (isKey(name, "EndOfStream") and !isKey(op_name, "read_stream") and !allow_port_differences) {
-        die("expect_error can only name EndOfStream on read_stream", .{});
+    // and applying bytes at 0 that are too short to be a database raises it everywhere
+    if (isKey(name, "EndOfStream") and !isKey(op_name, "read_stream") and !isKey(op_name, "apply_replicated") and !allow_port_differences) {
+        die("expect_error can only name EndOfStream on read_stream and apply_replicated", .{});
     }
     for (ERROR_NAMES) |known| {
         if (isKey(name, known)) return;
@@ -272,6 +277,14 @@ const OpKind = enum {
     reopen,
     raw_append,
     raw_write,
+    create_database,
+    use,
+    compact,
+    replica_state,
+    replication_start,
+    committed_size,
+    read_committed,
+    apply_replicated,
 };
 
 fn opFields(kind: OpKind) []const []const u8 {
@@ -299,6 +312,14 @@ fn opFields(kind: OpKind) []const []const u8 {
         .reopen => &.{ "op", "note", "expect_error", "read_only", "hash_size" },
         .raw_append => &.{ "op", "note", "bytes" },
         .raw_write => &.{ "op", "note", "offset", "bytes" },
+        .create_database => &.{ "op", "note", "name", "file_id", "hash_id" },
+        .use => &.{ "op", "note", "name" },
+        .compact => &.{ "op", "note", "expect_error", "into", "file_id", "hash_id", "offset_map" },
+        .replica_state => &.{ "op", "note", "expect_error", "as" },
+        .replication_start => &.{ "op", "note", "expect_error", "state", "as", "expect" },
+        .committed_size => &.{ "op", "note", "expect_error", "as", "expect" },
+        .read_committed => &.{ "op", "note", "expect_error", "start", "end", "as", "expect_same" },
+        .apply_replicated => &.{ "op", "note", "expect_error", "start", "bytes", "short_by" },
     };
 }
 
@@ -306,6 +327,16 @@ const SidecarEntry = struct {
     // null while the database is closed
     committed_size: ?u64,
     commit_id: ?u64,
+    // which database they're about, if it isn't the script's own
+    db: ?[]const u8 = null,
+};
+
+/// a commit's trailer that's in a database's file. it can have come from another database
+/// through replication, so it says which file ID its checksum goes by.
+const Trailer = struct {
+    position: u64,
+    commit_id: u64,
+    file_id: u64,
 };
 
 fn checkHashSize(size: u16) void {
@@ -326,6 +357,28 @@ const Options = struct {
     allow_port_differences: bool,
 };
 
+/// what `offset_map: "disk"` keeps the offsets in, as test.zig does
+const OffsetDB = xitdb.Database(.file, u64);
+
+const DiskOffsets = struct {
+    map: OffsetDB.HashMap(.read_write),
+
+    pub fn reset(self: *DiskOffsets) !void {
+        var cursor = self.map.cursor;
+        try cursor.write(.{ .slot = null });
+        self.map = try OffsetDB.HashMap(.read_write).init(cursor);
+    }
+
+    pub fn get(self: *DiskOffsets, source_offset: u64) !?u64 {
+        const cursor = (try self.map.getCursor(source_offset)) orelse return null;
+        return try cursor.readUint();
+    }
+
+    pub fn put(self: *DiskOffsets, source_offset: u64, target_offset: u64) !void {
+        try self.map.put(source_offset, .{ .uint = target_offset });
+    }
+};
+
 fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
     return struct {
         const Self = @This();
@@ -342,6 +395,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         const TRAILER_COMMIT_ID_OFFSET = 9;
         // where a root cursor says it is, though it reads the root again each time
         const ROOT_HEADER_START = 20;
+        const INITIAL_SIZE = 62;
 
         const Binding = union(enum) {
             rw: RW,
@@ -352,6 +406,36 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             // an iterator changes as it's used, so it's held by pointer and never copied
             iter_rw: *RW.Iter,
             iter_ro: *RO.Iter,
+            // what the replication ops pass around
+            number: u64,
+            replica_state: xitdb.ReplicaState,
+            committed_bytes: *CommittedBytes,
+        };
+
+        const CommittedBytes = struct {
+            data: []const u8,
+            source: *Store,
+            start: u64,
+        };
+
+        /// a database and the file it's in. the script's own is called main.
+        const Store = struct {
+            name: []const u8,
+            db: DB,
+            out: Io.File,
+            out_path: []const u8,
+            buffer: *Io.Writer.Allocating,
+            read_only_file: ?Io.File = null,
+            closed: bool = false,
+            // bytes past the committed size are normal from when the file is written to
+            // directly until a transaction next truncates them
+            may_have_leftovers: bool = false,
+            // applying bytes at 0 failed, so it's in no state to say what its size is
+            broken: bool = false,
+            // its committed size before the top-level op being run
+            size_before: ?u64 = null,
+            // the trailers of commits that are in its file
+            trailers: std.ArrayList(Trailer) = .empty,
         };
 
         const Entry = struct {
@@ -386,19 +470,18 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         };
 
         arena: Allocator,
+        gpa: Allocator = undefined,
         // when validating there is no database, and parsing a path only checks it
-        db: *DB = undefined,
+        store: *Store = undefined,
+        stores: std.ArrayList(*Store) = .empty,
         validating: bool = false,
-        // what closing and reopening the database needs
         io: Io = undefined,
-        out: Io.File = undefined,
-        out_path: []const u8 = "",
-        buffer: *Io.Writer.Allocating = undefined,
-        read_only_file: ?Io.File = null,
-        closed: bool = false,
-        // bytes past the committed size are normal from when the file is written to
-        // directly until a transaction next truncates them
-        may_have_leftovers: bool = false,
+        main_path: []const u8 = "",
+        script_hash_id: ?xitdb.HashId = null,
+        // what compaction with `offset_map: "memory"` uses, which it clears each time
+        offset_map: std.AutoHashMap(u64, u64) = undefined,
+        // the database a compaction wrote to, for the sidecar
+        compacted_into: ?*Store = null,
         // the names of the callbacks around the op being validated
         enclosing: std.ArrayList([]const u8) = .empty,
         env: std.StringHashMapUnmanaged(Entry) = .empty,
@@ -432,7 +515,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             if (op.get("expect_error")) |err| checkErrorName(asString(err, "expect_error"), name, self.allow_port_differences);
             switch (kind_of_op) {
                 .run_context, .db_freeze, .fail => {},
-                .close, .reopen, .raw_append, .raw_write => {
+                .close, .reopen, .raw_append, .raw_write, .create_database, .use, .compact, .replica_state, .replication_start, .committed_size, .read_committed, .apply_replicated => {
                     if (self.enclosing.items.len > 0) die("{s} can only be used at the top level", .{name});
                 },
                 else => checkName(asString(required(op, "on", name), "on"), "on"),
@@ -529,7 +612,67 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     const offset = asInt(u64, required(op, "offset", name), "offset");
                     if (offset > MAX_SEEK) die("offset can't go past {d}, got {d}", .{ @as(u64, MAX_SEEK), offset });
                 },
+                .create_database => {
+                    checkName(asString(required(op, "name", name), "name"), "name");
+                    _ = parseHex64(self.arena, required(op, "file_id", name), "file_id");
+                    if (op.get("hash_id")) |v| _ = parseHashId(self.arena, v);
+                },
+                .use => checkName(asString(required(op, "name", name), "name"), "name"),
+                .compact => {
+                    checkName(asString(required(op, "into", name), "into"), "into");
+                    if (op.get("file_id")) |v| _ = parseHex64(self.arena, v, "file_id");
+                    if (op.get("hash_id")) |v| _ = parseHashId(self.arena, v);
+                    const offset_map = asString(required(op, "offset_map", name), "offset_map");
+                    if (!isKey(offset_map, "memory") and !isKey(offset_map, "disk")) die("offset_map must be \"memory\" or \"disk\"", .{});
+                },
+                .replica_state => checkBindable(asString(required(op, "as", name), "as"), "as"),
+                .replication_start => {
+                    checkBindable(asString(required(op, "state", name), "state"), "state");
+                    checkBindableField(op, "as");
+                    if (op.get("expect")) |v| validateNumber(v, "expect");
+                },
+                .committed_size => {
+                    checkBindableField(op, "as");
+                    if (op.get("expect")) |v| validateNumber(v, "expect");
+                },
+                .read_committed => {
+                    validateNumber(required(op, "start", name), "start");
+                    validateNumber(required(op, "end", name), "end");
+                    checkBindable(asString(required(op, "as", name), "as"), "as");
+                    if (op.get("expect_same")) |v| checkBindable(asString(v, "expect_same"), "expect_same");
+                },
+                .apply_replicated => {
+                    validateNumber(required(op, "start", name), "start");
+                    checkBindable(asString(required(op, "bytes", name), "bytes"), "bytes");
+                    if (op.get("short_by")) |v| _ = asInt(u64, v, "short_by");
+                },
             }
+        }
+
+        /// an integer, or {"var": a name that holds one}
+        fn validateNumber(v: Json, what: []const u8) void {
+            switch (v) {
+                .number_string => _ = asInt(u64, v, what),
+                .object => |o| {
+                    checkKeys(o, &.{"var"}, what);
+                    checkBindable(asString(required(o, "var", what), "var"), "var");
+                },
+                else => die("{s} must be an integer or {{\"var\": ...}}", .{what}),
+            }
+        }
+
+        fn number(self: *Self, v: Json, what: []const u8) u64 {
+            if (v == .number_string) return asInt(u64, v, what);
+            const name = v.object.get("var").?.string;
+            return switch (self.lookup(name)) {
+                .number => |n| n,
+                else => die("\"{s}\" doesn't hold a number", .{name}),
+            };
+        }
+
+        fn checkNumber(self: *Self, op: ObjectMap, got: u64) void {
+            const want = self.number(op.get("expect") orelse return, "expect");
+            if (got != want) die("expected {d}, got {d}", .{ want, got });
         }
 
         fn validateBytesExpectation(self: *Self, op: ObjectMap) void {
@@ -587,7 +730,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         }
 
         fn lookup(self: *Self, name: []const u8) Binding {
-            if (isKey(name, "root")) return .{ .rw = self.db.rootCursor() };
+            if (isKey(name, "root")) return .{ .rw = self.store.db.rootCursor() };
             return self.entryFor(name).binding;
         }
 
@@ -603,13 +746,14 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 .slot => die("\"{s}\" is a slot, not a cursor", .{name}),
                 .null_cursor => die("\"{s}\" is a null cursor", .{name}),
                 .iter_rw, .iter_ro => die("\"{s}\" is an iterator, not a cursor", .{name}),
+                .number, .replica_state, .committed_bytes => die("\"{s}\" holds something for replication, not a cursor", .{name}),
             };
         }
 
         /// the cursor called `name` by pointer, for methods that update it
         fn rwPointer(self: *Self, name: []const u8) *RW {
             if (isKey(name, "root")) {
-                self.root_cursor = self.db.rootCursor();
+                self.root_cursor = self.store.db.rootCursor();
                 return &self.root_cursor;
             }
             return switch (self.entryFor(name).binding) {
@@ -618,6 +762,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 .slot => die("\"{s}\" is a slot, not a cursor", .{name}),
                 .null_cursor => die("\"{s}\" is a null cursor", .{name}),
                 .iter_rw, .iter_ro => die("\"{s}\" is an iterator, not a cursor", .{name}),
+                .number, .replica_state, .committed_bytes => die("\"{s}\" holds something for replication, not a cursor", .{name}),
             };
         }
 
@@ -629,6 +774,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 .slot => die("\"{s}\" is a slot, not a cursor", .{name}),
                 .null_cursor => die("\"{s}\" is a null cursor", .{name}),
                 .iter_rw, .iter_ro => die("\"{s}\" is an iterator, not a cursor", .{name}),
+                .number, .replica_state, .committed_bytes => die("\"{s}\" holds something for replication, not a cursor", .{name}),
             };
         }
 
@@ -899,18 +1045,150 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             }
         }
 
-        fn initOpts(self: *Self, file: Io.File, file_id: ?u64, hash_id: ?xitdb.HashId) xitdb.InitOpts(kind) {
+        fn initOpts(store: *Store, file: Io.File, file_id: ?u64, hash_id: ?xitdb.HashId) xitdb.InitOpts(kind) {
             return switch (kind) {
-                .memory => .{ .buffer = self.buffer, .hash_id = hash_id, .file_id = file_id },
+                .memory => .{ .buffer = store.buffer, .hash_id = hash_id, .file_id = file_id },
                 .file => .{ .file = file, .fsync = false, .hash_id = hash_id, .file_id = file_id },
-                .buffered_file => .{ .file = file, .buffer = self.buffer, .fsync = false, .hash_id = hash_id, .file_id = file_id },
+                .buffered_file => .{ .file = file, .buffer = store.buffer, .fsync = false, .hash_id = hash_id, .file_id = file_id },
             };
         }
 
         /// opening with a hash size that isn't the file's fails, and that's all it's good for
         fn openAs(self: *Self, comptime OtherHashInt: type) !void {
-            _ = try xitdb.Database(kind, OtherHashInt).init(self.io, self.initOpts(self.out, null, null));
+            _ = try xitdb.Database(kind, OtherHashInt).init(self.io, initOpts(self.store, self.store.out, null, null));
             die("the database opened with a hash size that isn't the script's, which is an undefined use", .{});
+        }
+
+        fn findStore(self: *Self, name: []const u8) ?*Store {
+            for (self.stores.items) |store| {
+                if (isKey(store.name, name)) return store;
+            }
+            return null;
+        }
+
+        /// <out>.<name>.db, next to <out>.db
+        fn pathFor(self: *Self, name: []const u8) []const u8 {
+            const stem = if (std.mem.endsWith(u8, self.main_path, ".db")) self.main_path[0 .. self.main_path.len - 3] else self.main_path;
+            return std.mem.concat(self.arena, u8, &.{ stem, ".", name, ".db" }) catch die("out of memory", .{});
+        }
+
+        /// a new file for a database, with no database in it yet
+        fn newStore(self: *Self, name: []const u8) !*Store {
+            const store = self.arena.create(Store) catch die("out of memory", .{});
+            const path = self.pathFor(name);
+            const buffer = self.arena.create(Io.Writer.Allocating) catch die("out of memory", .{});
+            buffer.* = Io.Writer.Allocating.init(self.gpa);
+            store.* = .{
+                .name = name,
+                .db = undefined,
+                .out = try Io.Dir.cwd().createFile(self.io, path, .{ .read = true, .truncate = true }),
+                .out_path = path,
+                .buffer = buffer,
+            };
+            return store;
+        }
+
+        fn compactWithDiskOffsets(self: *Self, opts: xitdb.InitOpts(kind)) !DB {
+            const path = std.mem.concat(self.arena, u8, &.{ self.main_path, ".offsets" }) catch die("out of memory", .{});
+            const file = try Io.Dir.cwd().createFile(self.io, path, .{ .read = true, .truncate = true });
+            defer {
+                file.close(self.io);
+                Io.Dir.cwd().deleteFile(self.io, path) catch {};
+            }
+            // it has commit IDs of its own, which go nowhere, as this file doesn't either
+            var offsets = try OffsetDB.init(self.io, .{ .file = file, .fsync = false });
+            var result: DB = undefined;
+            const InTransaction = struct {
+                source: *DB,
+                opts: xitdb.InitOpts(kind),
+                result: *DB,
+
+                pub fn run(ctx: @This(), cursor: *OffsetDB.Cursor(.read_write)) !void {
+                    var map = DiskOffsets{ .map = try OffsetDB.HashMap(.read_write).init(cursor.*) };
+                    ctx.result.* = try ctx.source.compact(kind, ctx.opts, &map);
+                }
+            };
+            try offsets.runContext(InTransaction{ .source = &self.store.db, .opts = opts, .result = &result });
+            return result;
+        }
+
+        fn compact(self: *Self, op: ObjectMap) !void {
+            const into = op.get("into").?.string;
+            const existing = self.findStore(into);
+            if (existing) |store| {
+                if (store.closed) die("database \"{s}\" is closed", .{into});
+                if (op.get("file_id") != null) die("database \"{s}\" already has a file ID", .{into});
+            } else if (op.get("file_id") == null) die("compacting into a new database needs a file_id", .{});
+
+            const target = existing orelse try self.newStore(into);
+            errdefer if (existing == null) {
+                target.out.close(self.io);
+                Io.Dir.cwd().deleteFile(self.io, target.out_path) catch {};
+            };
+            try target.db.core.flush();
+
+            const file_id: ?u64 = if (op.get("file_id")) |v| parseHex64(self.arena, v, "file_id") else null;
+            const hash_id: ?xitdb.HashId = if (op.get("hash_id")) |v| parseHashId(self.arena, v) else null;
+            const opts = initOpts(target, target.out, file_id, hash_id);
+            if (isKey(op.get("offset_map").?.string, "disk")) {
+                target.db = try self.compactWithDiskOffsets(opts);
+            } else {
+                target.db = try self.store.db.compact(kind, opts, &self.offset_map);
+            }
+
+            if (existing == null) {
+                target.size_before = INITIAL_SIZE;
+                self.stores.append(self.arena, target) catch die("out of memory", .{});
+            }
+            self.compacted_into = target;
+        }
+
+        fn removeTrailersFrom(store: *Store, position: u64) void {
+            var kept: usize = 0;
+            for (store.trailers.items) |trailer| {
+                if (trailer.position < position) {
+                    store.trailers.items[kept] = trailer;
+                    kept += 1;
+                }
+            }
+            store.trailers.shrinkRetainingCapacity(kept);
+        }
+
+        fn applyReplicated(self: *Self, op: ObjectMap) !void {
+            const store = self.store;
+            const start = self.number(op.get("start").?, "start");
+            const name = op.get("bytes").?.string;
+            const bytes = switch (self.lookup(name)) {
+                .committed_bytes => |b| b,
+                else => die("\"{s}\" doesn't hold committed bytes", .{name}),
+            };
+            const short_by: usize = if (op.get("short_by")) |v| asInt(usize, v, "short_by") else 0;
+            if (short_by > bytes.data.len) die("short_by can't be more than the {d} bytes there are", .{bytes.data.len});
+            const data = bytes.data[0 .. bytes.data.len - short_by];
+
+            // whether it gets as far as writing
+            const committed: ?u64 = store.db.committedSize() catch null;
+            const writes = start == 0 or (committed != null and committed.? == start);
+            if (writes and start != bytes.start) die("these bytes were read from {d}, and applying them at {d} isn't something a script can say what it means", .{ bytes.start, start });
+
+            var reader = Io.Reader.fixed(data);
+            const result = store.db.applyReplicated(start, &reader, data.len);
+
+            if (writes) {
+                removeTrailersFrom(store, start);
+                for (bytes.source.trailers.items) |trailer| {
+                    if (trailer.position >= start and trailer.position < start + data.len) {
+                        store.trailers.append(self.arena, trailer) catch die("out of memory", .{});
+                    }
+                }
+                if (result) |_| {
+                    store.broken = false;
+                } else |_| {
+                    store.may_have_leftovers = true;
+                    if (start == 0) store.broken = true;
+                }
+            }
+            return result;
         }
 
         fn makeIterator(self: *Self, cursor: anytype, op: ObjectMap) !@TypeOf(cursor).Iter {
@@ -936,6 +1214,21 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             if (writes_by_then != entry.writes) die("iterator \"{s}\" is being used after a write in the transaction that made it, which is an undefined use", .{name});
         }
 
+        /// an iterator stops after giving as many elements as a list has, and not at the end
+        /// of the list. it skips what was never written, and a slice leaves what's past the new
+        /// end in its blocks, so it can give what the list no longer has.
+        fn isPastEndOfList(iter: anytype) bool {
+            if (iter.cursor.slot_ptr.slot.tag != .array_list) return false;
+            const levels = iter.core.stack.slice();
+            var position: u64 = 0;
+            for (levels, 0..) |level, i| {
+                // it has moved on from what it just gave
+                const index: u64 = if (i == levels.len - 1) level.index - 1 else level.index;
+                position = position * 16 + index;
+            }
+            return position >= iter.core.size;
+        }
+
         /// Cursor.reader takes a short value's length from the cursor and its bytes from
         /// the file, and needs the slot's position for that
         fn checkStreamable(self: *Self, cursor: anytype) !void {
@@ -945,7 +1238,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 .short_bytes => {
                     const position = cursor.slot_ptr.position orelse return self.portDiffers("streaming a short value from a cursor with no position");
                     if (position == ROOT_HEADER_START) return;
-                    var reader = self.db.core.reader();
+                    var reader = cursor.db.core.reader();
                     try reader.seekTo(position);
                     var bytes: [9]u8 = undefined;
                     try reader.interface.readSliceAll(&bytes);
@@ -982,35 +1275,90 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
 
         fn writeRaw(self: *Self, offset: u64, bytes: []const u8) !void {
             if (kind == .memory) {
-                var writer = self.db.core.writer();
+                var writer = self.store.db.core.writer();
                 try writer.seekTo(offset);
                 try writer.interface.writeAll(bytes);
             } else {
-                try self.out.writePositionalAll(self.io, bytes, offset);
+                try self.store.out.writePositionalAll(self.io, bytes, offset);
             }
+            // what's written over a trailer's commit ID isn't random any more
+            var kept: usize = 0;
+            for (self.store.trailers.items) |trailer| {
+                if (offset < trailer.position + TRAILER_SIZE and offset + bytes.len > trailer.position) continue;
+                self.store.trailers.items[kept] = trailer;
+                kept += 1;
+            }
+            self.store.trailers.shrinkRetainingCapacity(kept);
         }
 
         fn dispatch(self: *Self, op: ObjectMap) anyerror!void {
             const kind_of_op = std.meta.stringToEnum(OpKind, op.get("op").?.string).?;
 
             switch (kind_of_op) {
-                .close, .reopen, .raw_append, .raw_write => {},
-                else => if (self.closed) die("the database is closed", .{}),
+                .close, .reopen, .raw_append, .raw_write, .create_database, .use => {},
+                else => if (self.store.closed) die("the database is closed", .{}),
             }
 
             switch (kind_of_op) {
+                .create_database => {
+                    const name = op.get("name").?.string;
+                    if (self.findStore(name) != null) die("there's already a database called \"{s}\"", .{name});
+                    const hash_id = if (op.get("hash_id")) |v| parseHashId(self.arena, v) else self.script_hash_id;
+                    const store = try self.newStore(name);
+                    store.db = try DB.init(self.io, initOpts(store, store.out, parseHex64(self.arena, op.get("file_id").?, "file_id"), hash_id));
+                    store.size_before = INITIAL_SIZE;
+                    self.stores.append(self.arena, store) catch die("out of memory", .{});
+                },
+                .use => {
+                    const name = op.get("name").?.string;
+                    self.store = self.findStore(name) orelse die("there's no database called \"{s}\"", .{name});
+                },
+                .compact => try self.compact(op),
+                .replica_state => self.bind(op.get("as").?.string, .{ .replica_state = try self.store.db.replicaState() }),
+                .replication_start => {
+                    const name = op.get("state").?.string;
+                    const state = switch (self.lookup(name)) {
+                        .replica_state => |state| state,
+                        else => die("\"{s}\" doesn't hold a replica's state", .{name}),
+                    };
+                    const start = try self.store.db.replicationStart(state);
+                    self.checkNumber(op, start);
+                    if (op.get("as")) |as| self.bind(as.string, .{ .number = start });
+                },
+                .committed_size => {
+                    const size = try self.store.db.committedSize();
+                    self.checkNumber(op, size);
+                    if (op.get("as")) |as| self.bind(as.string, .{ .number = size });
+                },
+                .read_committed => {
+                    const start = self.number(op.get("start").?, "start");
+                    const end = self.number(op.get("end").?, "end");
+                    var writer = Io.Writer.Allocating.init(self.arena);
+                    try self.store.db.readCommitted(start, end, &writer.writer);
+                    if (op.get("expect_same")) |v| {
+                        const other = switch (self.lookup(v.string)) {
+                            .committed_bytes => |b| b,
+                            else => die("\"{s}\" doesn't hold committed bytes", .{v.string}),
+                        };
+                        if (!std.mem.eql(u8, writer.written(), other.data)) die("the {d} bytes read aren't the same as the {d} in \"{s}\"", .{ writer.written().len, other.data.len, v.string });
+                    }
+                    const bytes = self.arena.create(CommittedBytes) catch die("out of memory", .{});
+                    bytes.* = .{ .data = writer.written(), .source = self.store, .start = start };
+                    self.bind(op.get("as").?.string, .{ .committed_bytes = bytes });
+                },
+                .apply_replicated => try self.applyReplicated(op),
                 .close => {
-                    if (self.closed) die("the database is already closed", .{});
-                    try self.db.core.flush();
-                    if (self.read_only_file) |file| {
+                    if (self.store.closed) die("the database is already closed", .{});
+                    try self.store.db.core.flush();
+                    if (self.store.read_only_file) |file| {
                         file.close(self.io);
-                        self.read_only_file = null;
+                        self.store.read_only_file = null;
                     }
                     self.env.clearRetainingCapacity();
-                    self.closed = true;
+                    self.store.closed = true;
                 },
                 .reopen => {
-                    if (!self.closed) die("the database is already open", .{});
+                    if (!self.store.closed) die("the database is already open", .{});
                     if (op.get("hash_size")) |v| {
                         const size = asInt(u16, v, "hash_size");
                         if (size != HASH_SIZE) {
@@ -1024,28 +1372,29 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                         }
                     }
                     const read_only = if (op.get("read_only")) |v| v.bool else false;
-                    const file: Io.File = if (read_only) try Io.Dir.cwd().openFile(self.io, self.out_path, .{ .mode = .read_only }) else self.out;
+                    const file: Io.File = if (read_only) try Io.Dir.cwd().openFile(self.io, self.store.out_path, .{ .mode = .read_only }) else self.store.out;
                     errdefer if (read_only) file.close(self.io);
-                    self.db.* = try DB.init(self.io, self.initOpts(file, null, null));
-                    if (read_only) self.read_only_file = file;
-                    self.closed = false;
+                    self.store.db = try DB.init(self.io, initOpts(self.store, file, null, null));
+                    if (read_only) self.store.read_only_file = file;
+                    self.store.closed = false;
+                    self.store.broken = false;
                 },
                 .raw_append => {
-                    if (!self.closed) die("the file can only be written to directly while the database is closed", .{});
-                    const end = if (kind == .memory) self.buffer.written().len else try self.out.length(self.io);
+                    if (!self.store.closed) die("the file can only be written to directly while the database is closed", .{});
+                    const end = if (kind == .memory) self.store.buffer.written().len else try self.store.out.length(self.io);
                     try self.writeRaw(end, parseBytes(self.arena, op.get("bytes").?, "bytes"));
-                    self.may_have_leftovers = true;
+                    self.store.may_have_leftovers = true;
                 },
                 .raw_write => {
-                    if (!self.closed) die("the file can only be written to directly while the database is closed", .{});
+                    if (!self.store.closed) die("the file can only be written to directly while the database is closed", .{});
                     try self.writeRaw(asInt(u64, op.get("offset").?, "offset"), parseBytes(self.arena, op.get("bytes").?, "bytes"));
-                    self.may_have_leftovers = true;
+                    self.store.may_have_leftovers = true;
                 },
                 .write_path => {
                     self.writes += 1;
                     const cursor = self.rwValue(cursorName(op));
                     const path = self.parsePath(op.get("path").?);
-                    if (self.read_only_file != null) {
+                    if (self.store.read_only_file != null) {
                         for (path) |part| {
                             if (part == .ctx) die("a callback on a read-only file runs or doesn't depending on the storage kind, which is an undefined use", .{});
                         }
@@ -1079,10 +1428,10 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     try writer.finish();
                 },
                 .freeze => try self.rwPointer(cursorName(op)).freeze(),
-                .db_freeze => try self.db.freeze(),
+                .db_freeze => try self.store.db.freeze(),
                 .run_context => {
-                    if (self.read_only_file != null) die("a callback on a read-only file runs or doesn't depending on the storage kind, which is an undefined use", .{});
-                    try self.db.runContext(self.parseCtx(op.get("ctx").?));
+                    if (self.store.read_only_file != null) die("a callback on a read-only file runs or doesn't depending on the storage kind, which is an undefined use", .{});
+                    try self.store.db.runContext(self.parseCtx(op.get("ctx").?));
                 },
                 .fail => return error.ScriptAbort,
                 .read_path => {
@@ -1211,7 +1560,9 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     const result: ?RO = switch (entry.binding) {
                         inline .iter_rw, .iter_ro => |iter| blk: {
                             self.checkIteratorUse(name, entry);
-                            break :blk try iter.next();
+                            const next = try iter.next();
+                            if (next != null and isPastEndOfList(iter)) self.portDiffers("an iterator giving an element past the end of an array list");
+                            break :blk next;
                         },
                         else => die("\"{s}\" is not an iterator", .{name}),
                     };
@@ -1245,12 +1596,19 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
 
         // the top level. each op gets one sidecar entry.
 
-        fn readCommitId(self: *Self, committed_size: u64) !u64 {
-            var reader = self.db.core.reader();
+        fn readCommitId(store: *Store, committed_size: u64) !u64 {
+            var reader = store.db.core.reader();
             try reader.seekTo(committed_size - TRAILER_SIZE + TRAILER_COMMIT_ID_OFFSET);
             var bytes: [8]u8 = undefined;
             try reader.interface.readSliceAll(&bytes);
             return std.mem.readInt(u64, &bytes, .big);
+        }
+
+        /// its committed size, or null if it can't say
+        fn sizeOf(store: *Store) !?u64 {
+            if (store.closed) return null;
+            if (store.broken) return store.db.committedSize() catch null;
+            return try store.db.committedSize();
         }
 
         fn execTopLevel(self: *Self, ops: []const Json, entries: []SidecarEntry) !void {
@@ -1259,10 +1617,9 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 defer loc_len = saved_loc;
 
                 self.top_index = i;
-                const before: ?u64 = if (self.closed) null else try self.db.committedSize();
+                self.compacted_into = null;
                 self.execOp(op.object) catch |err| die("unexpected error {s}, which started at {s}", .{ @errorName(err), error_loc_buf[0..error_loc_len] });
                 self.writes_after_op.append(self.arena, self.writes) catch die("out of memory", .{});
-                const after: ?u64 = if (self.closed) null else try self.db.committedSize();
 
                 // an error handled here was fatal to the op, so if it was a
                 // transaction, it rolled back along with what its callbacks bound
@@ -1270,23 +1627,48 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     self.rolled_back.put(self.arena, i, {}) catch die("out of memory", .{});
                 }
 
-                // a transaction either committed or was rolled back, so unless the
-                // file has been written to directly, nothing can be left past the
-                // committed bytes between top-level ops
-                if (after) |size| {
-                    const length = try self.db.core.length();
-                    if (length == size) {
-                        self.may_have_leftovers = false;
-                    } else if (!self.may_have_leftovers) {
-                        die("{d} bytes are left past the committed size {d}", .{ length - size, size });
+                // the size can change without a commit when a file is reopened, or
+                // when bytes are applied to it, as those have commits of their own in them
+                const op_name = op.object.get("op").?.string;
+                const can_commit = !isKey(op_name, "reopen") and !isKey(op_name, "apply_replicated");
+
+                var committed: ?*Store = null;
+                var commit_id: ?u64 = null;
+                for (self.stores.items) |store| {
+                    const before = store.size_before;
+                    const after = try sizeOf(store);
+                    store.size_before = after;
+
+                    if (can_commit and before != null and after != null and before.? != after.?) {
+                        if (committed != null) die("one top-level op committed in both \"{s}\" and \"{s}\", which a sidecar has no way to say", .{ committed.?.name, store.name });
+                        committed = store;
+                        commit_id = try readCommitId(store, after.?);
+                        removeTrailersFrom(store, before.?);
+                        store.trailers.append(self.arena, .{
+                            .position = after.? - TRAILER_SIZE,
+                            .commit_id = commit_id.?,
+                            .file_id = store.db.header.file_id,
+                        }) catch die("out of memory", .{});
+                    }
+
+                    // a transaction either committed or was rolled back, so unless the
+                    // file has been written to directly, or a sync stopped part way, nothing
+                    // can be left past the committed bytes between top-level ops
+                    if (after) |size| {
+                        const length = try store.db.core.length();
+                        if (length == size) {
+                            store.may_have_leftovers = false;
+                        } else if (!store.may_have_leftovers) {
+                            die("{d} bytes are left past the committed size {d} of \"{s}\"", .{ length - size, size, store.name });
+                        }
                     }
                 }
 
-                // the size can change without a commit when a file is reopened, but
-                // then the database was closed before the op
+                const described = committed orelse self.compacted_into orelse self.store;
                 entry.* = .{
-                    .committed_size = after,
-                    .commit_id = if (before != null and after != null and before.? != after.?) try self.readCommitId(after.?) else null,
+                    .committed_size = described.size_before,
+                    .commit_id = commit_id,
+                    .db = if (isKey(described.name, "main")) null else described.name,
                 };
             }
         }
@@ -1296,47 +1678,76 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             validator.validateOps(opts.ops);
 
             const io = opts.io;
-            const out = try Io.Dir.cwd().createFile(io, opts.out_path, .{ .read = true, .truncate = true });
-            defer out.close(io);
+            var self: Self = .{
+                .arena = opts.arena,
+                .gpa = opts.gpa,
+                .io = io,
+                .main_path = opts.out_path,
+                .script_hash_id = opts.hash_id,
+                .allow_port_differences = opts.allow_port_differences,
+                .offset_map = std.AutoHashMap(u64, u64).init(opts.gpa),
+            };
+            defer self.offset_map.deinit();
 
-            var buffer = Io.Writer.Allocating.init(opts.gpa);
-            defer buffer.deinit();
-
-            var db: DB = undefined;
-            var self: Self = .{ .arena = opts.arena, .db = &db, .io = io, .out = out, .out_path = opts.out_path, .buffer = &buffer, .allow_port_differences = opts.allow_port_differences };
-            db = try DB.init(io, self.initOpts(out, opts.file_id, opts.hash_id));
-            const initial_size = try db.committedSize();
+            const main_store = opts.arena.create(Store) catch die("out of memory", .{});
+            const buffer = opts.arena.create(Io.Writer.Allocating) catch die("out of memory", .{});
+            buffer.* = Io.Writer.Allocating.init(opts.gpa);
+            main_store.* = .{
+                .name = "main",
+                .db = undefined,
+                .out = try Io.Dir.cwd().createFile(io, opts.out_path, .{ .read = true, .truncate = true }),
+                .out_path = opts.out_path,
+                .buffer = buffer,
+            };
+            main_store.db = try DB.init(io, initOpts(main_store, main_store.out, opts.file_id, opts.hash_id));
+            main_store.size_before = try main_store.db.committedSize();
+            const initial_size = main_store.size_before.?;
+            self.store = main_store;
+            try self.stores.append(opts.arena, main_store);
 
             const entries = try opts.arena.alloc(SidecarEntry, opts.ops.len);
             try self.execTopLevel(opts.ops, entries);
 
-            if (!self.closed) try db.core.flush();
-            if (self.read_only_file) |file| file.close(io);
-            if (kind == .memory) try out.writeStreamingAll(io, buffer.written());
+            for (self.stores.items) |store| {
+                if (!store.closed) try store.db.core.flush();
+                if (store.read_only_file) |file| file.close(io);
+                if (kind == .memory) try store.out.writeStreamingAll(io, store.buffer.written());
+            }
 
-            const file_size = try out.length(io);
-            try writeSidecar(opts, initial_size, file_size, entries);
+            try writeSidecar(opts, &self, initial_size, entries);
+
+            for (self.stores.items) |store| {
+                store.out.close(io);
+                store.buffer.deinit();
+            }
         }
 
-        fn writeSidecar(opts: Options, initial_size: u64, file_size: u64, entries: []const SidecarEntry) !void {
+        fn writeSidecar(opts: Options, self: *Self, initial_size: u64, entries: []const SidecarEntry) !void {
             var text = Io.Writer.Allocating.init(opts.gpa);
             defer text.deinit();
             const w = &text.writer;
 
-            try w.print("{{\n  \"format\": \"{s}\",\n  \"file_id\": \"{x:0>16}\",\n  \"initial_size\": {d},\n  \"file_size\": {d},\n  \"ops\": [", .{
+            const file_size = try self.stores.items[0].out.length(opts.io);
+            try w.print("{{\n  \"format\": \"{s}\",\n  \"file_id\": \"{x:0>16}\",\n  \"initial_size\": {d},\n  \"file_size\": {d},\n", .{
                 SIDECAR_FORMAT,
                 opts.file_id,
                 initial_size,
                 file_size,
             });
+            if (self.stores.items.len > 1) try writeDatabases(opts, self, w);
+            try w.writeAll("  \"ops\": [");
             for (entries, 0..) |entry, i| {
-                try w.writeAll(if (i == 0) "\n" else ",\n");
-                if (entry.commit_id) |id| {
-                    try w.print("    {{\"committed_size\": {d}, \"commit_id\": \"{x:0>16}\"}}", .{ entry.committed_size.?, id });
-                } else if (entry.committed_size) |size| {
-                    try w.print("    {{\"committed_size\": {d}, \"commit_id\": null}}", .{size});
+                try w.writeAll(if (i == 0) "\n    {" else ",\n    {");
+                if (entry.db) |db| try w.print("\"db\": \"{s}\", ", .{db});
+                if (entry.committed_size) |size| {
+                    try w.print("\"committed_size\": {d}, ", .{size});
                 } else {
-                    try w.writeAll("    {\"committed_size\": null, \"commit_id\": null}");
+                    try w.writeAll("\"committed_size\": null, ");
+                }
+                if (entry.commit_id) |id| {
+                    try w.print("\"commit_id\": \"{x:0>16}\"}}", .{id});
+                } else {
+                    try w.writeAll("\"commit_id\": null}");
                 }
             }
             try w.writeAll(if (entries.len == 0) "]\n}\n" else "\n  ]\n}\n");
@@ -1346,7 +1757,37 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             defer file.close(opts.io);
             try file.writeStreamingAll(opts.io, text.written());
         }
+
+        /// each database's file, and the trailers in it, whose commit IDs and checksums are all that differ between runs
+        fn writeDatabases(opts: Options, self: *Self, w: *Io.Writer) !void {
+            try w.writeAll("  \"databases\": {");
+            for (self.stores.items, 0..) |store, i| {
+                const file_size = try store.out.length(opts.io);
+                var file_id: u64 = 0;
+                if (file_size >= 20) {
+                    var bytes: [8]u8 = undefined;
+                    _ = try store.out.readPositionalAll(opts.io, &bytes, 12);
+                    file_id = std.mem.readInt(u64, &bytes, .big);
+                }
+                try w.print("{s}\n    \"{s}\": {{\"file_id\": \"{x:0>16}\", \"file_size\": {d}, \"trailers\": [", .{ if (i == 0) "" else ",", store.name, file_id, file_size });
+                var first = true;
+                for (store.trailers.items) |trailer| {
+                    if (trailer.position >= file_size) continue;
+                    try w.print("{s}\n      {{\"position\": {d}, \"commit_id\": \"{x:0>16}\", \"file_id\": \"{x:0>16}\"}}", .{ if (first) "" else ",", trailer.position, trailer.commit_id, trailer.file_id });
+                    first = false;
+                }
+                try w.writeAll(if (first) "]}" else "\n    ]}");
+            }
+            try w.writeAll("\n  },\n");
+        }
     };
+}
+
+/// null, or 4 bytes
+fn parseHashId(arena: Allocator, v: Json) ?xitdb.HashId {
+    if (v == .null) return null;
+    const bytes = parseFixedBytes(4, arena, v, "hash_id");
+    return xitdb.HashId.fromBytes(&bytes);
 }
 
 fn usage() noreturn {
@@ -1385,11 +1826,7 @@ pub fn main(init: std.process.Init) !void {
     if (!std.mem.eql(u8, format, SCRIPT_FORMAT)) die("unknown format \"{s}\"", .{format});
     if (script.get("description")) |description| _ = asString(description, "description");
 
-    const hash_id_value = required(script, "hash_id", "the script");
-    const hash_id: ?xitdb.HashId = if (hash_id_value == .null) null else blk: {
-        const bytes = parseFixedBytes(4, arena, hash_id_value, "hash_id");
-        break :blk xitdb.HashId.fromBytes(&bytes);
-    };
+    const hash_id = parseHashId(arena, required(script, "hash_id", "the script"));
     const file_id = parseHex64(arena, required(script, "file_id", "the script"), "file_id");
     const ops = asArray(required(script, "ops", "the script"), "ops");
     const hash_size = asInt(u16, required(script, "hash_size", "the script"), "hash_size");

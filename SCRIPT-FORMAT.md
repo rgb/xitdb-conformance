@@ -601,7 +601,7 @@ path API. What it does depends on the collection, since only the trees index a n
 ### What the port corrects
 
 The user has decided that the port differs from Zig in these reads from the start, so a valid script can't use them
-(findings 8, 9 and 21 in `director/zig-findings.md`). A second runner doesn't need to do anything about them, and `run`
+(findings 8, 9, 21 and 26 in `director/zig-findings.md`). A second runner doesn't need to do anything about them, and `run`
 fails on a script that uses them, unless it's given `--allow-port-differences`. `tests/port-differs/` has a pair of
 scripts for each, one with what Zig does and one with what the port does.
 
@@ -611,6 +611,7 @@ scripts for each, one with what Zig does and one with what the port does.
 | `read_stream` on a slot with nothing in it | `UnexpectedTag` | an empty stream |
 | `read_stream` on a `short_bytes` slot from a cursor with no position, which is a key from `{"sorted_map_get": {"key": ...}}` or from `read_key_value_pair` on a set's entry | `ExpectedSlotPosition` | it gives the value |
 | `read_stream` on a `short_bytes` slot that has since been overwritten | the length from the cursor and the bytes from the file, so neither value | it gives what the cursor holds |
+| `next` on an array list's iterator, when what it would give is past the end of the list. It stops after giving as many elements as the list has, it skips one that was never written, and a slice leaves what's past the new end in its blocks. So `[unwritten, 1, 2, 3]` sliced to a size of 2 gives 1 and 2 | it gives what `{"array_list_get": 2}` says isn't there | it goes through the positions up to the list's size and no further, so here it gives 1 |
 
 **Storage kinds don't otherwise change the bytes.** `check.sh` holds every script in this repository to that, across
 all three kinds, in debug and release builds.
@@ -652,11 +653,7 @@ All of these look like mistakes and all of them are what Zig does. `overwriting-
 11. **Opening a file doesn't clean it up.** Bytes past the committed size stay until a write, and a free init on a
    read-only file doesn't report that it couldn't truncate them. Only the committed size in the root header is ever
    read: the root slot next to it can be garbage, and the root comes from the trailer anyway.
-12. **An iterator can give an element past the end of a sliced array list.** It stops after giving as many elements as
-   the list has, rather than at the end of the list. It skips an element that was never written, and a slice leaves
-   the old elements in their blocks. So after `[unwritten, 1, 2, 3]` is sliced to a size of 2, it gives 1 and 2, while
-   `{"array_list_get": 2}` says there's nothing there. `iterator-after-slice` pins this.
-13. **An element appended and never written isn't the same in the two lists.** In an array list it's empty, so an
+12. **An element appended and never written isn't the same in the two lists.** In an array list it's empty, so an
    iterator skips it. In a linked array list it's marked as written with nothing (`lib.zig:2094`), so an iterator gives
    it.
 
