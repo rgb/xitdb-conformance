@@ -7,7 +7,8 @@
 # 3. the storage kind and the optimization level make no difference to the bytes;
 # 4. every script in tests/failing and tests/invalid fails, for the reason in its
 #    description;
-# 5. detcheck itself notices a changed byte.
+# 5. the fixtures haven't drifted from what the scripts produce now;
+# 6. detcheck itself notices a changed byte.
 
 set -eu
 cd "$(dirname "$0")"
@@ -78,6 +79,9 @@ expect_failures() { # folder
 echo "== scripts that must fail"
 expect_failures tests/failing
 expect_failures tests/invalid
+
+echo "== the fixtures"
+./fixtures.sh --check
 
 echo "== detcheck notices changes"
 A="$OUT/01-list-root-hash-map.a.db"

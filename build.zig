@@ -26,4 +26,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(detcheck_exe);
+
+    const manifest_exe = b.addExecutable(.{
+        .name = "manifest",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/manifest.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(manifest_exe);
 }
