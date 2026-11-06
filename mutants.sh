@@ -9,9 +9,10 @@
 # Every script is run against it, and compared with what the unchanged engine writes.
 #
 # It prints one line per mutant: how many of the scripts noticed, and which of the deep-*
-# ones did. Fails if a mutant gets past all of them. It isn't part of the gate, as it builds
-# the runner once per mutant. "Noticed" covers a different file, a failed expectation, and a
-# crash, and a mutant that only makes a script run forever counts too, after 30 seconds.
+# ones did. Fails if a mutant gets past all of them, or if only one script notices it, which is
+# how easily a change to that script could leave it unnoticed. It isn't part of the gate, as it
+# builds the runner once per mutant. "Noticed" covers a different file, a failed expectation,
+# and a crash, and a mutant that only makes a script run forever counts too, after 30 seconds.
 
 set -eu
 cd "$(dirname "$0")"
@@ -38,7 +39,7 @@ done
 
 # replaces the given occurrence of some text, and fails if it isn't there
 patch_lib() { # old text, new text, which occurrence
-    OLD=$1 NEW=$2 WANT=$3 perl -pi -e '
+    OLD=$1 NEW=$2 WANT=$3 perl -0777 -pi -e '
         BEGIN { $old = $ENV{OLD}; $new = $ENV{NEW}; $want = $ENV{WANT}; $n = 0; }
         s/\Q$old\E/++$n == $want ? $new : $old/ge;
         END { die "patch: \"$old\" appears $n times\n" if $n < $want; }
@@ -46,6 +47,7 @@ patch_lib() { # old text, new text, which occurrence
 }
 
 failed=0
+thin=0
 
 try_mutant() { # name, old text, new text, which occurrence
     name=$1
@@ -85,6 +87,10 @@ try_mutant() { # name, old text, new text, which occurrence
         echo "    others:$others"
     fi
     if [ "$noticed" -eq 0 ]; then failed=$((failed + 1)); fi
+    if [ "$noticed" -eq 1 ]; then
+        thin=$((thin + 1))
+        echo "    only:$deep$others"
+    fi
     rm -f "$WORK"/m.*
 }
 
@@ -118,15 +124,55 @@ try_mutant is-old-off-by-one "return ptr < @max(tx_start, frozen_at);" "return p
 
 # compaction, whose results should show in the target's bytes
 try_mutant compact-partial-blocks-as-full "if (@as(u128, size) == @as(u128, child_size) * SLOT_COUNT) {" "if (size == size) {"
+try_mutant compact-full-blocks-as-partial "if (@as(u128, size) == @as(u128, child_size) * SLOT_COUNT) {" "if (size != size) {"
+try_mutant compact-keeps-what-is-past-the-end "if (remaining == 0) break;" "if (remaining == 0 and false) break;"
+try_mutant compact-first-moment "if (try self.rootCursor().readPathSlot(void, &.{.{ .array_list_get = -1 }})) |last_moment| {" "if (try self.rootCursor().readPathSlot(void, &.{.{ .array_list_get = 0 }})) |last_moment| {"
+try_mutant compact-history-whole "switch (source_root.tag) {" "switch (@as(Tag, if (source_root.tag == .array_list) .hash_map else source_root.tag)) {"
+try_mutant compact-empty-root-commits "if (source_root.empty()) return target;" "if (source_root.empty() and false) return target;"
+try_mutant compact-target-not-checked "if (!(try target.readRootSlot()).empty()) return error.TargetNotEmpty;" "if (!(try target.readRootSlot()).empty() and false) return error.TargetNotEmpty;"
+try_mutant compact-hash-id-not-inherited "opts.hash_id = target_opts.hash_id orelse self.header.hash_id;" "opts.hash_id = target_opts.hash_id;"
+try_mutant compact-hash-id-always-the-source-s "opts.hash_id = target_opts.hash_id orelse self.header.hash_id;" "opts.hash_id = self.header.hash_id;"
+try_mutant compact-loses-format-tags "const format_tag_size: u64 = if (slot.full) 2 else 0;" "const format_tag_size: u64 = if (slot.full and false) 2 else 0;"
+try_mutant compact-loses-full "return .{ .value = new_offset, .tag = slot.tag, .full = slot.full };" "return .{ .value = new_offset, .tag = slot.tag, .full = false };"
+try_mutant compact-memory-offsets-not-cleared "offset_map.clearRetainingCapacity();" "_ = offset_map;"
+try_mutant compact-disk-offsets-not-cleared "try offset_map.reset();" "_ = offset_map;"
 try_mutant compact-bytes-not-shared "if (try self.getOffset(slot.value)) |target_offset| {" "if (if (slot.value == slot.value) @as(?u64, null) else try self.getOffset(slot.value)) |target_offset| {"
 try_mutant compact-objects-not-shared "if (try self.getOffset(source_offset)) |target_offset| {" "if (if (source_offset == source_offset) @as(?u64, null) else try self.getOffset(source_offset)) |target_offset| {"
 # replication
 try_mutant replica-always-replaced "return if (trailer.checksum == state.checksum) state.committed_size else 0;" "return if (trailer.checksum == state.checksum and false) state.committed_size else 0;"
 try_mutant replica-never-replaced "return if (trailer.checksum == state.checksum) state.committed_size else 0;" "return if (trailer.checksum == state.checksum or true) state.committed_size else 0;"
 try_mutant first-sync-keeps-latest-root-header ".file_size = end, .root = trailer.root" ".file_size = try self.committedSize(), .root = trailer.root"
+try_mutant first-sync-keeps-latest-root-slot ".file_size = end, .root = trailer.root" ".file_size = end, .root = try self.readRootSlot()"
+try_mutant replica-ahead-not-noticed "if (state.committed_size > try self.committedSize()) return 0;" "if (state.committed_size > try self.committedSize() and false) return 0;"
+try_mutant read-past-committed-allowed "if (start > end or end > try self.committedSize()) return error.InvalidRange;" "if (start > end) return error.InvalidRange;"
+try_mutant read-backwards-allowed "if (start > end or end > try self.committedSize()) return error.InvalidRange;" "if (end > try self.committedSize()) return error.InvalidRange;"
+try_mutant read-inside-root-header-allowed "if (start > 0 and start < ROOT_HEADER_END) return error.InvalidRange;" "if (start > 0 and start < ROOT_HEADER_END and false) return error.InvalidRange;"
+try_mutant apply-anywhere-allowed "} else return error.InvalidRange;
+
+            var writer = self.core.writer();
+            try writer.seekTo(start);
+            try reader.streamExact64" "}
+
+            var writer = self.core.writer();
+            try writer.seekTo(start);
+            try reader.streamExact64"
+try_mutant apply-at-0-keeps-what-was-there "try self.core.setLength(0);" "_ = &self.core;"
+try_mutant apply-keeps-leftovers "// discard anything past the committed bytes, such as the remains of an interrupted sync
+                try self.truncate();" "// discard anything past the committed bytes, such as the remains of an interrupted sync"
+try_mutant apply-at-0-keeps-the-old-header "try self.core.sync();
+                self.header = try self.readAndValidateHeader();" "try self.core.sync();
+                _ = try self.readAndValidateHeader();"
+try_mutant apply-leaves-root-header "try self.core.sync();
+                try self.writeRootHeader(trailer.root);" "try self.core.sync();
+                _ = trailer;"
+try_mutant trailer-checksum-not-checked "if (trailer.checksum != RootTrailer.computeChecksum(self.header.file_id, trailer_pos, trailer.root, trailer.commit_id)) return error.InvalidDatabase;" "if (trailer.checksum != RootTrailer.computeChecksum(self.header.file_id, trailer_pos, trailer.root, trailer.commit_id) and false) return error.InvalidDatabase;"
 
 if [ "$failed" -gt 0 ]; then
     echo "$failed mutants got past every script"
     exit 1
 fi
-echo "every mutant was noticed"
+if [ "$thin" -gt 0 ]; then
+    echo "$thin mutants were noticed by only one script"
+    exit 1
+fi
+echo "every mutant was noticed by more than one script"

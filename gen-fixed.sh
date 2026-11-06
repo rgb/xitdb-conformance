@@ -7,6 +7,7 @@
 # A change to gen changes the scripts it writes, and with them the fixtures. reads-<seed>
 # has reads added, and the same writes as what the same seed gives without them.
 # compact-<seed> ends with a compaction, whose target is an expected file too.
+# replica-<seed> ends with a sync, whose replica is one.
 
 set -eu
 cd "$(dirname "$0")"
@@ -16,6 +17,7 @@ DIR=tests/generated
 SEEDS="1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18"
 READ_SEEDS="101 102 103 104 105 106 107 108 109 110 111 112"
 COMPACT_SEEDS="201 202 203 204 205 206"
+REPLICA_SEEDS="301 302 303 304 305 306"
 
 case "${1:-}" in
     "")
@@ -29,7 +31,10 @@ case "${1:-}" in
         for seed in $COMPACT_SEEDS; do
             "$GEN" "$seed" "$DIR/compact-$seed.json" --compact
         done
-        echo "$DIR: wrote the scripts for seeds $SEEDS, with reads for $READ_SEEDS, and with a compaction for $COMPACT_SEEDS"
+        for seed in $REPLICA_SEEDS; do
+            "$GEN" "$seed" "$DIR/replica-$seed.json" --replicate
+        done
+        echo "$DIR: wrote the scripts for seeds $SEEDS, with reads for $READ_SEEDS, with a compaction for $COMPACT_SEEDS, and with a replica for $REPLICA_SEEDS"
         ;;
     --check)
         mkdir -p out
@@ -58,12 +63,21 @@ case "${1:-}" in
             }
             count=$((count + 1))
         done
+        for seed in $REPLICA_SEEDS; do
+            "$GEN" "$seed" out/gen-check.json --replicate
+            cmp -s out/gen-check.json "$DIR/replica-$seed.json" || {
+                echo "gen-fixed: seed $seed no longer gives $DIR/replica-$seed.json. Run ./gen-fixed.sh"
+                exit 1
+            }
+            count=$((count + 1))
+        done
         for script in "$DIR"/*.json; do
             name=$(basename "$script" .json)
             case "$name" in
                 gen-*) seed=${name#gen-} seeds=$SEEDS ;;
                 reads-*) seed=${name#reads-} seeds=$READ_SEEDS ;;
                 compact-*) seed=${name#compact-} seeds=$COMPACT_SEEDS ;;
+                replica-*) seed=${name#replica-} seeds=$REPLICA_SEEDS ;;
                 *)
                     echo "gen-fixed: $script doesn't look like a generated script"
                     exit 1
