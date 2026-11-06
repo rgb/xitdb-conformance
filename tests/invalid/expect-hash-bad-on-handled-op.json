@@ -1,0 +1,4 @@
+{ "format": "xitdb-script/1", "description": "expected failure: must be exactly 40 digits", "hash_size": 20, "hash_id": null, "file_id": "0000000000000001",
+  "ops": [
+    { "op": "read_key_value_pair", "on": "root", "expect_hash": { "hex": "00" }, "expect_error": "UnexpectedTag" }
+  ] }

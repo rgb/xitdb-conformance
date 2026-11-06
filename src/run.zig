@@ -5,8 +5,12 @@
 //! <out.db>.sidecar.json. Every script op maps to one call of xitdb's API, and
 //! the only state added here is the table of names that ops refer to.
 //!
-//! Exits with 0 on success, 1 when the script fails (an unexpected error, an
-//! expectation not met, or a malformed script), and 2 on a usage error. Output
+//! The whole script is validated before the database is created, so a script
+//! this runner accepts is well-formed everywhere, including in ops that are
+//! never reached. Everything that uses a script can rely on that.
+//!
+//! Exits with 0 on success, 1 when the script fails (it isn't valid, an error
+//! nothing handled, or an expectation not met), and 2 on a usage error. Output
 //! files must not be used after a nonzero exit.
 
 const std = @import("std");
@@ -21,6 +25,10 @@ const SIDECAR_SUFFIX = ".sidecar.json";
 const SCRIPT_FORMAT = "xitdb-script/1";
 const SIDECAR_FORMAT = "xitdb-sidecar/1";
 
+/// seeking further isn't a limit of the engine. it keeps a script runnable on
+/// every storage kind, and away from overflowing the writer's position.
+const MAX_SEEK = 1 << 24;
+
 // where the runner is in the script, for messages only
 
 var loc_buf: [4096]u8 = undefined;
@@ -31,6 +39,10 @@ fn pushLoc(comptime fmt: []const u8, args: anytype) usize {
     const written = std.fmt.bufPrint(loc_buf[loc_len..], fmt, args) catch return saved;
     loc_len += written.len;
     return saved;
+}
+
+fn pushOpLoc(i: usize) usize {
+    return if (loc_len == 0) pushLoc("ops[{d}]", .{i}) else pushLoc("/ops[{d}]", .{i});
 }
 
 fn die(comptime fmt: []const u8, args: anytype) noreturn {
@@ -88,7 +100,9 @@ fn asInt(comptime T: type, v: Json, what: []const u8) T {
         .number_string => |s| s,
         else => die("{s} must be an integer", .{what}),
     };
-    return std.fmt.parseInt(T, s, 10) catch die("{s}: {s} is not a valid {s}", .{ what, s, @typeName(T) });
+    const value = std.fmt.parseInt(T, s, 10) catch die("{s}: {s} is not a valid {s}", .{ what, s, @typeName(T) });
+    if (value == 0 and s[0] == '-') die("{s}: -0 is not a valid {s}", .{ what, @typeName(T) });
+    return value;
 }
 
 fn required(obj: ObjectMap, key: []const u8, what: []const u8) Json {
@@ -152,9 +166,28 @@ fn parseFixedBytes(comptime N: usize, arena: Allocator, v: Json, what: []const u
     return bytes[0..N].*;
 }
 
-fn hasExpectedError(op: ObjectMap) ?[]const u8 {
-    const v = op.get("expect_error") orelse return null;
-    return asString(v, "expect_error");
+/// ASCII letters, digits and underscores, not starting with a digit
+fn checkName(name: []const u8, what: []const u8) void {
+    if (name.len == 0) die("{s} can't be empty", .{what});
+    for (name, 0..) |c, i| {
+        switch (c) {
+            'a'...'z', 'A'...'Z', '_' => {},
+            '0'...'9' => if (i == 0) die("{s} can't start with a digit: \"{s}\"", .{ what, name }),
+            else => die("{s} can only have ASCII letters, digits and underscores: \"{s}\"", .{ what, name }),
+        }
+    }
+}
+
+/// a name that something can be bound to, which is any name but "root"
+fn checkBindable(name: []const u8, what: []const u8) void {
+    checkName(name, what);
+    if (isKey(name, "root")) die("\"root\" can't be bound", .{});
+}
+
+/// an optional field that binds a name
+fn checkBindableField(op: ObjectMap, field: []const u8) void {
+    const v = op.get(field) orelse return;
+    checkBindable(asString(v, field), field);
 }
 
 const OpKind = enum {
@@ -177,6 +210,25 @@ const OpKind = enum {
     read_bytes,
     count,
 };
+
+fn opFields(kind: OpKind) []const []const u8 {
+    return switch (kind) {
+        .write_path => &.{ "op", "note", "expect_error", "on", "path", "as" },
+        .write, .write_if_empty => &.{ "op", "note", "expect_error", "on", "data" },
+        .writer => &.{ "op", "note", "expect_error", "on", "format_tag", "steps" },
+        .freeze => &.{ "op", "note", "expect_error", "on" },
+        .db_freeze => &.{ "op", "note", "expect_error" },
+        .run_context => &.{ "op", "note", "expect_error", "ctx" },
+        .fail => &.{ "op", "note" },
+        .read_path => &.{ "op", "note", "expect_error", "on", "path", "as", "expect_null" },
+        .read_path_slot => &.{ "op", "note", "expect_error", "on", "path", "as", "expect_null", "expect" },
+        .slot => &.{ "op", "note", "expect_error", "on", "as", "expect" },
+        .read_only => &.{ "op", "note", "expect_error", "on", "as" },
+        .read_key_value_pair => &.{ "op", "note", "expect_error", "on", "key_as", "value_as", "expect_hash" },
+        .read_uint, .read_int, .read_float, .count => &.{ "op", "note", "expect_error", "on", "expect" },
+        .read_bytes => &.{ "op", "note", "expect_error", "on", "expect", "expect_format_tag" },
+    };
+}
 
 const SidecarEntry = struct {
     committed_size: u64,
@@ -204,6 +256,8 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         const Data = DB.WriteableData;
         const HASH_SIZE = @bitSizeOf(HashInt) / 8;
 
+        // where the root cursor points, which is the root header
+        const ROOT_POSITION = 20;
         // the trailer's size, and where the commit ID is inside it
         const TRAILER_SIZE = 25;
         const TRAILER_COMMIT_ID_OFFSET = 9;
@@ -214,6 +268,12 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             slot: ?Slot,
             // what `read_path` found nothing for
             null_cursor,
+        };
+
+        const Entry = struct {
+            binding: Binding,
+            // the top-level op it was bound in, for finding undefined uses
+            born: usize,
         };
 
         /// the callback of a `ctx` path part. the callback's cursor is bound to
@@ -229,54 +289,143 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 const saved_loc = pushLoc("/ctx:{s}", .{self.name});
                 defer loc_len = saved_loc;
 
-                if (r.active.contains(self.name)) die("callback name \"{s}\" is already in use by an enclosing callback", .{self.name});
-                r.active.put(r.arena, self.name, {}) catch die("out of memory", .{});
-                defer _ = r.active.remove(self.name);
-
                 r.bind(self.name, .{ .rw = cursor.* });
-
-                r.depth += 1;
-                defer r.depth -= 1;
                 try r.execOps(self.ops);
 
-                switch (r.env.get(self.name).?) {
+                switch (r.env.get(self.name).?.binding) {
                     .rw => |c| cursor.* = c,
                     else => die("callback name \"{s}\" must hold a read-write cursor when the callback ends", .{self.name}),
                 }
             }
         };
 
-        io: Io,
-        db: *DB,
         arena: Allocator,
-        env: std.StringHashMapUnmanaged(Binding) = .empty,
-        active: std.StringHashMapUnmanaged(void) = .empty,
-        depth: usize = 0,
+        // when validating there is no database, and parsing a path only checks it
+        db: *DB = undefined,
+        validating: bool = false,
+        // the names of the callbacks around the op being validated
+        enclosing: std.ArrayList([]const u8) = .empty,
+        env: std.StringHashMapUnmanaged(Entry) = .empty,
+        // the top-level op being run, and the ones that rolled back
+        top_index: usize = 0,
+        rolled_back: std.AutoHashMapUnmanaged(usize, void) = .empty,
         // the storage behind a `root` reference by pointer
         root_cursor: RW = undefined,
+
+        // validation: everything that can be known about a script without running it
+
+        fn validateOps(self: *Self, ops: []const Json) void {
+            for (ops, 0..) |op, i| {
+                const saved_loc = pushOpLoc(i);
+                defer loc_len = saved_loc;
+                self.validateOp(op);
+            }
+        }
+
+        fn validateOp(self: *Self, op_value: Json) void {
+            const op = asObject(op_value, "an op");
+            const name = asString(required(op, "op", "an op"), "op");
+            const kind_of_op = std.meta.stringToEnum(OpKind, name) orelse die("\"{s}\" is not an op", .{name});
+            checkKeys(op, opFields(kind_of_op), name);
+
+            if (op.get("note")) |note| _ = asString(note, "note");
+            if (op.get("expect_error")) |err| checkName(asString(err, "expect_error"), "expect_error");
+            if (kind_of_op != .run_context and kind_of_op != .db_freeze and kind_of_op != .fail) {
+                checkName(asString(required(op, "on", name), "on"), "on");
+            }
+            if (op.get("expect_null")) |v| _ = asBool(v, "expect_null");
+
+            switch (kind_of_op) {
+                .write_path => {
+                    _ = self.parsePath(required(op, "path", name));
+                    checkBindableField(op, "as");
+                },
+                .write, .write_if_empty => _ = self.parseData(required(op, "data", name)),
+                .writer => {
+                    if (op.get("format_tag")) |tag| _ = parseFixedBytes(2, self.arena, tag, "format_tag");
+                    for (asArray(required(op, "steps", name), "steps")) |step_value| {
+                        const step = onlyKey(asObject(step_value, "a writer step"), "a writer step");
+                        if (isKey(step.key, "write")) {
+                            _ = parseBytes(self.arena, step.value, "write");
+                        } else if (isKey(step.key, "seek")) {
+                            const offset = asInt(u64, step.value, "seek");
+                            if (offset > MAX_SEEK) die("seek can't go past {d}, got {d}", .{ @as(u64, MAX_SEEK), offset });
+                        } else die("a writer step must be \"write\" or \"seek\"", .{});
+                    }
+                },
+                .freeze, .db_freeze => {},
+                .run_context => _ = self.parseCtx(required(op, "ctx", name)),
+                .fail => if (self.enclosing.items.len == 0) die("fail can only be used in a callback", .{}),
+                .read_path => {
+                    _ = self.parsePath(required(op, "path", name));
+                    checkBindableField(op, "as");
+                },
+                .read_path_slot => {
+                    _ = self.parsePath(required(op, "path", name));
+                    checkBindableField(op, "as");
+                    validateSlotExpectation(op);
+                },
+                .slot => {
+                    checkBindableField(op, "as");
+                    validateSlotExpectation(op);
+                },
+                .read_only => checkBindable(asString(required(op, "as", name), "as"), "as"),
+                .read_key_value_pair => {
+                    checkBindableField(op, "key_as");
+                    checkBindableField(op, "value_as");
+                    if (op.get("key_as")) |key_as| {
+                        if (op.get("value_as")) |value_as| {
+                            if (isKey(key_as.string, value_as.string)) die("key_as and value_as can't be the same name", .{});
+                        }
+                    }
+                    if (op.get("expect_hash")) |hash| _ = self.parseHash(hash);
+                },
+                .read_uint, .count => if (op.get("expect")) |v| {
+                    _ = asInt(u64, v, "expect");
+                },
+                .read_int => if (op.get("expect")) |v| {
+                    _ = asInt(i64, v, "expect");
+                },
+                .read_float => if (op.get("expect")) |v| {
+                    _ = parseHex64(self.arena, v, "expect");
+                },
+                .read_bytes => {
+                    if (op.get("expect")) |v| _ = parseBytes(self.arena, v, "expect");
+                    if (op.get("expect_format_tag")) |v| {
+                        if (v != .null) _ = parseFixedBytes(2, self.arena, v, "expect_format_tag");
+                    }
+                },
+            }
+        }
+
+        fn validateSlotExpectation(op: ObjectMap) void {
+            const want = asObject(op.get("expect") orelse return, "expect");
+            checkKeys(want, &.{ "tag", "value", "full" }, "expect");
+            if (want.count() == 0) die("expect needs at least one of tag, value and full", .{});
+            if (want.get("tag")) |tag| _ = parseTag(asString(tag, "tag"));
+            if (want.get("value")) |value| _ = asInt(u64, value, "value");
+            if (want.get("full")) |full| _ = asBool(full, "full");
+        }
 
         // names
 
         fn bind(self: *Self, name: []const u8, binding: Binding) void {
-            if (isKey(name, "root")) die("\"root\" can't be bound", .{});
-            for (name, 0..) |c, i| {
-                switch (c) {
-                    'a'...'z', 'A'...'Z', '_' => {},
-                    '0'...'9' => if (i == 0) die("names can't start with a digit: \"{s}\"", .{name}),
-                    else => die("names can only have ASCII letters, digits and underscores: \"{s}\"", .{name}),
-                }
-            }
-            if (name.len == 0) die("names can't be empty", .{});
-            self.env.put(self.arena, name, binding) catch die("out of memory", .{});
+            self.env.put(self.arena, name, .{ .binding = binding, .born = self.top_index }) catch die("out of memory", .{});
+        }
+
+        fn entryFor(self: *Self, name: []const u8) *Entry {
+            const entry = self.env.getPtr(name) orelse die("\"{s}\" is not bound", .{name});
+            if (self.rolled_back.contains(entry.born)) die("\"{s}\" comes from a transaction that was rolled back, which is an undefined use", .{name});
+            return entry;
         }
 
         fn lookup(self: *Self, name: []const u8) Binding {
             if (isKey(name, "root")) return .{ .rw = self.db.rootCursor() };
-            return self.env.get(name) orelse die("\"{s}\" is not bound", .{name});
+            return self.entryFor(name).binding;
         }
 
         fn cursorName(op: ObjectMap) []const u8 {
-            return asString(required(op, "on", "this op"), "on");
+            return op.get("on").?.string;
         }
 
         /// the cursor called `name` as a value, for methods that don't change it
@@ -295,8 +444,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 self.root_cursor = self.db.rootCursor();
                 return &self.root_cursor;
             }
-            const binding = self.env.getPtr(name) orelse die("\"{s}\" is not bound", .{name});
-            return switch (binding.*) {
+            return switch (self.entryFor(name).binding) {
                 .rw => |*c| c,
                 .ro => die("\"{s}\" is a read-only cursor", .{name}),
                 .slot => die("\"{s}\" is a slot, not a cursor", .{name}),
@@ -316,6 +464,19 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
 
         fn wrap(cursor: anytype) Binding {
             return if (@TypeOf(cursor) == RW) .{ .rw = cursor } else .{ .ro = cursor };
+        }
+
+        /// writing to a cursor kept from an earlier transaction overwrites committed
+        /// bytes. the engine allows it, so stop it here to keep it out of any fixture.
+        fn checkNotStale(self: *Self, name: []const u8) void {
+            if (isKey(name, "root") or self.db.tx_start == null) return;
+            const entry = self.env.get(name) orelse return;
+            switch (entry.binding) {
+                .rw => |c| if (entry.born != self.top_index and c.slot_ptr.position != ROOT_POSITION) {
+                    die("\"{s}\" comes from an earlier transaction and can't be written to in this one, which is an undefined use", .{name});
+                },
+                else => {},
+            }
         }
 
         // values
@@ -343,14 +504,23 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     if (o.get("var")) |name_value| {
                         checkKeys(o, &.{"var"}, "a slot variable");
                         const name = asString(name_value, "var");
+                        if (self.validating) {
+                            checkBindable(name, "var");
+                            return Slot{};
+                        }
                         return switch (self.lookup(name)) {
                             .slot => |s| s,
                             else => die("\"{s}\" is not a slot", .{name}),
                         };
                     }
                     checkKeys(o, &.{ "tag", "value", "full" }, "a literal slot");
+                    const tag = parseTag(asString(required(o, "tag", "a literal slot"), "tag"));
+                    switch (tag) {
+                        .none, .short_bytes, .uint, .int, .float => {},
+                        else => die("a literal slot can't have the tag {s}, whose value is a file offset", .{@tagName(tag)}),
+                    }
                     return .{
-                        .tag = parseTag(asString(required(o, "tag", "a literal slot"), "tag")),
+                        .tag = tag,
                         .value = if (o.get("value")) |value| asInt(u64, value, "value") else 0,
                         .full = if (o.get("full")) |full| asBool(full, "full") else false,
                     };
@@ -474,37 +644,42 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         fn parseCtx(self: *Self, v: Json) Ctx {
             const o = asObject(v, "a callback");
             checkKeys(o, &.{ "as", "ops" }, "a callback");
-            return .{
-                .runner = self,
-                .name = asString(required(o, "as", "a callback"), "as"),
-                .ops = asArray(required(o, "ops", "a callback"), "ops"),
-            };
+            const name = asString(required(o, "as", "a callback"), "as");
+            const ops = asArray(required(o, "ops", "a callback"), "ops");
+            if (self.validating) {
+                checkBindable(name, "a callback's as");
+                for (self.enclosing.items) |enclosing| {
+                    if (isKey(enclosing, name)) die("callback name \"{s}\" is already used by a callback around this one", .{name});
+                }
+                self.enclosing.append(self.arena, name) catch die("out of memory", .{});
+                defer _ = self.enclosing.pop();
+                const saved_loc = pushLoc("/ctx:{s}", .{name});
+                defer loc_len = saved_loc;
+                self.validateOps(ops);
+            }
+            return .{ .runner = self, .name = name, .ops = ops };
         }
 
         // expectations
 
         fn checkNull(op: ObjectMap, is_null: bool) void {
             const v = op.get("expect_null") orelse return;
-            const want = asBool(v, "expect_null");
-            if (want != is_null) die("expected a {s} result, got a {s} one", .{ if (want) "null" else "non-null", if (is_null) "null" else "non-null" });
+            if (v.bool != is_null) die("expected a {s} result, got a {s} one", .{ if (v.bool) "null" else "non-null", if (is_null) "null" else "non-null" });
         }
 
         fn checkSlot(op: ObjectMap, slot: ?Slot) void {
             const v = op.get("expect") orelse return;
-            const want = asObject(v, "expect");
-            checkKeys(want, &.{ "tag", "value", "full" }, "expect");
+            const want = v.object;
             const s = slot orelse die("expected a slot, got null", .{});
             if (want.get("tag")) |tag| {
-                const name = asString(tag, "tag");
-                if (s.tag != parseTag(name)) die("expected tag {s}, got {s}", .{ name, @tagName(s.tag) });
+                if (s.tag != parseTag(tag.string)) die("expected tag {s}, got {s}", .{ tag.string, @tagName(s.tag) });
             }
             if (want.get("value")) |value| {
                 const n = asInt(u64, value, "value");
                 if (s.value != n) die("expected slot value {d}, got {d}", .{ n, s.value });
             }
             if (want.get("full")) |full| {
-                const b = asBool(full, "full");
-                if (s.full != b) die("expected full={}, got full={}", .{ b, s.full });
+                if (s.full != full.bool) die("expected full={}, got full={}", .{ full.bool, s.full });
             }
         }
 
@@ -512,18 +687,17 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
 
         fn execOps(self: *Self, ops: []const Json) anyerror!void {
             for (ops, 0..) |op, i| {
-                const saved_loc = pushLoc("/ops[{d}]", .{i});
+                const saved_loc = pushOpLoc(i);
                 defer loc_len = saved_loc;
-                try self.execOp(op);
+                try self.execOp(op.object);
             }
         }
 
         /// runs one op. with `expect_error` the op must fail with that error, which
         /// ends here; without it, an error is returned to whoever is running the
         /// ops, the way `try` would in a Zig callback.
-        fn execOp(self: *Self, op_value: Json) anyerror!void {
-            const op = asObject(op_value, "an op");
-            const expected = hasExpectedError(op);
+        fn execOp(self: *Self, op: ObjectMap) anyerror!void {
+            const expected: ?[]const u8 = if (op.get("expect_error")) |v| v.string else null;
             const result = self.dispatch(op);
             if (result) |_| {} else |_| noteErrorLoc();
             const want = expected orelse return result;
@@ -536,98 +710,84 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         }
 
         fn dispatch(self: *Self, op: ObjectMap) anyerror!void {
-            const name = asString(required(op, "op", "an op"), "op");
-            const kind_of_op = std.meta.stringToEnum(OpKind, name) orelse die("\"{s}\" is not an op", .{name});
+            const kind_of_op = std.meta.stringToEnum(OpKind, op.get("op").?.string).?;
 
             switch (kind_of_op) {
                 .write_path => {
-                    checkKeys(op, &.{ "op", "note", "expect_error", "on", "path", "as" }, name);
-                    const cursor = self.rwValue(cursorName(op));
-                    const path = self.parsePath(required(op, "path", name));
+                    const name = cursorName(op);
+                    const cursor = self.rwValue(name);
+                    const path = self.parsePath(op.get("path").?);
+                    if (path.len > 0) self.checkNotStale(name);
                     const next = try cursor.writePath(Ctx, path);
-                    if (op.get("as")) |as| self.bind(asString(as, "as"), .{ .rw = next });
+                    if (op.get("as")) |as| self.bind(as.string, .{ .rw = next });
                 },
                 .write => {
-                    checkKeys(op, &.{ "op", "note", "expect_error", "on", "data" }, name);
-                    const data = self.parseData(required(op, "data", name));
-                    try self.rwPointer(cursorName(op)).write(data);
+                    const name = cursorName(op);
+                    const data = self.parseData(op.get("data").?);
+                    const cursor = self.rwPointer(name);
+                    self.checkNotStale(name);
+                    try cursor.write(data);
                 },
                 .write_if_empty => {
-                    checkKeys(op, &.{ "op", "note", "expect_error", "on", "data" }, name);
-                    const data = self.parseData(required(op, "data", name));
-                    try self.rwPointer(cursorName(op)).writeIfEmpty(data);
+                    const name = cursorName(op);
+                    const data = self.parseData(op.get("data").?);
+                    const cursor = self.rwPointer(name);
+                    self.checkNotStale(name);
+                    try cursor.writeIfEmpty(data);
                 },
                 .writer => {
-                    checkKeys(op, &.{ "op", "note", "expect_error", "on", "format_tag", "steps" }, name);
-                    const steps = asArray(required(op, "steps", name), "steps");
+                    const name = cursorName(op);
                     const format_tag: ?[2]u8 = if (op.get("format_tag")) |tag| parseFixedBytes(2, self.arena, tag, "format_tag") else null;
-                    const cursor = self.rwPointer(cursorName(op));
+                    const cursor = self.rwPointer(name);
+                    self.checkNotStale(name);
                     var writer = try cursor.writer(&.{});
                     writer.format_tag = format_tag;
-                    for (steps) |step_value| {
-                        const step = onlyKey(asObject(step_value, "a writer step"), "a writer step");
+                    for (op.get("steps").?.array.items) |step_value| {
+                        const step = onlyKey(step_value.object, "a writer step");
                         if (isKey(step.key, "write")) {
                             try writer.interface.writeAll(parseBytes(self.arena, step.value, "write"));
-                        } else if (isKey(step.key, "seek")) {
+                        } else {
                             try writer.seekTo(asInt(u64, step.value, "seek"));
-                        } else die("a writer step must be \"write\" or \"seek\"", .{});
+                        }
                     }
                     try writer.finish();
                 },
-                .freeze => {
-                    checkKeys(op, &.{ "op", "note", "expect_error", "on" }, name);
-                    try self.rwPointer(cursorName(op)).freeze();
-                },
-                .db_freeze => {
-                    checkKeys(op, &.{ "op", "note", "expect_error" }, name);
-                    try self.db.freeze();
-                },
-                .run_context => {
-                    checkKeys(op, &.{ "op", "note", "expect_error", "ctx" }, name);
-                    try self.db.runContext(self.parseCtx(required(op, "ctx", name)));
-                },
-                .fail => {
-                    checkKeys(op, &.{ "op", "note" }, name);
-                    if (self.depth == 0) die("fail can only be used in a callback", .{});
-                    return error.ScriptAbort;
-                },
+                .freeze => try self.rwPointer(cursorName(op)).freeze(),
+                .db_freeze => try self.db.freeze(),
+                .run_context => try self.db.runContext(self.parseCtx(op.get("ctx").?)),
+                .fail => return error.ScriptAbort,
                 .read_path => {
-                    checkKeys(op, &.{ "op", "note", "expect_error", "on", "path", "as", "expect_null" }, name);
-                    const path = self.parsePath(required(op, "path", name));
+                    const path = self.parsePath(op.get("path").?);
                     const result = switch (self.anyCursor(cursorName(op))) {
                         inline .rw, .ro => |c| try c.readPath(Ctx, path),
                         else => unreachable,
                     };
                     checkNull(op, result == null);
-                    if (op.get("as")) |as| self.bind(asString(as, "as"), if (result) |c| .{ .ro = c } else .null_cursor);
+                    if (op.get("as")) |as| self.bind(as.string, if (result) |c| .{ .ro = c } else .null_cursor);
                 },
                 .read_path_slot => {
-                    checkKeys(op, &.{ "op", "note", "expect_error", "on", "path", "as", "expect_null", "expect" }, name);
-                    const path = self.parsePath(required(op, "path", name));
+                    const path = self.parsePath(op.get("path").?);
                     const result = switch (self.anyCursor(cursorName(op))) {
                         inline .rw, .ro => |c| try c.readPathSlot(Ctx, path),
                         else => unreachable,
                     };
                     checkNull(op, result == null);
                     checkSlot(op, result);
-                    if (op.get("as")) |as| self.bind(asString(as, "as"), .{ .slot = result });
+                    if (op.get("as")) |as| self.bind(as.string, .{ .slot = result });
                 },
                 .slot => {
-                    checkKeys(op, &.{ "op", "note", "expect_error", "on", "as", "expect" }, name);
                     const result = switch (self.anyCursor(cursorName(op))) {
                         inline .rw, .ro => |c| try c.slot(),
                         else => unreachable,
                     };
                     checkSlot(op, result);
-                    if (op.get("as")) |as| self.bind(asString(as, "as"), .{ .slot = result });
+                    if (op.get("as")) |as| self.bind(as.string, .{ .slot = result });
                 },
                 .read_only => {
-                    checkKeys(op, &.{ "op", "note", "expect_error", "on", "as" }, name);
                     const result = self.rwValue(cursorName(op)).readOnly();
-                    self.bind(asString(required(op, "as", name), "as"), .{ .ro = result });
+                    self.bind(op.get("as").?.string, .{ .ro = result });
                 },
                 .read_key_value_pair => {
-                    checkKeys(op, &.{ "op", "note", "expect_error", "on", "key_as", "value_as", "expect_hash" }, name);
                     switch (self.anyCursor(cursorName(op))) {
                         inline .rw, .ro => |c| {
                             const pair = try c.readKeyValuePair();
@@ -635,14 +795,13 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                                 const want = self.parseHash(hash);
                                 if (pair.hash != want) die("expected hash {x}, got {x}", .{ want, pair.hash });
                             }
-                            if (op.get("key_as")) |as| self.bind(asString(as, "key_as"), wrap(pair.key_cursor));
-                            if (op.get("value_as")) |as| self.bind(asString(as, "value_as"), wrap(pair.value_cursor));
+                            if (op.get("key_as")) |as| self.bind(as.string, wrap(pair.key_cursor));
+                            if (op.get("value_as")) |as| self.bind(as.string, wrap(pair.value_cursor));
                         },
                         else => unreachable,
                     }
                 },
                 .read_uint => {
-                    checkKeys(op, &.{ "op", "note", "expect_error", "on", "expect" }, name);
                     const got = switch (self.anyCursor(cursorName(op))) {
                         inline .rw, .ro => |c| try c.readUint(),
                         else => unreachable,
@@ -653,7 +812,6 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     }
                 },
                 .read_int => {
-                    checkKeys(op, &.{ "op", "note", "expect_error", "on", "expect" }, name);
                     const got = switch (self.anyCursor(cursorName(op))) {
                         inline .rw, .ro => |c| try c.readInt(),
                         else => unreachable,
@@ -664,7 +822,6 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     }
                 },
                 .read_float => {
-                    checkKeys(op, &.{ "op", "note", "expect_error", "on", "expect" }, name);
                     const got = switch (self.anyCursor(cursorName(op))) {
                         inline .rw, .ro => |c| try c.readFloat(),
                         else => unreachable,
@@ -676,7 +833,6 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     }
                 },
                 .read_bytes => {
-                    checkKeys(op, &.{ "op", "note", "expect_error", "on", "expect", "expect_format_tag" }, name);
                     const got = switch (self.anyCursor(cursorName(op))) {
                         inline .rw, .ro => |c| try c.readBytesObjectAlloc(self.arena, null),
                         else => unreachable,
@@ -692,7 +848,6 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     }
                 },
                 .count => {
-                    checkKeys(op, &.{ "op", "note", "expect_error", "on", "expect" }, name);
                     const got = switch (self.anyCursor(cursorName(op))) {
                         inline .rw, .ro => |c| try c.count(),
                         else => unreachable,
@@ -717,12 +872,19 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
 
         fn execTopLevel(self: *Self, ops: []const Json, entries: []SidecarEntry) !void {
             for (ops, entries, 0..) |op, *entry, i| {
-                const saved_loc = pushLoc("ops[{d}]", .{i});
+                const saved_loc = pushOpLoc(i);
                 defer loc_len = saved_loc;
 
+                self.top_index = i;
                 const before = try self.db.committedSize();
-                self.execOp(op) catch |err| die("unexpected error {s}, which started at {s}", .{ @errorName(err), error_loc_buf[0..error_loc_len] });
+                self.execOp(op.object) catch |err| die("unexpected error {s}, which started at {s}", .{ @errorName(err), error_loc_buf[0..error_loc_len] });
                 const after = try self.db.committedSize();
+
+                // an error handled here was fatal to the op, so if it was a
+                // transaction, it rolled back along with what its callbacks bound
+                if (op.object.get("expect_error") != null) {
+                    self.rolled_back.put(self.arena, i, {}) catch die("out of memory", .{});
+                }
 
                 // a transaction either committed or was rolled back, so nothing
                 // can be left past the committed bytes between top-level ops
@@ -737,6 +899,9 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         }
 
         fn runScript(opts: Options) !void {
+            var validator: Self = .{ .arena = opts.arena, .validating = true };
+            validator.validateOps(opts.ops);
+
             const io = opts.io;
             const out = try Io.Dir.cwd().createFile(io, opts.out_path, .{ .read = true, .truncate = true });
             defer out.close(io);
@@ -752,7 +917,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             var db = try DB.init(io, init_opts);
             const initial_size = try db.committedSize();
 
-            var self: Self = .{ .io = io, .db = &db, .arena = opts.arena };
+            var self: Self = .{ .arena = opts.arena, .db = &db };
             const entries = try opts.arena.alloc(SidecarEntry, opts.ops.len);
             try self.execTopLevel(opts.ops, entries);
 
@@ -820,6 +985,7 @@ pub fn main(init: std.process.Init) !void {
 
     const format = asString(required(script, "format", "the script"), "format");
     if (!std.mem.eql(u8, format, SCRIPT_FORMAT)) die("unknown format \"{s}\"", .{format});
+    if (script.get("description")) |description| _ = asString(description, "description");
 
     const hash_id_value = required(script, "hash_id", "the script");
     const hash_id: ?xitdb.HashId = if (hash_id_value == .null) null else blk: {

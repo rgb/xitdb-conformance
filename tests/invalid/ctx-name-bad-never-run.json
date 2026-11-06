@@ -1,0 +1,4 @@
+{ "format": "xitdb-script/1", "description": "expected failure: can't start with a digit", "hash_size": 20, "hash_id": null, "file_id": "0000000000000001",
+  "ops": [
+    { "op": "read_path", "on": "root", "path": [{ "ctx": { "as": "1x", "ops": [] } }], "expect_error": "WriteNotAllowed" }
+  ] }

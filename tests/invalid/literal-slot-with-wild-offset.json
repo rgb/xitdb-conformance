@@ -1,0 +1,4 @@
+{ "format": "xitdb-script/1", "description": "expected failure: whose value is a file offset", "hash_size": 20, "hash_id": null, "file_id": "0000000000000001",
+  "ops": [
+    { "op": "write_path", "on": "root", "path": ["linked_array_list_init", { "linked_array_list_concat": { "list": { "tag": "linked_array_list", "value": 18446744073709551615 } } }] }
+  ] }

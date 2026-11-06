@@ -5,7 +5,8 @@
 # 2. every script runs, twice, and the two files differ only in the commit ID and
 #    checksum of each trailer (see src/detcheck.zig for exactly what's checked);
 # 3. the storage kind and the optimization level make no difference to the bytes;
-# 4. every script in tests/invalid fails, for the reason in its description;
+# 4. every script in tests/failing and tests/invalid fails, for the reason in its
+#    description;
 # 5. detcheck itself notices a changed byte.
 
 set -eu
@@ -44,30 +45,39 @@ for script in scripts/*.json tests/valid/*.json; do
     echo "$name: buffered_file == file == memory == release"
 done
 
-echo "== invalid scripts"
-count=0
-for script in tests/invalid/*.json; do
-    name=$(basename "$script" .json)
-    want=$(sed -n 's/.*"description": "expected failure: \([^"]*\)".*/\1/p' "$script" | head -n 1)
-    if [ -z "$want" ]; then
-        echo "$name: no expected failure in its description"
-        exit 1
-    fi
-    status=0
-    "$RUN" "$script" "$OUT/$name.db" 2> "$OUT/$name.err" || status=$?
-    if [ "$status" -ne 1 ]; then
-        echo "$name: expected exit status 1, got $status"
-        cat "$OUT/$name.err"
-        exit 1
-    fi
-    if ! grep -qF -- "$want" "$OUT/$name.err"; then
-        echo "$name: expected a failure with \"$want\", got:"
-        cat "$OUT/$name.err"
-        exit 1
-    fi
-    count=$((count + 1))
-done
-echo "$count scripts failed as they should"
+expect_failures() { # folder
+    count=0
+    for script in "$1"/*.json; do
+        name=$(basename "$script" .json)
+        want=$(sed -n 's/.*"description": "expected failure: \([^"]*\)".*/\1/p' "$script" | head -n 1)
+        # the one script whose description can't say, because its description is the problem
+        if [ "$name" = "description-wrong-type" ]; then
+            want="description must be a string"
+        fi
+        if [ -z "$want" ]; then
+            echo "$name: no expected failure in its description"
+            exit 1
+        fi
+        status=0
+        "$RUN" "$script" "$OUT/$name.db" 2> "$OUT/$name.err" || status=$?
+        if [ "$status" -ne 1 ]; then
+            echo "$name: expected exit status 1, got $status"
+            cat "$OUT/$name.err"
+            exit 1
+        fi
+        if ! grep -qF -- "$want" "$OUT/$name.err"; then
+            echo "$name: expected a failure with \"$want\", got:"
+            cat "$OUT/$name.err"
+            exit 1
+        fi
+        count=$((count + 1))
+    done
+    echo "$1: $count scripts failed as they should"
+}
+
+echo "== scripts that must fail"
+expect_failures tests/failing
+expect_failures tests/invalid
 
 echo "== detcheck notices changes"
 A="$OUT/01-list-root-hash-map.a.db"

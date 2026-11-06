@@ -1,0 +1,7 @@
+{ "format": "xitdb-script/1", "description": "expected failure: not valid JSON", "hash_size": 20, "hash_id": null, "file_id": "0000000000000001",
+  "ops": [
+    { "op": "run_context", "ctx": { "as": "c", "ops": [
+      { "op": "fail" },
+      { "op": "count", "on": "c", "on": "c" }
+    ] }, "expect_error": "ScriptAbort" }
+  ] }

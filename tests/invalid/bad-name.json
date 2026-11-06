@@ -1,4 +1,4 @@
-{ "format": "xitdb-script/1", "description": "expected failure: names can only have", "hash_size": 20, "hash_id": null, "file_id": "0000000000000001",
+{ "format": "xitdb-script/1", "description": "expected failure: can only have ASCII", "hash_size": 20, "hash_id": null, "file_id": "0000000000000001",
   "ops": [
     { "op": "read_only", "on": "root", "as": "a b" }
   ] }

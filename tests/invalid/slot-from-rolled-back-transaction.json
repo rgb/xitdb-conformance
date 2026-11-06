@@ -1,0 +1,9 @@
+{ "format": "xitdb-script/1", "description": "expected failure: was rolled back", "hash_size": 20, "hash_id": null, "file_id": "0000000000000001",
+  "ops": [
+    { "op": "write_path", "on": "root", "path": ["array_list_init", "array_list_append", { "ctx": { "as": "c", "ops": [
+      { "op": "write", "on": "c", "data": { "bytes": "a long enough value" } },
+      { "op": "slot", "on": "c", "as": "s" },
+      { "op": "fail" }
+    ] } }], "expect_error": "ScriptAbort" },
+    { "op": "write", "on": "root", "data": { "slot": { "var": "s" } } }
+  ] }
