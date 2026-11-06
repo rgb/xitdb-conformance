@@ -437,8 +437,10 @@ that holds one.
 | `apply_replicated` | `start`, `bytes`, `short_by?` | `current.applyReplicated(start, reader, len)`, with `start` a number, `bytes` a name holding committed bytes, a reader over them, and `len` their length | |
 
 `expect` on `replication_start` and `committed_size` is a number. `expect_same` is a name holding committed bytes, and
-what was read must be the same bytes. `short_by` leaves that many bytes off the end of `bytes`, which is the sync that was
-interrupted, and is how an append comes to fail.
+what was read must be the same bytes. An expected file only says how a database ended up, so this is what scripts use to
+say how each sync left a replica: its committed bytes are the source's, and the source's are in its expected file.
+`short_by` leaves that many bytes off the end of `bytes`, which is the sync that was interrupted, and is how an append
+comes to fail.
 
 What's applied must be applied where it was read from: `run` fails on a `start` other than the one it was read with, if
 the start is one that gets as far as writing. Those are 0, and the database's committed size. Any other raises

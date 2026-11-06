@@ -23,6 +23,7 @@
     { "op": "apply_replicated", "start": 0, "bytes": "sent", "note": "and a whole one puts it right" },
     { "op": "committed_size", "expect": 96 },
     { "op": "read_uint", "on": "root", "expect": 1 },
+    { "op": "read_committed", "start": 0, "end": 96, "as": "got", "expect_same": "sent" },
     { "op": "replica_state", "as": "state" },
     { "op": "use", "name": "main" },
     { "op": "replication_start", "state": "state", "expect": 96 },

@@ -700,17 +700,11 @@ fn sync(s: *S, comptime source: []const u8, comptime replica: []const u8, first:
     try s.op("{{\"op\":\"use\",\"name\":\"" ++ replica ++ "\"}}", .{});
     try s.op("{{\"op\":\"apply_replicated\",\"start\":{{\"var\":\"start\"}},\"bytes\":\"sent\"}}", .{});
     try s.op("{{\"op\":\"committed_size\",\"expect\":{{\"var\":\"end\"}}}}", .{});
+    // the expected files only say how a database ended up, so this is what says how each
+    // sync left it: all of what the two have committed is the same
+    try s.op("{{\"op\":\"read_committed\",\"start\":0,\"end\":{{\"var\":\"end\"}},\"as\":\"from_replica\"}}", .{});
     try s.op("{{\"op\":\"use\",\"name\":\"" ++ source ++ "\"}}", .{});
-}
-
-/// all of what the two have committed is the same, whatever's in their root headers now
-fn expectSameBytes(s: *S, comptime source: []const u8, comptime replica: []const u8) !void {
-    try s.op("{{\"op\":\"use\",\"name\":\"" ++ source ++ "\"}}", .{});
-    try s.op("{{\"op\":\"committed_size\",\"as\":\"end\"}}", .{});
-    try s.op("{{\"op\":\"read_committed\",\"start\":0,\"end\":{{\"var\":\"end\"}},\"as\":\"from_source\"}}", .{});
-    try s.op("{{\"op\":\"use\",\"name\":\"" ++ replica ++ "\"}}", .{});
-    try s.op("{{\"op\":\"read_committed\",\"start\":0,\"end\":{{\"var\":\"end\"}},\"as\":\"from_replica\",\"expect_same\":\"from_source\"}}", .{});
-    try s.op("{{\"op\":\"use\",\"name\":\"" ++ source ++ "\"}}", .{});
+    try s.op("{{\"op\":\"read_committed\",\"start\":0,\"end\":{{\"var\":\"end\"}},\"as\":\"from_source\",\"expect_same\":\"from_replica\"}}", .{});
 }
 
 fn replicateHistory(w: *Io.Writer) !void {
@@ -736,7 +730,6 @@ fn replicateHistory(w: *Io.Writer) !void {
         // each one for a while, and then several at a time
         if (i < 40 or i % 7 == 0 or i == 200 or i == 299) try sync(&s, "main", "replica", false);
     }
-    try expectSameBytes(&s, "main", "replica");
 
     // 196 moments before the slice, cut to 150, and 97 after it
     try s.op("{{\"op\":\"use\",\"name\":\"replica\"}}", .{});
@@ -758,11 +751,9 @@ fn replicateHistory(w: *Io.Writer) !void {
     try s.op("{{\"op\":\"compact\",\"into\":\"compacted\",\"file_id\":\"00000000000000dd\",\"offset_map\":\"memory\"}}", .{});
     try s.op("{{\"op\":\"create_database\",\"name\":\"compacted_replica\",\"file_id\":\"00000000000000ee\"}}", .{});
     try sync(&s, "compacted", "compacted_replica", true);
-    try expectSameBytes(&s, "compacted", "compacted_replica");
     try s.op("{{\"op\":\"read_path_slot\",\"on\":\"root\",\"path\":[{{\"array_list_get\":-1}}],\"as\":\"last\"}}", .{});
     try s.op("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[\"array_list_init\",\"array_list_append\",{{\"write\":{{\"slot\":{{\"var\":\"last\"}}}}}}],\"note\":\"and it can keep receiving transactions\"}}", .{});
     try sync(&s, "compacted", "compacted_replica", false);
-    try expectSameBytes(&s, "compacted", "compacted_replica");
     try s.op("{{\"op\":\"use\",\"name\":\"compacted_replica\"}}", .{});
     try s.op("{{\"op\":\"count\",\"on\":\"root\",\"expect\":2}}", .{});
     try s.readMoment(-1);
@@ -787,7 +778,6 @@ fn replicateRoots(w: *Io.Writer) !void {
         if (i == 50) try s.op("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[{{\"hash_map_init\":{{}}}},{{\"hash_map_remove\":{{\"sha1\":\"key-25\"}}}}]}}", .{});
         if (i % 10 == 9) try sync(&s, "main", "replica", false);
     }
-    try expectSameBytes(&s, "main", "replica");
 
     try s.op("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[{{\"hash_map_init\":{{}}}},{{\"hash_map_get\":{{\"key\":{{\"sha1\":\"key-1\"}}}}}},{{\"write\":{{\"bytes\":\"key-1\"}}}}]}}", .{});
     try s.open("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[{{\"hash_map_init\":{{}}}},{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"inner\"}}}}}},{{\"ctx\":{{\"as\":\"c\",\"ops\":[", .{});
@@ -814,7 +804,6 @@ fn replicateRoots(w: *Io.Writer) !void {
         }
     }
     try sync(&s, "main", "replica", false);
-    try expectSameBytes(&s, "main", "replica");
 
     try s.op("{{\"op\":\"write_path\",\"on\":\"root\",\"path\":[{{\"hash_map_init\":{{}}}},{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"late\"}}}}}}],\"as\":\"late\",\"note\":\"a nested write cursor can't be written to after its transaction\"}}", .{});
     try s.op("{{\"op\":\"write\",\"on\":\"late\",\"data\":{{\"uint\":1}},\"expect_error\":\"ExpectedTxStart\"}}", .{});
@@ -833,7 +822,6 @@ fn replicateRoots(w: *Io.Writer) !void {
     try s.op("{{\"op\":\"compact\",\"into\":\"compacted\",\"file_id\":\"00000000000000dd\",\"offset_map\":\"memory\"}}", .{});
     try s.op("{{\"op\":\"create_database\",\"name\":\"compacted_replica\",\"file_id\":\"00000000000000ee\"}}", .{});
     try sync(&s, "compacted", "compacted_replica", true);
-    try expectSameBytes(&s, "compacted", "compacted_replica");
 
     // the other kinds of root, for which a replica is no different
     try s.op("{{\"op\":\"create_database\",\"name\":\"s_list\",\"file_id\":\"0000000000000011\"}}", .{});
