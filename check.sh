@@ -209,7 +209,7 @@ count=0
 for script in scripts/*.json tests/valid/*.json tests/generated/*.json; do
     name=$(basename "$script" .json)
     # each of the other databases, if it has any, the same way
-    for database in "" $(grep -o '^    "[A-Za-z0-9_]*": {"file_id"' "$OUT/$name.a.db.sidecar.json" | sed 's/^    "\(.*\)".*/\1/' | grep -v '^main$'); do
+    for database in "" $(grep -o '^    "[A-Za-z0-9_]*": {"file_id"' "$OUT/$name.a.db.sidecar.json" | sed 's/^    "\([^"]*\)".*/\1/' | grep -v '^main$'); do
         suffix=${database:+.$database}
         # one can be left in no state to read by a script that means to, and it's there to compare
         status=0

@@ -803,7 +803,7 @@ All of these look like mistakes and all of them are what Zig does. `overwriting-
 13. **Compacting a history with no last moment loses the history.** A list at the root with no moments, or whose last
    moment was never written, compacts to an empty root, and not to a list.
 14. **A failed sync at 0 leaves no database.** It empties the file first, so it can't be opened until a sync at 0
-   succeeds. `file-format.md` and the README say so, and that a caller who minds should copy to a new file.
+   succeeds. Zig's README says so, and that a caller who minds should write the copy to a new file.
 
 ## 12. Worked example
 
