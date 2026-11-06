@@ -18,6 +18,9 @@ independent of the Swift code.
 - `fixtures/`: every script with what Zig produces for it, which the Swift package copies into its test resources.
   `fixtures.sh` regenerates it, and `src/manifest.zig` lists what each script needs.
 - `src/coverage.zig`: `coverage <script>...`, which checks that the scripts use everything in the format.
+- `src/dump.zig`: `dump <file>`, which prints what's in a database in a form that doesn't depend on file layout.
+- `src/bench.zig`: `bench`, the Zig side of the workloads in `../director/spec/benchmarks.md`. For real numbers, build
+  it with `zig build -Doptimize=ReleaseFast --prefix out/release` and run `out/release/bin/bench`.
 - `check.sh`: the gate. It builds everything and checks all of the above, in debug and release builds and across
   all three storage kinds.
 

@@ -57,4 +57,26 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(coverage_exe);
+
+    const bench_exe = b.addExecutable(.{
+        .name = "bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "xitdb", .module = xitdb }},
+        }),
+    });
+    b.installArtifact(bench_exe);
+
+    const dump_exe = b.addExecutable(.{
+        .name = "dump",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/dump.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "xitdb", .module = xitdb }},
+        }),
+    });
+    b.installArtifact(dump_exe);
 }

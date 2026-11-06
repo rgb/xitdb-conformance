@@ -1,0 +1,49 @@
+version: 1
+hash size: 20
+hash id: sha1
+file id: c0f0000000000001
+moments: 2
+moment 0: hash_map
+  entry 0feca720e2c29dafb2c900713ba560e03b758711:
+    value: null
+  entry fcdbc880c3d7454f7aed7a672c34ebc2395648a2:
+    value: uint 18446744073709551615
+  entry 66df0bfa3d352c8d87d0b7968d1e0f771c407b93:
+    value: bytes hex 610062
+  entry 46f8ab7c0cff9df7cd124852e26022a6bf89e315:
+    value: int -9223372036854775808
+  entry a0f4ea7d91495df92bbac2e2149dfb850fe81396:
+    key: short_bytes "short"
+    value: short_bytes "foo"
+  entry bd3027fa569ea15ca76d84db21c67e2d514c1a5a:
+    value: bytes "longer than eight bytes"
+  entry 11e623a37e87cf7995c466723ec99688d55cae8c:
+    value: float 7ff4000000000001
+  entry 685e80366130387cb75c055248326976d16fdf8d:
+    value: float 400921fb54442d18
+  entry ee61df007a111389a25094beb5a3ba765f50b62e:
+    value: short_bytes "foo" format tag "st"
+  entry 5af11e72f4daad4a37cccdccdf7d25a36e363ecf:
+    value: bytes "seven b" format tag "lt"
+moment 1: hash_map
+  entry 0feca720e2c29dafb2c900713ba560e03b758711:
+    value: null
+  entry fcdbc880c3d7454f7aed7a672c34ebc2395648a2:
+    value: uint 18446744073709551615
+  entry 66df0bfa3d352c8d87d0b7968d1e0f771c407b93:
+    value: bytes hex 610062
+  entry 46f8ab7c0cff9df7cd124852e26022a6bf89e315:
+    value: int -9223372036854775808
+  entry a0f4ea7d91495df92bbac2e2149dfb850fe81396:
+    key: short_bytes "short"
+    value: short_bytes "bar"
+  entry bd3027fa569ea15ca76d84db21c67e2d514c1a5a:
+    value: bytes "longer than eight bytes"
+  entry 11e623a37e87cf7995c466723ec99688d55cae8c:
+    value: float 7ff4000000000001
+  entry 685e80366130387cb75c055248326976d16fdf8d:
+    value: float 400921fb54442d18
+  entry ee61df007a111389a25094beb5a3ba765f50b62e:
+    value: short_bytes "foo" format tag "st"
+  entry 5af11e72f4daad4a37cccdccdf7d25a36e363ecf:
+    value: bytes "seven b" format tag "lt"

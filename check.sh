@@ -7,10 +7,13 @@
 # 3. the storage kind and the optimization level make no difference to the bytes;
 # 4. every script in tests/failing and tests/invalid fails, for the reason in its
 #    description;
-# 5. the hand-written scripts use everything in the format;
-# 6. the fixtures haven't drifted from what the scripts produce now, and that check
+# 5. dump gives the same text across all of those, doesn't depend on layout, and
+#    reports what it can't read;
+# 6. bench refuses to give numbers from a debug build, and still runs;
+# 7. the hand-written scripts use everything in the format;
+# 8. the fixtures haven't drifted from what the scripts produce now, and that check
 #    notices drift;
-# 7. detcheck itself notices a changed byte.
+# 9. detcheck itself notices a changed byte.
 
 set -eu
 cd "$(dirname "$0")"
@@ -21,6 +24,11 @@ DET=zig-out/bin/detcheck
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
+
+flip_byte() { # file, byte offset. flips every bit of that byte
+    old=$(od -An -tu1 -j "$2" -N 1 "$1" | tr -d ' ')
+    printf "$(printf '\\%03o' $((old ^ 255)))" | dd of="$1" bs=1 seek="$2" conv=notrunc 2> /dev/null
+}
 
 echo "== build (debug and release)"
 zig build
@@ -96,10 +104,91 @@ echo "== scripts that must fail"
 expect_failures tests/failing
 expect_failures tests/invalid
 
-flip_byte() { # file, byte offset. flips every bit of that byte
-    old=$(od -An -tu1 -j "$2" -N 1 "$1" | tr -d ' ')
-    printf "$(printf '\\%03o' $((old ^ 255)))" | dd of="$1" bs=1 seek="$2" conv=notrunc 2> /dev/null
+echo "== dump"
+DUMP=zig-out/bin/dump
+count=0
+for script in scripts/*.json tests/valid/*.json tests/generated/*.json; do
+    name=$(basename "$script" .json)
+    "$DUMP" "$OUT/$name.a.db" > "$OUT/$name.a.txt"
+    for other in b file memory release; do
+        [ -f "$OUT/$name.$other.db" ] || continue
+        "$DUMP" "$OUT/$name.$other.db" > "$OUT/$name.$other.txt"
+        cmp -s "$OUT/$name.a.txt" "$OUT/$name.$other.txt" || {
+            echo "$name: dump differs between a and $other"
+            exit 1
+        }
+    done
+    count=$((count + 1))
+done
+echo "$count scripts dump without errors, and the same across runs, storage kinds and builds"
+for expected in tests/dump/expected/*.txt; do
+    name=$(basename "$expected" .txt)
+    cmp -s "$OUT/$name.a.txt" "$expected" || {
+        echo "$name: dump differs from $expected"
+        exit 1
+    }
+done
+echo "dump still prints what it should for $(ls tests/dump/expected | wc -l | tr -d ' ') scripts"
+"$RUN" tests/dump/same-content-a.json "$OUT/same-a.db"
+"$RUN" tests/dump/same-content-b.json "$OUT/same-b.db"
+if cmp -s "$OUT/same-a.db" "$OUT/same-b.db"; then
+    echo "same-content-a and same-content-b should be different files"
+    exit 1
+fi
+"$DUMP" "$OUT/same-a.db" > "$OUT/same-a.txt"
+"$DUMP" "$OUT/same-b.db" > "$OUT/same-b.txt"
+cmp -s "$OUT/same-a.txt" "$OUT/same-b.txt" || {
+    echo "the same content in different bytes should dump the same"
+    diff "$OUT/same-a.txt" "$OUT/same-b.txt" | head -20
+    exit 1
 }
+echo "the same content in different bytes dumps the same"
+# the value slot of the worked example, whose last byte is the 42
+cp "$OUT/worked-example.a.db" "$OUT/changed.db"
+flip_byte "$OUT/changed.db" 412
+"$DUMP" "$OUT/changed.db" > "$OUT/changed.txt"
+if cmp -s "$OUT/worked-example.a.txt" "$OUT/changed.txt"; then
+    echo "dump didn't notice a changed value"
+    exit 1
+fi
+echo "a changed value dumps differently"
+"$RUN" tests/dump/dangling.json "$OUT/dangling.db"
+status=0
+"$DUMP" "$OUT/dangling.db" > "$OUT/dangling.txt" 2> /dev/null || status=$?
+if [ "$status" -ne 1 ] || ! grep -q "error EndOfStream" "$OUT/dangling.txt"; then
+    echo "dump should have reported the dangling slot, but its exit status is $status"
+    exit 1
+fi
+echo "a slot pointing past the end of the file is reported"
+
+echo "== bench still works, and writes the size run does"
+BENCH=zig-out/bin/bench
+status=0
+"$BENCH" > /dev/null 2> "$OUT/bench.err" || status=$?
+if [ "$status" -ne 1 ] || ! grep -qF "its numbers would mean nothing" "$OUT/bench.err"; then
+    echo "bench should refuse to give numbers from a debug build"
+    exit 1
+fi
+"$BENCH" --divide 1000 > "$OUT/bench.txt"
+lines=$(wc -l < "$OUT/bench.txt" | tr -d ' ')
+if [ "$lines" -ne 14 ]; then
+    echo "bench should print 14 lines, and it printed $lines"
+    exit 1
+fi
+echo "bench refuses a debug build, and prints its 14 lines"
+# the file size is what the Swift side is held to, so bench has to mean what it says.
+# these scripts are its workloads, spelled out as the spec spells them.
+for line in "map_insert 100 memory" "map_insert 100 buffered_file" "map_insert 10 file" "list_append 1000 memory" "list_append 1000 buffered_file" "map_transactions 2 memory" "map_transactions 2 buffered_file"; do
+    set -- $line
+    "$RUN" "tests/bench/$1-$2.json" "$OUT/bench-$1-$2-$3.db" --kind "$3"
+    from_run=$(sed -n 's/.*"file_size": \([0-9]*\).*/\1/p' "$OUT/bench-$1-$2-$3.db.sidecar.json")
+    from_bench=$(grep "\"workload\": \"$1\", \"phase\": \"write\", \"kind\": \"$3\"" "$OUT/bench.txt" | sed -n 's/.*"file_size": \([0-9]*\).*/\1/p')
+    if [ -z "$from_run" ] || [ "$from_run" != "$from_bench" ]; then
+        echo "$1 at $2 on $3: bench says the file is $from_bench bytes, and run says $from_run"
+        exit 1
+    fi
+done
+echo "bench's file sizes are what run gets for the same operations, on 7 workloads and kinds"
 
 echo "== coverage of the format by the hand-written scripts"
 COVERAGE=zig-out/bin/coverage

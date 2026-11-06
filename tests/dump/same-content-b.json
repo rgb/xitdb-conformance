@@ -1,0 +1,270 @@
+{
+ "format": "xitdb-script/1",
+ "description": "Dumps the same as same-content-a, in different bytes: other orders, and leftovers from what was changed and removed.",
+ "hash_size": 20,
+ "hash_id": "sha1",
+ "file_id": "c0f00000000000d0",
+ "ops": [
+  {
+   "op": "write_path",
+   "on": "root",
+   "path": [
+    "array_list_init",
+    "array_list_append",
+    {
+     "hash_map_init": {}
+    },
+    {
+     "ctx": {
+      "as": "m",
+      "ops": [
+       {
+        "op": "write_path",
+        "on": "m",
+        "path": [
+         {
+          "hash_map_get": {
+           "value": {
+            "sha1": "sorted"
+           }
+          }
+         },
+         {
+          "sorted_map_init": {}
+         },
+         {
+          "sorted_map_get": {
+           "value": "b"
+          }
+         },
+         {
+          "write": {
+           "uint": 99
+          }
+         }
+        ]
+       },
+       {
+        "op": "write_path",
+        "on": "m",
+        "path": [
+         {
+          "hash_map_get": {
+           "value": {
+            "sha1": "sorted"
+           }
+          }
+         },
+         {
+          "sorted_map_init": {}
+         },
+         {
+          "sorted_map_get": {
+           "value": "a"
+          }
+         },
+         {
+          "write": {
+           "uint": 1
+          }
+         }
+        ]
+       },
+       {
+        "op": "write_path",
+        "on": "m",
+        "path": [
+         {
+          "hash_map_get": {
+           "value": {
+            "sha1": "sorted"
+           }
+          }
+         },
+         {
+          "sorted_map_init": {}
+         },
+         {
+          "sorted_map_get": {
+           "value": "b"
+          }
+         },
+         {
+          "write": {
+           "uint": 2
+          }
+         }
+        ]
+       },
+       {
+        "op": "write_path",
+        "on": "m",
+        "path": [
+         {
+          "hash_map_get": {
+           "value": {
+            "sha1": "gone"
+           }
+          }
+         },
+         {
+          "write": {
+           "bytes": "this is removed again, and its bytes stay in the file"
+          }
+         }
+        ]
+       },
+       {
+        "op": "write_path",
+        "on": "m",
+        "path": [
+         {
+          "hash_map_remove": {
+           "sha1": "gone"
+          }
+         }
+        ]
+       },
+       {
+        "op": "write_path",
+        "on": "m",
+        "path": [
+         {
+          "hash_map_get": {
+           "value": {
+            "sha1": "linked"
+           }
+          }
+         },
+         "linked_array_list_init",
+         "linked_array_list_append",
+         {
+          "write": {
+           "uint": 2
+          }
+         }
+        ]
+       },
+       {
+        "op": "write_path",
+        "on": "m",
+        "path": [
+         {
+          "hash_map_get": {
+           "value": {
+            "sha1": "linked"
+           }
+          }
+         },
+         "linked_array_list_init",
+         {
+          "linked_array_list_insert": 0
+         },
+         {
+          "write": {
+           "uint": 1
+          }
+         }
+        ]
+       },
+       {
+        "op": "write_path",
+        "on": "m",
+        "path": [
+         {
+          "hash_map_get": {
+           "value": {
+            "sha1": "two"
+           }
+          }
+         },
+         {
+          "write": {
+           "bytes": "a long enough value that has a record, soon replaced"
+          }
+         }
+        ]
+       },
+       {
+        "op": "write_path",
+        "on": "m",
+        "path": [
+         {
+          "hash_map_get": {
+           "value": {
+            "sha1": "two"
+           }
+          }
+         },
+         {
+          "write": {
+           "bytes": "a long enough value that has a record"
+          }
+         }
+        ]
+       },
+       {
+        "op": "write_path",
+        "on": "m",
+        "path": [
+         {
+          "hash_map_get": {
+           "value": {
+            "sha1": "list"
+           }
+          }
+         },
+         "array_list_init",
+         "array_list_append",
+         {
+          "write": {
+           "uint": 1
+          }
+         }
+        ]
+       },
+       {
+        "op": "write_path",
+        "on": "m",
+        "path": [
+         {
+          "hash_map_get": {
+           "value": {
+            "sha1": "list"
+           }
+          }
+         },
+         "array_list_init",
+         "array_list_append",
+         {
+          "write": {
+           "uint": 2
+          }
+         }
+        ]
+       },
+       {
+        "op": "write_path",
+        "on": "m",
+        "path": [
+         {
+          "hash_map_get": {
+           "value": {
+            "sha1": "one"
+           }
+          }
+         },
+         {
+          "write": {
+           "uint": 1
+          }
+         }
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

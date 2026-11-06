@@ -1,0 +1,52 @@
+{
+ "format": "xitdb-script/1",
+ "description": "An undefined use, which only dump gets to see: a committed slot left pointing past the end of the file. Nothing in this script reads it, so run passes.",
+ "hash_size": 20,
+ "hash_id": "sha1",
+ "file_id": "c0f00000000000d1",
+ "ops": [
+  {
+   "op": "write_path",
+   "on": "root",
+   "path": [
+    "array_list_init",
+    "array_list_append",
+    {
+     "hash_map_init": {}
+    },
+    {
+     "hash_map_get": {
+      "value": {
+       "sha1": "kept"
+      }
+     }
+    },
+    {
+     "write": {
+      "uint": 1
+     }
+    }
+   ],
+   "as": "kept"
+  },
+  {
+   "op": "run_context",
+   "ctx": {
+    "as": "c",
+    "ops": [
+     {
+      "op": "write",
+      "on": "kept",
+      "data": {
+       "bytes": "a value too long to fit in a slot"
+      }
+     },
+     {
+      "op": "fail"
+     }
+    ]
+   },
+   "expect_error": "ScriptAbort"
+  }
+ ]
+}

@@ -14,10 +14,12 @@ cd "$(dirname "$0")"
 COUNT=${1:?usage: ./gen-live.sh <how many> [first seed] [ops per script]}
 FIRST=${2:-1000000}
 OPS=${3:-25}
-GEN=zig-out/bin/gen
-RUN=zig-out/bin/run
-DET=zig-out/bin/detcheck
-OUT=out/live
+# BIN and OUT are there so that a long run can use a copy, and survive a rebuild
+BIN=${BIN:-zig-out/bin}
+GEN=$BIN/gen
+RUN=$BIN/run
+DET=$BIN/detcheck
+OUT=${OUT:-out/live}
 
 mkdir -p "$OUT"
 failed=0
