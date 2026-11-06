@@ -19,6 +19,7 @@ BIN=${BIN:-zig-out/bin}
 GEN=$BIN/gen
 RUN=$BIN/run
 DET=$BIN/detcheck
+DUMP=$BIN/dump
 OUT=${OUT:-out/live}
 
 mkdir -p "$OUT"
@@ -32,6 +33,8 @@ while [ "$seed" -lt "$last" ]; do
     ok=yes
     "$GEN" "$seed" "$script" --ops "$OPS" 2> "$err" || ok=no
     if [ "$ok" = yes ]; then "$RUN" "$script" "$db" 2>> "$err" || ok=no; fi
+    # all of the file has to be readable, including what the script never reads back
+    if [ "$ok" = yes ]; then "$DUMP" "$db" > /dev/null 2>> "$err" || ok=no; fi
     if [ "$ok" = yes ]; then "$RUN" "$script" "$db.again" 2>> "$err" || ok=no; fi
     if [ "$ok" = yes ]; then "$DET" "$db" "$db.again" > /dev/null 2>> "$err" || ok=no; fi
     if [ "$ok" = yes ]; then "$RUN" "$script" "$db.file" --kind file 2>> "$err" || ok=no; fi

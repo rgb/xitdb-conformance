@@ -133,6 +133,16 @@ fn Gen(comptime HashInt: type) type {
         // the same reason, the root header can't be set back past a commit that did this.
         tx_dirty: bool = false,
         first_lost_commit: usize = 0,
+        // a frozen cursor copies a collection's header, and only the nodes it writes to,
+        // while an unfrozen one goes on rewriting those same nodes in place. when two
+        // slots hold one collection made in this transaction, that leaves one header
+        // disagreeing with its tree, which panics the engine, or worse in a release build.
+        // so once both of these have happened, everything gets frozen, which is safe.
+        tx_cloned: bool = false,
+        tx_frozen_cursor: bool = false,
+        tx_concat: bool = false,
+        // cursors before this one in `kept` are not used any more in this transaction
+        first_safe_kept: usize = 0,
 
         // names
 
@@ -157,6 +167,8 @@ fn Gen(comptime HashInt: type) type {
         }
 
         fn beginOp(self: *Self) anyerror!void {
+            // if the engine crashes, this leaves a script up to where it happened
+            try self.w.flush();
             if (self.has_ops[self.depth]) try self.w.writeAll(",");
             self.has_ops[self.depth] = true;
             try self.w.writeAll("\n");
@@ -305,8 +317,11 @@ fn Gen(comptime HashInt: type) type {
         // nearly always: skipping it writes into what's already committed, which is
         // defined (SCRIPT-FORMAT.md section 11), and worth having now and then
         fn maybeInit(self: *Self, p: *PathB, tag: Tag) void {
-            // a path at the top level is a whole transaction, which can still fail after this
-            if (self.depth > 0 and self.rng.chance(3)) {
+            // a path at the top level is a whole transaction, which can still fail after this.
+            // the trees are left out, because a later init would copy their committed header
+            // while it points at a node from this transaction, which gives two headers one tree
+            const hash_or_array = tag == .hash_map or tag == .counted_hash_map or tag == .hash_set or tag == .counted_hash_set or tag == .array_list;
+            if (hash_or_array and self.depth > 0 and self.rng.chance(3)) {
                 self.tx_dirty = true;
             } else {
                 self.addInit(p, tag);
@@ -401,13 +416,16 @@ fn Gen(comptime HashInt: type) type {
 
         /// adds what to do at the end of a walk
         fn finish(self: *Self, cursor: anytype, p: *PathB, reads: []const Part, tag: Tag) void {
-            // now and then, something that doesn't fit, for the error it raises
+            // now and then, something that doesn't fit, for the error it raises. it can
+            // fit after all, and with no init part before it, that writes into committed bytes
             if (self.rng.chance(3)) {
+                if (self.depth > 0) self.tx_dirty = true;
                 switch (self.rng.below(5)) {
                     0 => self.add(p, .array_list_append, "\"array_list_append\""),
-                    1 => if (self.linked_allowed) self.add(p, .linked_array_list_append, "\"linked_array_list_append\"") else self.addArrayGet(p, 99),
+                    // not on a tree of its own kind, which would be a skipped init (see maybeInit)
+                    1 => if (self.linked_allowed and tag != .linked_array_list) self.add(p, .linked_array_list_append, "\"linked_array_list_append\"") else self.addArrayGet(p, 99),
                     2 => self.addHashGet(p, .value),
-                    3 => if (self.sorted_allowed) self.addSortedGet(p, .value) else self.addHashGet(p, .value),
+                    3 => if (self.sorted_allowed and tag != .sorted_map and tag != .sorted_set) self.addSortedGet(p, .value) else self.addHashGet(p, .value),
                     else => {
                         if (self.sorted_allowed and self.rng.chance(50)) {
                             self.add(p, .{ .sorted_map_get_index = 0 }, "{\"sorted_map_get_index\":0}");
@@ -570,6 +588,7 @@ fn Gen(comptime HashInt: type) type {
         fn writePath(self: *Self, on_name: []const u8, cursor: RW, p: *PathB, bind: bool) anyerror!void {
             try self.beginOp();
             try self.w.print("{{\"op\":\"write_path\",\"on\":\"{s}\",\"path\":[{s}", .{ on_name, p.text.items });
+            try self.w.flush();
             const result = cursor.writePath(Ctx, p.parts.items);
             if (p.has_ctx) try self.w.writeAll("]}}");
             try self.w.writeAll("]");
@@ -711,14 +730,15 @@ fn Gen(comptime HashInt: type) type {
                 }
                 try self.writePath(on.name, on.cursor, &p, false);
             }
-            if (collection == .linked_array_list) try self.concat(index, hash_get, get_json);
+            if (collection == .linked_array_list and self.depth == 1) try self.concat(index, hash_get, get_json);
 
-            // what came of it
+            // what came of it, through the cursor as it is now, since a concat rebinds it
+            const current = self.at(index);
             var read_path: PathB = .{};
             self.add(&read_path, hash_get, get_json);
             try self.beginOp();
-            try self.w.print("{{\"op\":\"read_path\",\"on\":\"{s}\",\"path\":[{s}]", .{ on.name, read_path.text.items });
-            const found = on.cursor.readPath(Ctx, read_path.parts.items) catch |err| {
+            try self.w.print("{{\"op\":\"read_path\",\"on\":\"{s}\",\"path\":[{s}]", .{ current.name, read_path.text.items });
+            const found = current.cursor.readPath(Ctx, read_path.parts.items) catch |err| {
                 if (!expectable(err)) fail("the engine raised {s}, which a script can't expect", .{@errorName(err)});
                 try self.w.print(",\"expect_error\":\"{s}\"}}", .{@errorName(err)});
                 return;
@@ -773,6 +793,32 @@ fn Gen(comptime HashInt: type) type {
             self.addInit(&p, .linked_array_list);
             self.add(&p, .{ .linked_array_list_concat = .{ .list = slot } }, self.fmt("{{\"linked_array_list_concat\":{{\"list\":{{\"var\":\"{s}\"}}}}}}", .{slot_name}));
             try self.writePath(on.name, on.cursor, &p, false);
+
+            // a concat leaves the list's old header pointing at a node newer than the
+            // transaction's start, and the next init copies that header. so nothing may
+            // see the old one from here on, or it's two headers for one tree: cursors kept
+            // from before this, and this one's snapshot, which is why it moves the map now.
+            self.first_safe_kept = self.kept.items.len;
+            self.tx_concat = true;
+            try self.reinit(index, tag);
+        }
+
+        /// `cursor = cursor.writePath(init)`, so that this cursor sees what's there from now on
+        fn reinit(self: *Self, index: usize, tag: Tag) anyerror!void {
+            const on = self.at(index);
+            var p: PathB = .{};
+            self.addInit(&p, tag);
+            try self.beginOp();
+            try self.w.print("{{\"op\":\"write_path\",\"on\":\"{s}\",\"path\":[{s}],\"as\":\"{s}\"", .{ on.name, p.text.items, on.name });
+            try self.w.flush();
+            if (on.cursor.writePath(Ctx, p.parts.items)) |next| {
+                self.kept.items[index].cursor = next;
+                try self.endOp();
+            } else |err| {
+                const upward = try self.noteError(err);
+                try self.endOp();
+                if (upward) return err;
+            }
         }
 
         fn nested(self: *Self, index: usize) anyerror!void {
@@ -813,8 +859,10 @@ fn Gen(comptime HashInt: type) type {
                 self.tx_dirty = true;
                 return self.rng.below(self.tx_kept_start);
             }
-            if (base + 1 < self.kept.items.len) return base + 1 + self.rng.below(self.kept.items.len - base - 1);
-            return if (self.depth > 1) base else null;
+            // one from before a concat can hold a header that shares a tree with a later one
+            const first = @max(base + 1, self.first_safe_kept);
+            if (first < self.kept.items.len) return first + self.rng.below(self.kept.items.len - first);
+            return if (self.depth > 1 and base >= self.first_safe_kept) base else null;
         }
 
         fn writeThroughKept(self: *Self, base: usize) anyerror!void {
@@ -864,25 +912,23 @@ fn Gen(comptime HashInt: type) type {
             }
         }
 
-        fn freezeSomething(self: *Self, base: usize) anyerror!void {
-            if (self.rng.chance(40)) {
-                try self.beginOp();
-                try self.w.writeAll("{\"op\":\"db_freeze\"}");
-                try self.db.freeze();
-                // the map has been frozen too, so it starts again from here
-                var p: PathB = .{};
-                const on = self.at(base);
-                const tag = peekTag(on.cursor, &.{});
-                if (tag == .hash_map or tag == .counted_hash_map) {
-                    self.addInit(&p, tag);
-                    try self.writePath(on.name, on.cursor, &p, false);
-                }
-                return;
-            }
-            const index = self.someKept(base) orelse base;
+        fn freezeEverything(self: *Self) anyerror!void {
             try self.beginOp();
-            try self.w.print("{{\"op\":\"freeze\",\"on\":\"{s}\"}}", .{self.at(index).name});
-            try self.kept.items[index].cursor.freeze();
+            try self.w.writeAll("{\"op\":\"db_freeze\"}");
+            try self.db.freeze();
+            self.tx_cloned = false;
+            self.tx_frozen_cursor = false;
+            self.tx_concat = false;
+        }
+
+        fn freezeSomething(self: *Self, base: usize) anyerror!void {
+            // not a cursor, which would copy a header while unfrozen cursors go on rewriting the
+            // nodes it shares: two headers for one tree, without any way to see it coming.
+            // the frozen cursors here are in clone, where nothing can reach that.
+            try self.freezeEverything();
+            // the map has been frozen too, so it starts again from here
+            const tag = peekTag(self.at(base).cursor, &.{});
+            if (tag == .hash_map or tag == .counted_hash_map) try self.reinit(base, tag);
         }
 
         /// copies a slot from this transaction or an earlier moment under a new key,
@@ -947,6 +993,14 @@ fn Gen(comptime HashInt: type) type {
                 try self.beginOp();
                 try self.w.print("{{\"op\":\"freeze\",\"on\":\"{s}\"}}", .{self.at(target).name});
                 try self.kept.items[target].cursor.freeze();
+                self.tx_frozen_cursor = true;
+            }
+            // a slot from an earlier moment holds nothing that can be rewritten in place.
+            // one from this transaction might, if the clone's next init copies a header that
+            // the original still uses, and a frozen cursor or a concat is what would make that so.
+            if (!from_root) {
+                self.tx_cloned = true;
+                if (self.tx_frozen_cursor or self.tx_concat) try self.freezeEverything();
             }
             // and a change to the clone, the way the original can see or not
             try self.writeSomething(target);
@@ -1182,6 +1236,10 @@ fn Gen(comptime HashInt: type) type {
         fn topLevelOp(self: *Self) anyerror!void {
             const before = try self.db.committedSize();
             self.tx_dirty = false;
+            self.tx_cloned = false;
+            self.tx_frozen_cursor = false;
+            self.tx_concat = false;
+            self.first_safe_kept = 0;
             defer self.noteCommit(before) catch {};
 
             const r = self.rng.below(100);
@@ -1273,9 +1331,11 @@ fn run(comptime HashInt: type, io: Io, arena: Allocator, gpa: Allocator, seed: u
     const linked_allowed = seed % 3 != 0;
     const sorted_allowed = seed % 3 == 2;
 
-    var text = Io.Writer.Allocating.init(gpa);
-    defer text.deinit();
-    const w = &text.writer;
+    const out = try Io.Dir.cwd().createFile(io, out_path, .{ .truncate = true });
+    defer out.close(io);
+    var out_buffer: [64 * 1024]u8 = undefined;
+    var out_writer = out.writerStreaming(io, &out_buffer);
+    const w = &out_writer.interface;
 
     try w.print("{{\n  \"format\": \"{s}\",\n  \"description\": \"Generated by gen from seed {d}.\",\n  \"hash_size\": {d},\n  \"hash_id\": {s},\n  \"file_id\": \"{x:0>16}\",\n  \"ops\": [", .{
         SCRIPT_FORMAT,
@@ -1294,10 +1354,7 @@ fn run(comptime HashInt: type, io: Io, arena: Allocator, gpa: Allocator, seed: u
     try g.generate(ops);
 
     try w.writeAll("\n  ]\n}\n");
-
-    const out = try Io.Dir.cwd().createFile(io, out_path, .{ .truncate = true });
-    defer out.close(io);
-    try out.writeStreamingAll(io, text.written());
+    try w.flush();
 }
 
 pub fn main(init: std.process.Init) !void {

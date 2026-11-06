@@ -161,6 +161,44 @@ if [ "$status" -ne 1 ] || ! grep -q "error EndOfStream" "$OUT/dangling.txt"; the
 fi
 echo "a slot pointing past the end of the file is reported"
 
+echo "== what tests/undefined shows still happens"
+# none of this is among the fixtures. if one of these stops happening, the Zig original
+# has changed, and SCRIPT-FORMAT.md's table of undefined uses needs to change too.
+expect_undefined() { # script, exit status, what it says
+    status=0
+    "$RUN" "tests/undefined/$1.json" "$OUT/undefined.db" 2> "$OUT/undefined.err" || status=$?
+    if [ "$status" -ne "$2" ] || ! grep -qF -- "$3" "$OUT/undefined.err"; then
+        echo "$1: expected exit status $2 with \"$3\", got $status:"
+        head -n 3 "$OUT/undefined.err"
+        exit 1
+    fi
+    echo "$1: $3"
+}
+expect_undefined frozen-clone-linked-read 1 "unexpected error InvalidBTreeNode"
+expect_undefined frozen-clone-sorted-read 1 "unexpected error InvalidBTreeNode"
+expect_undefined frozen-clone-linked-append 134 "start index 4 is larger than end index 2"
+expect_undefined concat-stale-slot 134 "is larger than end index"
+# the same through the collection wrappers alone
+expect_wrappers() { # exit status, what it says, cases
+    wanted_status=$1
+    wanted_text=$2
+    shift 2
+    for case in "$@"; do
+        status=0
+        zig-out/bin/undefined-wrappers "$case" > /dev/null 2> "$OUT/undefined.err" || status=$?
+        if [ "$status" -ne "$wanted_status" ] || ! grep -qF -- "$wanted_text" "$OUT/undefined.err"; then
+            echo "wrappers: $case: expected exit status $wanted_status with \"$wanted_text\", got $status:"
+            head -n 3 "$OUT/undefined.err"
+            exit 1
+        fi
+    done
+    echo "wrappers, $wanted_text: $*"
+}
+expect_wrappers 134 "is larger than end index" concat_then_clone concat_two_wrappers concat_slot_read_before concat_old_map_wrapper frozen_clone_append frozen_clone_remove kept_across_transactions
+expect_wrappers 134 "integer overflow" sorted_frozen_clone_remove counted_frozen_clone_remove
+expect_wrappers 1 "InvalidBTreeNode" frozen_clone_read sorted_frozen_clone_read
+expect_wrappers 0 "finished" array_frozen_clone array_frozen_clone_slice hash_frozen_clone no_problem_without_freeze
+
 echo "== bench still works, and writes the size run does"
 BENCH=zig-out/bin/bench
 status=0

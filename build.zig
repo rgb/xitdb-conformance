@@ -79,4 +79,15 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(dump_exe);
+
+    const wrappers_exe = b.addExecutable(.{
+        .name = "undefined-wrappers",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/undefined/wrappers.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "xitdb", .module = xitdb }},
+        }),
+    });
+    b.installArtifact(wrappers_exe);
 }

@@ -187,6 +187,7 @@
       {"op":"write_path","on":"c23","path":[{"hash_map_init":{}},{"hash_map_get":{"value":{"hex":"699de12dc3094b06a5098e77fb1cdd72975b76a2"}}}],"as":"c28"},
       {"op":"write","on":"c28","data":{"slot":{"var":"s27"}}},
       {"op":"freeze","on":"c28"},
+      {"op":"db_freeze"},
       {"op":"write_path","on":"c28","path":[{"write":{"bytes":"dlakfbjpazzwdkamapsyxzpdqwgfugamqygslembvxuetftrarw"}}]}]}}]},
     {"op":"read_path_slot","on":"root","path":[{"array_list_get":-1}],"as":"s29"},
     {"op":"write_path","on":"root","path":["array_list_init","array_list_append",{"write":{"slot":{"var":"s29"}}},{"hash_map_init":{}},{"ctx":{"as":"c30","ops":[

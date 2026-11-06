@@ -482,7 +482,7 @@ The Zig runner truncates `<out.db>`, runs the script, and writes the file and th
 | 1 | the script isn't valid or it failed, or a file couldn't be opened. The output files must not be used |
 | 2 | wrong command line |
 
-A panic in the engine means an undefined use or an engine bug, and no script in this repository causes one.
+A panic in the engine means an undefined use or an engine bug, and nothing that's among the fixtures causes one.
 
 A second runner reads a script and a sidecar. How it's started is up to it, and it needn't write a sidecar. The three
 kinds of problem below matter to it differently.
@@ -529,7 +529,18 @@ needn't handle them. They are kept out like this:
 | Reading, before the commit, a gap left by a `writer` that seeked past the end | zeros on `file` and `memory`. On `buffered_file`, `EndOfStream` until the gap has been flushed, and zeros after that. The committed bytes are the same on all three | `EndOfStream` can't be expected, and `check.sh` runs every script on all three kinds. A read that gets zeros everywhere isn't caught |
 | On a read-only file, a transaction with a callback, or one that would fail anyway | `file` raises `WriteFailed` at the first write, without running the rest. `buffered_file` runs the rest and only fails at the commit, so it raises `KeyNotFound` for a path that fails by itself, runs the callback, and raises `ScriptAbort` for a callback that fails | `run` fails on the callback. `check.sh` runs every script on both kinds, which catches the rest |
 | A write into committed bytes (section 11) of something that points into the current transaction, if the transaction is then rolled back or the root header is later set back past it | committed data is left pointing past the end of the file. Reading it raises `EndOfStream`, or `OutOfMemory` for a wild length, and once more data has landed at that offset, the read succeeds and returns those bytes as if they were the value | `gen` doesn't let such a transaction fail. `run` can't see it, so a hand-written script has to take care: writing an inline value is fine, as `overwriting-committed-bytes` does |
+| **Two headers for one tree.** An init copies a linked list's or sorted map's header if it's old, and the copy shares the tree. That's only safe if the nodes are old too, or nothing can see the old header any more. There are three ways it goes wrong, all in one transaction. After `linked_array_list_concat`, the old header points at a node that's newer than the transaction's start, so it's rewritten in place, and the old header can still be reached through a slot read before or copied after, a cursor kept from before, or a stale snapshot. After a freeze on a cursor to a collection that a cursor that isn't frozen can also reach. And after a skipped init on a tree, followed by an init | the header disagrees with its tree. A read past the end raises `InvalidBTreeNode`, and some raise `InvalidEnumTag`. An append panics, or crashes in a release build | `gen` keeps away from all three. `run` can't see them, so a hand-written script has to take care. `tests/undefined/` shows them |
 | A trie 64 levels deep, at a hash size above 32. Two keys need to share their lowest 64 nibbles, which for real hashes would take a 256-bit collision | a depth counter overflows, which panics in a debug build | `run` is a debug build |
+
+`tests/undefined/wrappers.zig` shows that the collection wrappers alone can reach two headers for one tree, without the
+path API. What it does depends on the collection, since only the trees index a node by a count held elsewhere:
+
+| Collection | What a stale header leads to |
+|---|---|
+| `linked_array_list` | a read raises `InvalidBTreeNode`. An insert, an append or a remove panics, and crashes in a release build |
+| `sorted_map`, `sorted_set` | a read by index raises `InvalidBTreeNode`. A remove can underflow the count, which panics, and wraps in a release build |
+| `counted_hash_map`, `counted_hash_set` | a remove can underflow the count in the same way. Nothing else depends on the count |
+| `array_list`, `hash_map`, `hash_set` | no crash, only what's written to one showing up in the other |
 
 **Storage kinds don't otherwise change the bytes.** `check.sh` holds every script in this repository to that, across
 all three kinds, in debug and release builds.
