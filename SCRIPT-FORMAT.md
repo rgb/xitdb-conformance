@@ -9,8 +9,12 @@ the same file, byte for byte.
 binds the result. It adds no checks and no recovery of its own: if the engine does something odd, the script
 is there to pin it down. Section 11 lists the oddities a runner might be tempted to fix.
 
-The examples below are taken from scripts that run: `scripts/` holds the hand-written scripts, and
-`tests/valid/` covers every construct in this document.
+Every script a second runner is given has been accepted by `run`, which checks all of a script's shape before
+running any of it ([section 10](#10-valid-scripts-and-script-failures)). So the rules below on how things are
+written are promises to a second runner, and it needn't enforce them.
+
+`scripts/` holds the hand-written scripts, and between them `scripts/` and `tests/valid/` run every op, path part
+and form of value in this document. The file format itself is described in `../director/research/file-format.md`.
 
 ## 1. The document
 
@@ -28,31 +32,38 @@ The examples below are taken from scripts that run: `scripts/` holds the hand-wr
 | Field | Required | Meaning |
 |---|---|---|
 | `format` | yes | exactly `"xitdb-script/1"` |
-| `description` | no | ignored |
-| `hash_size` | yes | size of a hash in bytes, written to header bytes 6–7. Scripts use 8, 20, 32 or 64, the sizes the Zig runner is compiled for |
+| `description` | no | a string, which is ignored |
+| `hash_size` | yes | size of a hash in bytes, written to header bytes 6–7: 8, 20, 32 or 64 |
 | `hash_id` | yes | [bytes](#bytes), exactly 4, written to header bytes 8–11; or `null`, for 4 zero bytes |
-| `file_id` | yes | exactly 16 hex digits, the 8 bytes of header bytes 12–19 in order |
+| `file_id` | yes | exactly 16 lowercase hex digits, the 8 bytes of header bytes 12–19 in order |
 | `ops` | yes | the [ops](#5-ops), run in order |
 
 The runner starts with an empty file, creates a new database with these parameters, and runs the ops. Creating
 the database commits an empty root with commit ID 0, which gives the 62-byte file described in `file-format.md`.
 
-**A runner must fail on anything it does not recognise**: a field, an op, a path part, a tag, a value of the
-wrong JSON type. Ignoring it would silently weaken the check. Fields may be in any order, and a field never
-appears twice. Every op may have a `note` field, a string that is ignored.
+Fields may be in any order, and a field never appears twice. Every op may have a `note` field, a string that is
+ignored.
+
+**A runner must fail on a field, op, path part or tag it doesn't know.** Ignoring one would silently weaken the
+check, for instance when a later version of the format adds an op.
 
 ## 2. Values
 
 ### Integers
 
-A JSON integer literal, with no fraction or exponent, parsed exactly over its whole range: `0` to 2⁶⁴−1 for an
-unsigned value (`uint`, `size`, `offset`, `seek`, a slot's `value`), −2⁶³ to 2⁶³−1 for a signed one (`int`,
-indexes). Don't parse
-through a double. Zig's `std.json` with `parse_numbers = false`, and Swift's `JSONDecoder` and
-`JSONSerialization` on macOS 27, were all checked to be exact at both ends of these ranges.
+A JSON integer literal, with no fraction or exponent, parsed exactly over its whole range:
 
-Indexes are `i65` in Zig, but scripts only go as far as `i64`. Anything beyond that is `KeyNotFound` on any
-real list anyway.
+- `0` to 2⁶⁴−1 for an unsigned value: `uint`, `size`, `offset`, a slot's `value`, and the `expect` of `read_uint`
+  and `count`.
+- −2⁶³ to 2⁶³−1 for a signed one: `int`, indexes, and the `expect` of `read_int`.
+
+`-0` isn't used. `seek` is unsigned and goes up to 2²⁴, which isn't a limit of the engine: it keeps a script
+runnable on every storage kind.
+
+Don't parse through a double. Swift's `JSONDecoder` and `JSONSerialization` were both checked to be exact at both
+ends of these ranges, on macOS 27, and so was Zig's `std.json` with `parse_numbers = false`.
+
+Indexes are `i65` in Zig, but scripts only go as far as `i64`.
 
 ### Bytes
 
@@ -64,19 +75,21 @@ Either form, wherever this document says *bytes*:
 - `{"hex": "610062"}`: an even number of lowercase hex digits, the bytes in order. The empty string is allowed.
 
 Whether a value ends up inline in its slot (`short_bytes`) or in a record of its own (`bytes`) is the engine's
-decision, based on the value's bytes and whether it has a format tag. A script can't ask for either.
+decision, based on the value's bytes and whether it has a format tag. A script can't ask for either, except that
+`writer` always produces `bytes`.
 
 ### Format tags
 
-[Bytes](#bytes), exactly 2. `"bi"` and `{"hex": "6269"}` are the same tag. Leaving it out means no tag. `{"hex":
-"0000"}` is a tag like any other, and sets the slot's `full` flag.
+[Bytes](#bytes), exactly 2. `"bi"` and `{"hex": "6269"}` are the same tag. To have no tag, leave the field out:
+`null` isn't a format tag, except in `expect_format_tag`. `{"hex": "0000"}` is a tag like any other, and sets the
+slot's `full` flag.
 
 ### Hashes
 
 Exactly one of:
 
 - `{"hex": "..."}`: exactly `2 * hash_size` lowercase hex digits.
-- `{"sha1": BYTES}`: the SHA-1 digest of those [bytes](#bytes). Only valid when `hash_size` is 20.
+- `{"sha1": BYTES}`: the SHA-1 digest of those [bytes](#bytes). Only used when `hash_size` is 20.
 
 The digits, or the digest, are **the hash's bytes in the order they appear on disk**, at the start of the key-value
 pair. Zig reads them into its `HashInt` as a big-endian integer (`std.mem.readInt(HashInt, &hash, .big)`) and
@@ -88,25 +101,29 @@ So the trie is walked from the **end** of the written hash, low nibble first. `{
 
 ### Floats
 
-Exactly 16 hex digits: the IEEE 754 bit pattern, most significant first, which is also what's on disk.
+Exactly 16 lowercase hex digits: the IEEE 754 bit pattern, most significant first, which is also what's on disk.
 `"400921fb54442d18"` is π. There is no decimal form, so nothing is rounded and NaN payloads survive. Compare
 floats by their bits.
 
 ### Slots
 
-Anywhere a slot is given in a path, one of:
+Write data and `linked_array_list_concat` take a slot, which is one of:
 
 - `{"var": NAME}`: the slot [bound](#4-names) to `NAME`, which may hold null.
-- `{"tag": NAME, "value": 77, "full": false}`: a literal slot. `tag` is a name from the `Tag` enum: `none`,
-  `index`, `array_list`, `linked_array_list`, `hash_map`, `kv_pair`, `bytes`, `short_bytes`, `uint`, `int`,
-  `float`, `hash_set`, `counted_hash_map`, `counted_hash_set`, `sorted_map`, `sorted_set`, `sorted_kv_pair`.
-  `value` defaults to 0 and `full` to false. It is passed as it is, whatever it means.
-- `null`: no slot. Only `{"write": {"slot": ...}}` accepts a null slot, being `?Slot` in Zig. A `{"var": NAME}`
-  that holds null counts as `null`.
+- `{"tag": NAME, "value": 77, "full": false}`: a literal slot. `tag` is `none`, `short_bytes`, `uint`, `int` or
+  `float`, the tags whose value isn't a file offset. `value` defaults to 0 and `full` to false. It is passed as it
+  is, whatever it means.
+- `null`: no slot. Only write data takes one, being `?Slot` in Zig. A `{"var": NAME}` that holds null counts as
+  `null`, and that is a script failure in `linked_array_list_concat`.
+
+The tag names used elsewhere, in `expect`, are those of the `Tag` enum: `none`, `index`, `array_list`,
+`linked_array_list`, `hash_map`, `kv_pair`, `bytes`, `short_bytes`, `uint`, `int`, `float`, `hash_set`,
+`counted_hash_map`, `counted_hash_set`, `sorted_map`, `sorted_set`, `sorted_kv_pair`.
 
 ### Write data
 
-`WriteableData`, with exactly one field:
+`WriteableData`, with exactly one field. It's used by the `write` path part, and by the `write` and
+`write_if_empty` ops.
 
 | JSON | Zig |
 |---|---|
@@ -132,7 +149,7 @@ object with exactly one field.
 | `{"linked_array_list_get": -1}` | `.linked_array_list_get` |
 | `"linked_array_list_append"` | `.linked_array_list_append` |
 | `{"linked_array_list_slice": {"offset": 1, "size": 3}}` | `.linked_array_list_slice` |
-| `{"linked_array_list_concat": {"list": SLOT}}` | `.linked_array_list_concat`. The slot can't be null |
+| `{"linked_array_list_concat": {"list": SLOT}}` | `.linked_array_list_concat` |
 | `{"linked_array_list_insert": 1}` | `.linked_array_list_insert` |
 | `{"linked_array_list_remove": 0}` | `.linked_array_list_remove` |
 | `{"hash_map_init": {"counted": true, "set": false}}` | `.hash_map_init`. Both fields are optional and default to false |
@@ -148,7 +165,8 @@ object with exactly one field.
 The runner passes the path as written. Whether it makes sense is the engine's business: `[{"ctx": ...}, {"write":
 ...}]` is a fine thing to write, and it fails with `PathPartMustBeAtEnd`.
 
-Everything in a path, including `{"var": NAME}`, is evaluated once, before the call starts.
+Everything in a path, including `{"var": NAME}`, is evaluated once, before the call starts. The exception is the ops
+inside a `ctx`, which are evaluated when they run.
 
 ## 4. Names
 
@@ -159,36 +177,48 @@ after the callback or transaction that bound it has ended. Each name holds one o
 - a read-write cursor,
 - a read-only cursor,
 - a slot, or null, from a slot-reading op,
-- a null cursor, from a `read_path` that found nothing. Using one for anything is a script failure.
+- a null cursor, from a `read_path` that found nothing.
 
-`root` is reserved and can't be bound. Each use of it means a new `db.rootCursor()`.
+`root` is reserved and can't be bound. Each use of it means a new `db.rootCursor()`, and it can only be used as a
+cursor.
 
-**Cursors are values.** Binding one copies it, and two names never alias. A cursor holds a position and a
-**snapshot** of the slot at that position, and is only updated by what's done through that name:
+These are script failures ([section 10](#10-valid-scripts-and-script-failures)): using a name that isn't bound,
+using a null cursor for anything, using a slot as a cursor or a cursor as a slot, and using a read-only cursor where
+a read-write one is needed, as those methods don't exist on read-only cursors in Zig.
+
+### What a cursor holds
+
+**Cursors are values.** Binding one copies it, and two names never alias. A cursor holds a position, a **snapshot**
+of the slot at that position, and a **freeze point**, and is only updated by what's done through that name.
+
+The snapshot:
 
 - `write`, `write_if_empty` and `writer` update the cursor they are called on, as Zig's take `*Cursor`.
 - `write_path` does not change the cursor it is called on. Its result is a new cursor, bound by `as`.
-- `slot`, `count` and the `read_*` ops see the snapshot, however stale it is. `read_path` and `read_path_slot`
-  also start from it.
+- `slot`, `count`, `write_if_empty` and the `read_*` ops go by the snapshot, however stale it is, as do
+  `read_path` and `read_path_slot`. So `write_if_empty` on a cursor whose snapshot is empty overwrites a value it
+  can't see.
 - `write_path` starts by reading the slot at the cursor's position again, if it has one, so its result sees the
   present.
 
-A root cursor is the exception: everything it does reads the root from the last commit, so it's never stale. That
-means it doesn't see a transaction in progress either: `count` on a root list inside a callback gives the count
-from before the transaction.
+The freeze point, which is the `frozen_at` of a Zig cursor:
 
-Using a read-only cursor where a read-write one is needed is a script failure, as these methods don't exist on
-read-only cursors in Zig.
+- `freeze` sets it on the cursor it's called on.
+- The result of `write_path`, the cursors from `read_key_value_pair` and the cursor given to a callback take it from
+  the cursor they were made through. A cursor from `run_context` starts with none.
+- Cursors from `read_path` and `read_only` don't have one. They're read-only, so it wouldn't matter.
+- It doesn't come back out of a callback ([section 6](#6-callbacks)).
 
-**What a kept cursor can do.** `write_path` returns a root cursor if its path ended at the root, as a lone
-`hash_map_init` does, and every write through that cursor is a transaction of its own. Any other cursor from a
-finished transaction can still be read. Writing through it fails with `ExpectedTxStart` between transactions.
+**A root cursor is the exception**, read-write or read-only: everything it does reads the root from the last commit,
+so it's never stale. That means it doesn't see a transaction in progress either: `count` on a root list inside a
+callback gives the count from before the transaction.
 
-Two uses have no defined result, and scripts must not contain them:
+### What a kept cursor can do
 
-- Writing through a cursor kept from an earlier transaction, *during* a later one. Zig doesn't stop this, and the
-  write lands on committed bytes, in place.
-- Using a cursor from a transaction that was rolled back. What it points at is gone.
+`write_path` returns a root cursor if its path ended at the root, as a lone `hash_map_init` does, and every write
+through that cursor is a transaction of its own. Any other cursor from a finished transaction can still be read.
+Writing through it fails with `ExpectedTxStart` between transactions, and doing so during a later transaction is
+an undefined use ([section 10](#10-valid-scripts-and-script-failures)).
 
 ## 5. Ops
 
@@ -205,12 +235,12 @@ left out. `expect` and its relatives are checked after the call and are describe
 | `freeze` | `on` | `on.freeze()` | updates `on` |
 | `db_freeze` | | `db.freeze()` | |
 | `run_context` | `ctx` | `db.runContext(ctx)`, `ctx` being `{"as": NAME, "ops": [...]}` | |
-| `fail` | | `return error.ScriptAbort`. Only valid in a callback | |
+| `fail` | | `return error.ScriptAbort`. Only used in a callback | |
 | `read_path` | `on`, `path`, `as?`, `expect_null?` | `on.readPath(path)` | `as`: a read-only cursor, or a null cursor |
 | `read_path_slot` | `on`, `path`, `as?`, `expect_null?`, `expect?` | `on.readPathSlot(path)` | `as`: a slot, or null |
 | `slot` | `on`, `as?`, `expect?` | `on.slot()` | `as`: a slot |
 | `read_only` | `on`, `as` | `on.readOnly()` | `as`: a read-only cursor |
-| `read_key_value_pair` | `on`, `key_as?`, `value_as?`, `expect_hash?` | `on.readKeyValuePair()` | `key_as`, `value_as`: cursors of the same kind as `on` |
+| `read_key_value_pair` | `on`, `key_as?`, `value_as?`, `expect_hash?` | `on.readKeyValuePair()` | `key_as`, `value_as`: two different names, for cursors of the same kind as `on` |
 | `read_uint` | `on`, `expect?` | `on.readUint()` | |
 | `read_int` | `on`, `expect?` | `on.readInt()` | |
 | `read_float` | `on`, `expect?` | `on.readFloat()` | |
@@ -241,13 +271,12 @@ try w.finish();
 | `expect` on `read_uint`, `read_int`, `count` | the integer is equal |
 | `expect` on `read_float` | the bit pattern is equal ([floats](#floats)) |
 | `expect` on `read_bytes` | the bytes are equal ([bytes](#bytes)) |
-| `expect` on `slot`, `read_path_slot` | an object with any of `tag`, `value`, `full`: each given field is equal. It fails on a null slot |
+| `expect` on `slot`, `read_path_slot` | an object with at least one of `tag`, `value`, `full`: each given field is equal. It fails on a null slot |
 | `expect_format_tag` | a [format tag](#format-tags) that is equal, or `null` for no tag. Left out, the tag isn't checked |
 | `expect_null` | `true`: the result is null. `false`: it isn't. Left out, either is fine |
 | `expect_hash` | a [hash](#hashes) that is equal. A sorted entry's hash is all zeros |
 
-A failed expectation is a script failure ([section 10](#10-running-a-script)), not an engine error, so
-`expect_error` can't catch it.
+A failed expectation is a script failure, not an engine error, so `expect_error` can't catch it.
 
 ## 6. Callbacks
 
@@ -255,7 +284,8 @@ A `ctx` part or a `run_context` op is a Zig callback, `run(cursor: *Cursor(.read
 
 1. Bind `as` to `cursor.*`.
 2. Run the `ops` in order.
-3. If they all finished, assign `cursor.* = ` whatever `as` holds now, and return. It must hold a read-write cursor.
+3. If they all finished, assign `cursor.* = ` whatever `as` holds now, and return. If it doesn't hold a read-write
+   cursor, that's a script failure.
 4. If an error is leaving the callback ([section 7](#7-errors)), return it.
 
 Step 3 is what makes writes through the callback's cursor visible to the path that called it. `write` on `as`
@@ -263,13 +293,16 @@ updates it, and so does a `write_path` that binds its result to `as`, which is h
 written. A `write_path` through `as` with no `as` of its own changes the file but leaves the cursor as it was, so
 the cursor the outer call returns holds the old slot.
 
+What comes back out of a callback is only the cursor's position and snapshot. The outer `write_path`'s result takes
+its freeze point from the cursor that `write_path` was called on (`lib.zig:3203`), so a `freeze` on the callback's
+cursor ends with the callback, as far as the outer result goes.
+
 The callback runs when the path reaches it, and only then. If an earlier part fails, it doesn't run. In a read
 path, `ctx` fails with `WriteNotAllowed` without running. Ops inside a callback are evaluated when they run.
 
-Callbacks nest to any depth. A callback's `as` can't be the name of a callback that is still running around it:
-that's a script failure. It can be reused once that callback has ended, as `as` is an ordinary name. A cursor
-kept in a callback can be written through from a callback nested in it, or after it has ended, for as long as the
-transaction lasts.
+Callbacks nest to any depth. A callback's `as` is different from the `as` of every callback written around it, and
+it can be the same as one that isn't. A cursor kept in a callback can be written through from a callback nested in
+it, or after it has ended, for as long as the transaction lasts.
 
 ## 7. Errors
 
@@ -277,12 +310,15 @@ An op has a **result**: it finishes, or it raises an engine error with a name. `
 
 | `expect_error` | The op finishes | The op raises error E |
 |---|---|---|
-| given | script failure | If it names E, E is handled: nothing is bound, and the next op runs. Otherwise, script failure |
+| given | script failure | If it names E, E is handled and the next op runs. Otherwise, script failure |
 | left out, inside a callback | the next op runs | E leaves the callback: its remaining ops don't run, and the op that called the callback raises E, to which this table applies again |
 | left out, at the top level | the next op runs | script failure |
 
-This is `try`: an op with no `expect_error` passes the error upward, and an op with one catches it. A failed op
-binds nothing, so names in `as` keep what they had.
+This is `try`: an op with no `expect_error` passes the error upward, and an op with one catches it.
+
+A failed op doesn't bind its own `as`, `key_as` or `value_as`, and those names keep what they had. It doesn't unbind
+anything either: a callback that ran before the error has already bound its own `as` and whatever its ops bound,
+and those stay.
 
 **What gets undone** is the engine's decision, not the runner's:
 
@@ -290,7 +326,7 @@ binds nothing, so names in `as` keep what they had.
   file back to the last commit. The whole transaction is gone, and the next one starts from the same bytes.
 - When a callback handles an error, **nothing is undone**. The path that failed may have written to the file and
   linked what it wrote into the tree, all of which stays, and gets committed with the rest. From
-  `scripts/04-rollback.json`, inside a callback:
+  `scripts/04-rollback.json`, inside a callback, with its note left out:
 
   ```json
   { "op": "write_path", "on": "m", "path": [{ "hash_map_get": { "value": { "sha1": "b" } } }, { "array_list_get": 0 }], "expect_error": "KeyNotFound" }
@@ -313,9 +349,8 @@ The ones scripts expect:
 | `PathPartMustBeAtEnd` | a `ctx` part that isn't last |
 | `ScriptAbort` | the `fail` op. It isn't an engine error, but it travels like one |
 
-`EndOfStream`, `InvalidEnumTag`, `InvalidBTreeNode`, `InvalidBTreeNodeKind`, `KeyOffsetExceeded`, `MaxShiftExceeded`
-and `StreamTooLong` exist in the engine, but need a corrupt file or an undefined use (section 4) to reach, or a
-call scripts can't make.
+The engine has more errors than these, like `EndOfStream` and `InvalidEnumTag`. Reaching them takes an undefined use,
+a corrupt file, or a call scripts can't make, so no script expects them.
 
 ## 8. Transactions and commit IDs
 
@@ -334,8 +369,9 @@ transaction, which commits and makes the root a `hash_set`. `write_if_empty` on 
 root is empty, and otherwise makes no call at all. A root cleared with `{"slot": null}` isn't empty, because its
 `full` flag is set.
 
-An op on a root cursor inside a transaction, with a non-empty path, raises `NestedTopLevelWrite`. So at most one
-commit happens per top-level op, and an op inside a callback never commits.
+A write op on a root cursor inside a transaction, with a non-empty path, raises `NestedTopLevelWrite`. So at most one
+commit happens per top-level op, and an op inside a callback never commits. Reads through a root cursor are fine
+inside a transaction.
 
 The engine asks its random source for one 64-bit value per commit, and nowhere else (`lib.zig:916`). Creating
 the database doesn't, because the file ID is given and the first commit's ID is 0.
@@ -361,13 +397,14 @@ the database doesn't, because the file ID is given and the first commit's ID is 
 | `format` | exactly `"xitdb-sidecar/1"` |
 | `file_id` | the script's file ID |
 | `initial_size` | the committed size right after creating the database, always 62 |
-| `file_size` | the size of the file after the last op, which is also the last `committed_size`. No bytes are left past it |
+| `file_size` | the size of the file after the last op. No bytes are left past the last committed size |
 | `ops` | one entry per **top-level** op in the script, in the same order, including ops that are only reads |
 | `ops[i].committed_size` | `db.committedSize()` after op `i` |
 | `ops[i].commit_id` | 16 hex digits if op `i` committed, otherwise `null` |
 
-The commit ID's digits are the 8 bytes of the trailer's commit ID field, in order. As a number, they are the
-big-endian value of those bytes, which is what `randomU64` returns in Zig. The trailer is at `committed_size − 25`.
+An op committed if the committed size changed. The commit ID's digits are the 8 bytes at `committed_size − 16`, which
+is the trailer's commit ID field, in order. As a number, they are the big-endian value of those bytes, which is what
+`randomU64` returns in Zig.
 
 **To reproduce a file**, give the second implementation a random source that returns the non-null commit IDs in
 order, one per call. At the end, none should be left. Then after each top-level op, check the committed size
@@ -377,34 +414,66 @@ recomputes the checksums, and gets the first file back exactly.
 
 The checksum is computed by the engine and isn't in the sidecar. It should come out equal by itself.
 
-## 10. Running a script
+## 10. Valid scripts and script failures
 
 ```
 run <script> <out.db> [--kind buffered_file|file|memory]
 ```
 
 The Zig runner truncates `<out.db>`, runs the script, and writes the file and the sidecar. The default kind is
-`buffered_file`. It exits with:
+`buffered_file`. It uses `fsync = false` and the default buffer size, neither of which affects the bytes. It exits with:
 
 | Status | Meaning |
 |---|---|
-| 0 | the script ran to the end, and every expectation passed |
-| 1 | **script failure**: an error nothing handled, a failed expectation, or a malformed script. The runner stops there, and the output files must not be used |
+| 0 | the script is valid, it ran to the end, and every expectation passed |
+| 1 | the script isn't valid or it failed, or a file couldn't be opened. The output files must not be used |
 | 2 | wrong command line |
 
-A script is checked as it runs, so an op that's never reached isn't checked.
+A panic in the engine means an undefined use or an engine bug. No script accepted by `check.sh` causes one.
 
-A second runner reads a script and a sidecar, and has the same idea of a script failure. How it's started is up to
-it, and it needn't write a sidecar.
+A second runner reads a script and a sidecar. How it's started is up to it, and it needn't write a sidecar. The three
+kinds of problem below matter to it differently.
 
-**Storage kinds don't change the bytes.** `check.sh` holds every script in this repository to that, across all
-three kinds, in debug and release builds. There's one known difference in behaviour: within a transaction, reading
-a gap left by a `writer` that seeked past the end raises `EndOfStream` on `buffered_file` and gives zeros on the
-other two. The committed bytes are the same in all three. Scripts must not read a gap before it's committed.
+### A script that isn't well-formed
 
-**Hash sizes above 32** have a limit in Zig. The depth counter in the trie code overflows if two keys share their
-lowest 64 nibbles, which panics in debug builds. Scripts must not do that. Real hashes would need a 256-bit
-collision.
+Being well-formed is everything sections 1 to 6 say about how a script is written. `run` checks all of it, for the
+whole script, before it creates the database. That includes ops that are never reached, fields that would only be
+looked at if a call finished, and the bodies of callbacks that never run. `run` also fails on a duplicate field,
+`1.0`, `1e0`, `-0`, a trailing comma and a byte order mark. `tests/invalid/` has a script for each of these rules.
+
+So a script `run` has accepted is well-formed everywhere. A second runner can decode all of it up front or take it
+piece by piece, and need not reject any of the above. Swift's JSON parsers accept several of them, and it doesn't
+matter, because they don't appear. It only has to fail on what it doesn't know (section 1).
+
+### A script failure
+
+A failure that can only be known by running the script:
+
+- an engine error that nothing handled ([section 7](#7-errors)),
+- `expect_error` on an op that finished or raised a different error,
+- a failed expectation,
+- a name that isn't bound, or that holds the wrong kind of thing ([section 4](#4-names)),
+- a callback's `as` not holding a read-write cursor when it ends,
+- a null slot given to `linked_array_list_concat`.
+
+The runner stops there. **A second runner must do this too.** Each script in `tests/failing/` is well-formed and must
+fail in every runner. The text after `expected failure:` in each one's `description` is the reason in Zig's message;
+message wording isn't part of this format.
+
+### An undefined use
+
+Things a well-formed script could say, whose results aren't defined. Scripts don't contain them, and a second runner
+needn't handle them. They are kept out like this:
+
+| Use | What Zig does | How it's kept out |
+|---|---|---|
+| Writing, during a transaction, through a cursor kept from an earlier one | overwrites committed bytes in place | `run` fails, as it does with the next one, though the engine wouldn't |
+| Using a cursor or a slot from a transaction that was rolled back | reads whatever is at that offset by then | `run` fails |
+| Reading, before the commit, a gap left by a `writer` that seeked past the end | `EndOfStream` on `buffered_file`, zeros on `file` and `memory`, with the same committed bytes on all three | `check.sh` runs every script on all three kinds |
+| Two keys sharing their lowest 64 nibbles, at a hash size above 32 | a depth counter overflows, which panics in a debug build | `run` is a debug build. Real hashes would need a 256-bit collision |
+
+**Storage kinds don't otherwise change the bytes.** `check.sh` holds every script in this repository to that, across
+all three kinds, in debug and release builds.
 
 ## 11. Behaviour a runner must not fix
 
@@ -423,13 +492,16 @@ All of these look like mistakes and all of them are what Zig does. `tests/valid/
 5. **A sorted map's key can be written one way but not the other.** Through `{"sorted_map_get": {"key": ...}}` the
    cursor has no position, so writing fails with `CursorNotWriteable`. Through `read_key_value_pair` on a
    `{"sorted_map_get": {"kv_pair": ...}}` cursor, it has one, so writing works, and writing a different key would
-   break the order. In a key-only entry there's no key slot to write to.
+   break the order.
 6. **Asking a set for a pair changes the entry.** `{"sorted_map_get": {"kv_pair": ...}}` in a write path moves a
    key-only entry into a `sorted_kv_pair`, even in a `sorted_set`.
 7. **Writing `none` sets `full`, and keeps the value.** `{"write": {"slot": {"tag": "none", "value": 5}}}` writes
    tag `none`, `full` set, value 5.
-8. **Nothing stops a read of a stale snapshot** (section 4). `read_uint` on a cursor whose slot has since been
-   written reports `UnexpectedTag` if the old slot wasn't a `uint`.
+8. **Nothing stops a stale snapshot being used** (section 4). `read_uint` on a cursor whose slot has since been
+   written reports `UnexpectedTag` if the old slot wasn't a `uint`, and `write_if_empty` overwrites a value it can't
+   see.
+9. **A freeze doesn't leave a callback** (section 6). A cursor that the outer `write_path` returns isn't frozen,
+   even if its callback froze the cursor it was given.
 
 ## 12. Worked example
 
