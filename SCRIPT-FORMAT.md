@@ -315,8 +315,9 @@ A stream raises `UnexpectedTag` on anything but a byte value. Three uses of it a
 | `from_index` | `ArrayList.iteratorFrom`, `LinkedArrayList.iteratorFrom`, or `SortedMap.iteratorFromIndex` and the set's | array lists, linked array lists, sorted maps and sets. It counts from the end if negative, and gives nothing if it's out of range |
 | `from_key` | `SortedMap.iteratorFrom` and the set's | sorted maps and sets. It starts at the first key that isn't less than this one |
 
-Any of them on a slot with nothing in it gives an iterator that gives nothing. On a slot of any other kind they raise
-`UnexpectedTag`. Which call a runner makes depends on the tag it finds, and the wrappers add only a check of the tag,
+Any of them on a slot with nothing in it gives an iterator that gives nothing. That includes `from_key`, so a runner
+needs that much of it before it has sorted maps: `reads-iterators` does it on an empty root. On a slot of any other kind
+they raise `UnexpectedTag`. Which call a runner makes depends on the tag it finds, and the wrappers add only a check of the tag,
 which raises the same error.
 
 **Unlike a cursor, an iterator isn't a value.** There's one per `iterator` op, and `next` moves it, however it's reached.
