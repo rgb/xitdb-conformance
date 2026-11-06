@@ -285,9 +285,8 @@ between. These four ops only appear at the top level, and only `reopen` can have
 | `raw_append` | `bytes` | Writes the bytes at the end of the file |
 | `raw_write` | `offset`, `bytes` | Writes the bytes at `offset`, which goes up to 2²⁴, leaving zeros if that's past the end |
 
-While the database is closed, only `raw_append`, `raw_write` and `reopen` can run. Anything else is a script failure,
-as are `close` or a raw op at the wrong time: `close` and the raw ops need the opposite state from the one `reopen`
-needs. The raw ops write straight to storage, past the engine.
+While the database is closed, only `raw_append`, `raw_write` and `reopen` can run, and they can't run while it's open.
+Anything else is a script failure. The raw ops write straight to storage, past the engine.
 
 `reopen` states a hash size: the script's, or `hash_size` if given, which is 8, 20, 32 or 64. It never takes the size
 from the file, so a header that says otherwise is `InvalidHashSize`. If `reopen` fails, the database stays closed.
