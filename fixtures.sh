@@ -93,7 +93,7 @@ It was produced from:
   \`iterators\` (\`iterator\` and \`next\`), \`rank\`, \`byte_stream\` (\`read_stream\`) and \`byte_buffers\`
   (\`read_bytes_into\`, and \`max_size\` on \`read_bytes\`).
 - \`valid/<name>.json\`: a script that passes, with \`<name>.db\`, the file Zig wrote, and \`<name>.db.sidecar.json\`, its
-  committed sizes and commit IDs. Those called \`gen-<seed>\` and \`reads-<seed>\` come from the generator \`gen\`, and
+  committed sizes and commit IDs. Those called \`gen-<seed>\`, \`reads-<seed>\` and \`compact-<seed>\` come from the generator \`gen\`, and
   are harder to read, but they do things in combinations nobody thought of. Those called \`deep-*\` have transactions of
   hundreds of writes, and they're what tells copying from rewriting in place. These and \`iterator-tiers*\` come from
   \`longscripts\`, because they're too long to write by hand.

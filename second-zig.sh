@@ -192,6 +192,7 @@ for script in tests/generated/*.json; do
     case "$name" in
         gen-*) "$BIN/gen" "${name#gen-}" "$WORK/runs/gen.json" 2> /dev/null || true ;;
         reads-*) "$BIN/gen" "${name#reads-}" "$WORK/runs/gen.json" --reads 2> /dev/null || true ;;
+        compact-*) "$BIN/gen" "${name#compact-}" "$WORK/runs/gen.json" --compact 2> /dev/null || true ;;
     esac
     if cmp -s "$script" "$WORK/runs/gen.json"; then
         gen_same=$((gen_same + 1))

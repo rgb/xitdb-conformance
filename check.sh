@@ -152,7 +152,7 @@ expect_failures tests/invalid
 
 echo "== both kinds of offset map give the same target"
 count=0
-for script in tests/valid/*.json; do
+for script in tests/valid/*.json tests/generated/compact-*.json; do
     grep -q '"offset_map": *"memory"' "$script" || continue
     name=$(basename "$script" .json)
     sed 's/"offset_map": *"memory"/"offset_map": "disk"/' "$script" > "$OUT/disk.json"
@@ -164,7 +164,7 @@ for script in tests/valid/*.json; do
     rm -f "$OUT/$name.disk.db"* "$OUT/$name.disk".*.db
     count=$((count + 1))
 done
-if [ "$count" -lt 5 ]; then
+if [ "$count" -lt 12 ]; then
     echo "only $count scripts compact with the memory offset map, which is fewer than there should be"
     exit 1
 fi
