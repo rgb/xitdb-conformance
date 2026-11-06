@@ -528,6 +528,7 @@ needn't handle them. They are kept out like this:
 | Writing a slot whose tag is `index`, `kv_pair` or `sorted_kv_pair` | follows it as if it had been built there, which ends in errors like `KeyOffsetExceeded` | `run` fails |
 | Reading, before the commit, a gap left by a `writer` that seeked past the end | zeros on `file` and `memory`. On `buffered_file`, `EndOfStream` until the gap has been flushed, and zeros after that. The committed bytes are the same on all three | `EndOfStream` can't be expected, and `check.sh` runs every script on all three kinds. A read that gets zeros everywhere isn't caught |
 | On a read-only file, a transaction with a callback, or one that would fail anyway | `file` raises `WriteFailed` at the first write, without running the rest. `buffered_file` runs the rest and only fails at the commit, so it raises `KeyNotFound` for a path that fails by itself, runs the callback, and raises `ScriptAbort` for a callback that fails | `run` fails on the callback. `check.sh` runs every script on both kinds, which catches the rest |
+| A write into committed bytes (section 11) of something that points into the current transaction, if the transaction is then rolled back or the root header is later set back past it | committed data is left pointing past the end of the file. Reading it raises `EndOfStream`, or `OutOfMemory` for a wild length, and once more data has landed at that offset, the read succeeds and returns those bytes as if they were the value | `gen` doesn't let such a transaction fail. `run` can't see it, so a hand-written script has to take care: writing an inline value is fine, as `overwriting-committed-bytes` does |
 | A trie 64 levels deep, at a hash size above 32. Two keys need to share their lowest 64 nibbles, which for real hashes would take a 256-bit collision | a depth counter overflows, which panics in a debug build | `run` is a debug build |
 
 **Storage kinds don't otherwise change the bytes.** `check.sh` holds every script in this repository to that, across
@@ -542,8 +543,9 @@ All of these look like mistakes and all of them are what Zig does. `overwriting-
    transaction, and nothing makes a path run one. A path that skips it writes straight into the committed collection,
    so earlier moments change: a list grows, an element changes, a map gets a key. A write through a cursor kept from
    an earlier transaction does the same, however many new cursors were made from it in between. Neither is an error,
-   and a rollback doesn't undo them, because truncating only removes bytes past the commit. The collection wrappers
-   don't do this, because they always run the init part. Storage kinds agree on the result.
+   and a rollback doesn't undo them, because truncating only removes bytes past the commit, which is an undefined use
+   if what was written points at bytes that were removed (section 10). The collection wrappers don't do this, because
+   they always run the init part. Storage kinds agree on the result.
 2. **A remove ends the path.** `hash_map_remove` and `sorted_map_remove` return without looking at the parts after
    them, with no error. A `write` after one does nothing, and a `ctx` after one doesn't run.
 3. **`write_path` doesn't update the cursor it's called on** (section 4), so a callback that only uses `write_path`

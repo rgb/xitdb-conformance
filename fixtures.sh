@@ -89,7 +89,8 @@ It was produced from:
   reached. \`features\` says which of these it uses: \`reopen\` (closing and reopening), \`raw_file\` (writing to the
   file directly while it's closed) and \`read_only\` (opening it read-only, which the memory storage kind can't do).
 - \`valid/<name>.json\`: a script that passes, with \`<name>.db\`, the file Zig wrote, and \`<name>.db.sidecar.json\`, its
-  committed sizes and commit IDs.
+  committed sizes and commit IDs. Those called \`gen-<seed>\` come from the generator \`gen\`, and are harder to read,
+  but they do things in combinations nobody thought of.
 - \`failing/<name>.json\`: a well-formed script that must fail in every runner. The text after \`expected failure:\` in
   its description is why it fails in Zig, and it has no expected file, as there's nothing to compare.
 
@@ -106,7 +107,7 @@ can assume they're well-formed.
 EOF
 }
 
-SOURCES="scripts tests/valid"
+SOURCES="scripts tests/valid tests/generated"
 FAILING_SOURCES="tests/failing"
 
 if [ "$MODE" = check ]; then

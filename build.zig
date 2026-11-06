@@ -36,4 +36,15 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(manifest_exe);
+
+    const gen_exe = b.addExecutable(.{
+        .name = "gen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/gen.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "xitdb", .module = xitdb }},
+        }),
+    });
+    b.installArtifact(gen_exe);
 }

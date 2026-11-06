@@ -1,7 +1,7 @@
 #!/bin/sh
 # The gate for this repository. It stops at the first problem.
 #
-# 1. everything builds;
+# 1. everything builds, and gen still writes the scripts that are committed;
 # 2. every script runs, twice, and the two files differ only in the commit ID and
 #    checksum of each trailer (see src/detcheck.zig for exactly what's checked);
 # 3. the storage kind and the optimization level make no difference to the bytes;
@@ -26,8 +26,11 @@ zig build
 zig build -Doptimize=ReleaseFast --prefix out/release
 RELEASE_RUN=out/release/bin/run
 
+echo "== the generated scripts"
+./gen-fixed.sh --check
+
 echo "== determinism: each script run twice"
-for script in scripts/*.json tests/valid/*.json; do
+for script in scripts/*.json tests/valid/*.json tests/generated/*.json; do
     name=$(basename "$script" .json)
     "$RUN" "$script" "$OUT/$name.a.db"
     "$RUN" "$script" "$OUT/$name.b.db"
@@ -36,7 +39,7 @@ for script in scripts/*.json tests/valid/*.json; do
 done
 
 echo "== storage kinds and optimization levels"
-for script in scripts/*.json tests/valid/*.json; do
+for script in scripts/*.json tests/valid/*.json tests/generated/*.json; do
     name=$(basename "$script" .json)
     "$RUN" "$script" "$OUT/$name.file.db" --kind file
     "$RELEASE_RUN" "$script" "$OUT/$name.release.db"

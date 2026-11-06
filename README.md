@@ -13,6 +13,8 @@ independent of the Swift code.
 - `tests/failing/`: well-formed scripts that must fail in every runner, each for the reason in its description.
 - `tests/invalid/`: scripts that `run` must reject, before running them or, for an undefined use, when it gets there.
   A second runner never sees these.
+- `src/gen.zig`: `gen <seed> <out.script>`, which writes a valid random script. `tests/generated/` has the ones that
+  are committed, which `gen-fixed.sh` writes, and `gen-live.sh <how many>` runs as many fresh seeds as you like.
 - `fixtures/`: every script with what Zig produces for it, which the Swift package copies into its test resources.
   `fixtures.sh` regenerates it, and `src/manifest.zig` lists what each script needs.
 - `check.sh`: the gate. It builds everything and checks all of the above, in debug and release builds and across
