@@ -5,18 +5,18 @@
   "file_size": 96,
   "databases": {
     "main": {"file_id": "0000000000000001", "file_size": 96, "trailers": [
-      {"position": 71, "commit_id": "190692c6f4ddfbef", "file_id": "0000000000000001"}
+      {"position": 71, "commit_id": "c27de57424e551b6", "file_id": "0000000000000001"}
     ]},
     "replica": {"file_id": "0000000000000001", "file_size": 96, "trailers": [
-      {"position": 71, "commit_id": "190692c6f4ddfbef", "file_id": "0000000000000001"}
+      {"position": 71, "commit_id": "c27de57424e551b6", "file_id": "0000000000000001"}
     ]},
     "left_broken": {"file_id": "0000000000000001", "file_size": 95, "trailers": [
-      {"position": 71, "commit_id": "190692c6f4ddfbef", "file_id": "0000000000000001"}
+      {"position": 71, "commit_id": "c27de57424e551b6", "file_id": "0000000000000001"}
     ]}
   },
   "ops": [
     {"committed_size": 62, "commit_id": null},
-    {"committed_size": 96, "commit_id": "190692c6f4ddfbef"},
+    {"committed_size": 96, "commit_id": "c27de57424e551b6"},
     {"committed_size": 96, "commit_id": null},
     {"db": "replica", "committed_size": 62, "commit_id": null},
     {"db": "replica", "committed_size": null, "commit_id": null},
@@ -27,6 +27,7 @@
     {"db": "replica", "committed_size": null, "commit_id": null},
     {"db": "replica", "committed_size": null, "commit_id": null},
     {"db": "replica", "committed_size": null, "commit_id": null},
+    {"db": "replica", "committed_size": 96, "commit_id": null},
     {"db": "replica", "committed_size": 96, "commit_id": null},
     {"db": "replica", "committed_size": 96, "commit_id": null},
     {"db": "replica", "committed_size": 96, "commit_id": null},
