@@ -1,0 +1,23 @@
+# What each case in this folder does on the Zig commit most of the fixtures come from. check.sh holds
+# that commit to this, and second-zig.sh says which of them another commit does differently.
+#
+#   script|wrapper  name  exit status  text that's in what it prints
+script frozen-clone-linked-read 1 unexpected error InvalidBTreeNode
+script frozen-clone-sorted-read 1 unexpected error InvalidBTreeNode
+script frozen-clone-linked-append 134 start index 4 is larger than end index 2
+script concat-stale-slot 134 is larger than end index
+wrapper concat_then_clone 134 is larger than end index
+wrapper concat_two_wrappers 134 is larger than end index
+wrapper concat_slot_read_before 134 is larger than end index
+wrapper concat_old_map_wrapper 134 is larger than end index
+wrapper frozen_clone_append 134 is larger than end index
+wrapper frozen_clone_remove 134 is larger than end index
+wrapper kept_across_transactions 134 is larger than end index
+wrapper sorted_frozen_clone_remove 134 integer overflow
+wrapper counted_frozen_clone_remove 134 integer overflow
+wrapper frozen_clone_read 1 InvalidBTreeNode
+wrapper sorted_frozen_clone_read 1 InvalidBTreeNode
+wrapper array_frozen_clone 0 finished
+wrapper array_frozen_clone_slice 0 finished
+wrapper hash_frozen_clone 0 finished
+wrapper no_problem_without_freeze 0 finished

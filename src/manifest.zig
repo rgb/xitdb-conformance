@@ -1,9 +1,11 @@
-//! manifest <conformance commit> <zig commit> <zig version> <script>...
+//! manifest <conformance commit> <zig commit> <zig version> <zig commits file> <script>...
 //!
 //! Prints fixtures/manifest.json. It is run from inside the fixtures folder with
 //! the scripts as `valid/<name>.json` and `failing/<name>.json`, and lists what
 //! each script needs, so that a second runner can say which scripts wait for
 //! which of its milestones instead of failing on a part it doesn't have yet.
+//! It also says which Zig commit each one comes from, which is the one given,
+//! unless the zig commits file (tests/zig-commits.txt) says otherwise.
 //!
 //! The scripts have passed through `run`, so they're well-formed, and this only
 //! fails on what it can't classify.
@@ -166,9 +168,20 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
 
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len < 4) {
-        std.debug.print("usage: manifest <conformance commit> <zig commit> <zig version> <script>...\n", .{});
+    if (args.len < 5) {
+        std.debug.print("usage: manifest <conformance commit> <zig commit> <zig version> <zig commits file> <script>...\n", .{});
         std.process.exit(2);
+    }
+
+    var other_commits: std.StringHashMapUnmanaged([]const u8) = .empty;
+    const commits_text = try Io.Dir.cwd().readFileAlloc(io, args[4], arena, .unlimited);
+    var commit_lines = std.mem.splitScalar(u8, commits_text, '\n');
+    while (commit_lines.next()) |line| {
+        if (line.len == 0 or line[0] == '#') continue;
+        var fields = std.mem.tokenizeScalar(u8, line, ' ');
+        const fixture = fields.next() orelse continue;
+        const commit = fields.next() orelse fail("\"{s}\" in {s} has no commit", .{ line, args[4] });
+        try other_commits.put(arena, fixture, commit);
     }
 
     var stdout_buffer: [4096]u8 = undefined;
@@ -182,7 +195,7 @@ pub fn main(init: std.process.Init) !void {
         args[3],
     });
 
-    for (args[4..], 0..) |path, i| {
+    for (args[5..], 0..) |path, i| {
         const passes = std.mem.startsWith(u8, path, "valid/");
         if (!passes and !std.mem.startsWith(u8, path, "failing/")) fail("{s} isn't in valid/ or failing/", .{path});
         const base = std.fs.path.basename(path);
@@ -198,11 +211,12 @@ pub fn main(init: std.process.Init) !void {
         const hash_size = script.get("hash_size") orelse fail("{s} has no hash size", .{path});
 
         try w.writeAll(if (i == 0) "\n" else ",\n");
-        try w.print("    {{\"name\": \"{s}\", \"outcome\": \"{s}\", \"format\": \"{s}\", \"hash_size\": {s}, \"script\": \"{s}\"", .{
+        try w.print("    {{\"name\": \"{s}\", \"outcome\": \"{s}\", \"format\": \"{s}\", \"hash_size\": {s}, \"zig_commit\": \"{s}\", \"script\": \"{s}\"", .{
             name,
             if (passes) "pass" else "fail",
             format.string,
             hash_size.number_string,
+            other_commits.get(name) orelse args[2],
             path,
         });
         if (passes) {

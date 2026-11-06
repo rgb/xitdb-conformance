@@ -17,7 +17,7 @@ set -eu
 cd "$(dirname "$0")"
 
 WORK=${1:-out/mutants}
-ZIG_ORIGINAL=../../xitdb
+ZIG_ORIGINAL=${ZIG_ORIGINAL:-../../xitdb}
 HERE=$PWD
 DET=$HERE/zig-out/bin/detcheck
 RUN=$HERE/zig-out/bin/run

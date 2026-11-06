@@ -14,7 +14,8 @@
 # 7. the hand-written scripts use everything in the format;
 # 8. the fixtures haven't drifted from what the scripts produce now, and that check
 #    notices drift;
-# 9. detcheck itself notices a changed byte.
+# 9. second-zig.sh finds nothing against this same Zig, and notices what's changed;
+# 10. detcheck itself notices a changed byte.
 
 set -eu
 cd "$(dirname "$0")"
@@ -273,40 +274,30 @@ echo "a slot pointing past the end of the file is reported"
 echo "== what tests/undefined shows still happens"
 # none of this is among the fixtures. if one of these stops happening, the Zig original
 # has changed, and SCRIPT-FORMAT.md's table of undefined uses needs to change too.
-expect_undefined() { # script, exit status, what it says
-    status=0
-    "$RUN" "tests/undefined/$1.json" "$OUT/undefined.db" 2> "$OUT/undefined.err" || status=$?
-    if [ "$status" -ne "$2" ] || ! grep -qF -- "$3" "$OUT/undefined.err"; then
-        echo "$1: expected exit status $2 with \"$3\", got $status:"
+count=0
+while read -r kind name want text; do
+    case "$kind" in
+        script | wrapper) ;;
+        *) continue ;;
+    esac
+    code=0
+    if [ "$kind" = script ]; then
+        "$RUN" "tests/undefined/$name.json" "$OUT/undefined.db" > /dev/null 2> "$OUT/undefined.err" || code=$?
+    else
+        zig-out/bin/undefined-wrappers "$name" > /dev/null 2> "$OUT/undefined.err" || code=$?
+    fi
+    if [ "$code" -ne "$want" ] || ! grep -qF -- "$text" "$OUT/undefined.err"; then
+        echo "$kind $name: expected exit status $want with \"$text\", got $code:"
         head -n 3 "$OUT/undefined.err"
         exit 1
     fi
-    echo "$1: $3"
-}
-expect_undefined frozen-clone-linked-read 1 "unexpected error InvalidBTreeNode"
-expect_undefined frozen-clone-sorted-read 1 "unexpected error InvalidBTreeNode"
-expect_undefined frozen-clone-linked-append 134 "start index 4 is larger than end index 2"
-expect_undefined concat-stale-slot 134 "is larger than end index"
-# the same through the collection wrappers alone
-expect_wrappers() { # exit status, what it says, cases
-    wanted_status=$1
-    wanted_text=$2
-    shift 2
-    for case in "$@"; do
-        status=0
-        zig-out/bin/undefined-wrappers "$case" > /dev/null 2> "$OUT/undefined.err" || status=$?
-        if [ "$status" -ne "$wanted_status" ] || ! grep -qF -- "$wanted_text" "$OUT/undefined.err"; then
-            echo "wrappers: $case: expected exit status $wanted_status with \"$wanted_text\", got $status:"
-            head -n 3 "$OUT/undefined.err"
-            exit 1
-        fi
-    done
-    echo "wrappers, $wanted_text: $*"
-}
-expect_wrappers 134 "is larger than end index" concat_then_clone concat_two_wrappers concat_slot_read_before concat_old_map_wrapper frozen_clone_append frozen_clone_remove kept_across_transactions
-expect_wrappers 134 "integer overflow" sorted_frozen_clone_remove counted_frozen_clone_remove
-expect_wrappers 1 "InvalidBTreeNode" frozen_clone_read sorted_frozen_clone_read
-expect_wrappers 0 "finished" array_frozen_clone array_frozen_clone_slice hash_frozen_clone no_problem_without_freeze
+    count=$((count + 1))
+done < tests/undefined/expected.txt
+if [ "$count" -ne 19 ]; then
+    echo "tests/undefined/expected.txt should have 19 cases, and it has $count"
+    exit 1
+fi
+echo "$count cases do what tests/undefined/expected.txt says"
 
 echo "== bench still works, and writes the size run does"
 BENCH=zig-out/bin/bench
@@ -428,6 +419,34 @@ fresh_copy
 printf ' ' >> "$COPY/README.md"
 expect_drift "a changed README" "README.md has drifted"
 rm -rf "$COPY"
+
+echo "== second-zig.sh"
+# against this same Zig commit, where there's nothing for it to find
+SECOND_ZIG_OUT=$OUT/second-zig ./second-zig.sh "$(cd ../../xitdb && pwd)" > "$OUT/second-zig.txt"
+expect_report() { # text that should be in the report
+    if ! grep -qF -- "$1" "$OUT/second-zig.txt"; then
+        echo "second-zig.sh should have said \"$1\", and it said:"
+        cat "$OUT/second-zig.txt"
+        exit 1
+    fi
+    echo "it says: $1"
+}
+valid_fixtures=$(find fixtures/valid -name '*.db.sidecar.json' | wc -l | tr -d ' ')
+failing_fixtures=$(find fixtures/failing -name '*.json' | wc -l | tr -d ' ')
+generated=$(find tests/generated -name '*.json' | wc -l | tr -d ' ')
+expect_report "$valid_fixtures with the same bytes, 0 with different bytes, 0 that fail"
+expect_report "$failing_fixtures still fail, and 0 don't"
+expect_report "5 as the original does, and 0 as the port does"
+expect_report "19 as they were, and 0 changed"
+expect_report "$generated scripts the same, and 0 different"
+# and what it does with a changed fixture, in copies of what it would change
+COPY="$OUT/fixtures-second"
+rm -rf "$COPY"
+cp -R fixtures "$COPY"
+flip_byte "$COPY/valid/worked-example.db" 400
+FIXTURES="$COPY" SECOND_ZIG_OUT=$OUT/second-zig ./second-zig.sh "$(cd ../../xitdb && pwd)" > "$OUT/second-zig.txt"
+expect_report "different: worked-example"
+rm -rf "$COPY" "$OUT/second-zig"
 
 echo "== detcheck notices changes"
 # a corrupt file can come from a script's raw_write too, but the same in both runs, so

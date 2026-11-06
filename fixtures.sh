@@ -18,6 +18,8 @@ MANIFEST=$PWD/zig-out/bin/manifest
 # check.sh points this at a copy to show that --check notices drift
 FIXTURES=${FIXTURES:-fixtures}
 ZIG_ORIGINAL=../../xitdb
+# the fixtures that come from another Zig commit, which the runner here can't check
+ZIG_COMMITS=$PWD/tests/zig-commits.txt
 
 MODE=update
 case "${1:-}" in
@@ -63,7 +65,7 @@ write_manifest() { # conformance commit, output
         cd "$FIXTURES"
         # a sidecar is a .json file too. the names have no spaces in them
         # shellcheck disable=SC2046
-        "$MANIFEST" "$1" "$ZIG_COMMIT" "$ZIG_VERSION" $(ls valid/*.json | grep -v '\.db\.sidecar\.json$') failing/*.json
+        "$MANIFEST" "$1" "$ZIG_COMMIT" "$ZIG_VERSION" "$ZIG_COMMITS" $(ls valid/*.json | grep -v '\.db\.sidecar\.json$') failing/*.json
     ) > "$2"
 }
 
@@ -77,7 +79,7 @@ What the Zig implementation of xitdb does, for a Swift port to match byte for by
 It was produced from:
 
 - conformance repository: commit \`$1\`
-- xitdb, the Zig original: commit \`$ZIG_COMMIT\`
+- xitdb, the Zig original: commit \`$ZIG_COMMIT\`, or the one the manifest gives for that fixture as its \`zig_commit\`
 - Zig $ZIG_VERSION, with the runner \`run\` built in debug mode and using the \`buffered_file\` storage kind
 
 \`SCRIPT-FORMAT.md\` in the conformance repository describes the scripts, and how to run them.
@@ -124,10 +126,19 @@ EOF
 }
 
 SOURCES="scripts tests/valid tests/generated"
+# scripts that only pass on another Zig commit, which the gate doesn't run on this one
+if [ -d tests/from-other-zig ]; then
+    SOURCES="$SOURCES tests/from-other-zig"
+fi
 FAILING_SOURCES="tests/failing"
+
+from_another_zig() { # name of a fixture
+    grep -q "^$1 " "$ZIG_COMMITS"
+}
 
 if [ "$MODE" = check ]; then
     [ -f "$FIXTURES/manifest.json" ] || fail "there's no manifest. Run ./fixtures.sh"
+    elsewhere=0
 
     # every source script is here unchanged, and passes from its copy here
     for dir in $SOURCES; do
@@ -138,6 +149,10 @@ if [ "$MODE" = check ]; then
             cmp -s "$script" "$copy" || fail "$name differs from the script in $dir"
             [ -f "$FIXTURES/valid/$name.db" ] || fail "$name has no expected file"
             [ -f "$FIXTURES/valid/$name.db.sidecar.json" ] || fail "$name has no sidecar"
+            if from_another_zig "$name"; then
+                elsewhere=$((elsewhere + 1))
+                continue
+            fi
             "$RUN" "$copy" "$TMP/$name.db" || fail "$name no longer runs"
             "$DET" "$TMP/$name.db" "$FIXTURES/valid/$name.db" > /dev/null || fail "$name has drifted"
             same_sidecar_layout "$TMP/$name.db.sidecar.json" "$FIXTURES/valid/$name.db.sidecar.json" || fail "$name's sidecar has drifted"
@@ -192,6 +207,9 @@ if [ "$MODE" = check ]; then
     valid=$(find "$FIXTURES/valid" -name '*.db' | wc -l | tr -d ' ')
     failing=$(find "$FIXTURES/failing" -name '*.json' | wc -l | tr -d ' ')
     echo "$FIXTURES: $valid expected files and $failing failing scripts haven't drifted"
+    if [ "$elsewhere" -gt 0 ]; then
+        echo "$elsewhere of those are from another Zig commit, so they weren't run here. ./second-zig.sh runs them"
+    fi
     exit 0
 fi
 
@@ -228,8 +246,17 @@ done
 for dir in $SOURCES; do
     for script in "$dir"/*.json; do
         name=$(basename "$script" .json)
-        "$RUN" "$script" "$TMP/$name.db"
         copy="$FIXTURES/valid/$name"
+        # these came from second-zig.sh, and the runner here has no say in them
+        if from_another_zig "$name"; then
+            if ! cmp -s "$script" "$copy.json"; then
+                cp "$script" "$copy.json"
+                echo "wrote $copy.json"
+                changed=yes
+            fi
+            continue
+        fi
+        "$RUN" "$script" "$TMP/$name.db"
         if [ -f "$copy.json" ] && [ -f "$copy.db" ] && [ -f "$copy.db.sidecar.json" ] &&
             cmp -s "$script" "$copy.json" &&
             "$DET" "$TMP/$name.db" "$copy.db" > /dev/null 2>&1 &&
