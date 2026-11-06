@@ -1,0 +1,13 @@
+.{
+    .name = .xitdb_conformance,
+    .version = "0.0.0",
+    .fingerprint = 0x15f24297796086a1,
+    .dependencies = .{
+        .xitdb = .{ .path = "../../xitdb" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
