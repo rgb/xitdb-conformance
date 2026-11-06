@@ -1,0 +1,4 @@
+{ "format": "xitdb-script/1", "description": "expected failure: must be exactly 40 digits", "hash_size": 20, "hash_id": null, "file_id": "0000000000000001",
+  "ops": [
+    { "op": "write_path", "on": "root", "path": [{ "hash_map_init": {} }, { "hash_map_get": { "value": { "hex": "00" } } }] }
+  ] }

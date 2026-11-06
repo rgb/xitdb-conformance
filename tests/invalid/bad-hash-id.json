@@ -1,0 +1,1 @@
+{ "format": "xitdb-script/1", "description": "expected failure: must be exactly 4 bytes", "hash_size": 20, "hash_id": "sha", "file_id": "0000000000000001", "ops": [] }
