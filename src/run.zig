@@ -44,6 +44,11 @@ const ERROR_NAMES = [_][]const u8{
     "NestedTopLevelWrite",
     "PathPartMustBeAtEnd",
     "ScriptAbort",
+    "WriteFailed",
+    "InvalidDatabase",
+    "InvalidVersion",
+    "InvalidHashSize",
+    "TruncatedDatabase",
 };
 
 // where the runner is in the script, for messages only
@@ -237,6 +242,10 @@ const OpKind = enum {
     read_float,
     read_bytes,
     count,
+    close,
+    reopen,
+    raw_append,
+    raw_write,
 };
 
 fn opFields(kind: OpKind) []const []const u8 {
@@ -255,13 +264,25 @@ fn opFields(kind: OpKind) []const []const u8 {
         .read_key_value_pair => &.{ "op", "note", "expect_error", "on", "key_as", "value_as", "expect_hash" },
         .read_uint, .read_int, .read_float, .count => &.{ "op", "note", "expect_error", "on", "expect" },
         .read_bytes => &.{ "op", "note", "expect_error", "on", "expect", "expect_format_tag" },
+        .close => &.{ "op", "note" },
+        .reopen => &.{ "op", "note", "expect_error", "read_only", "hash_size" },
+        .raw_append => &.{ "op", "note", "bytes" },
+        .raw_write => &.{ "op", "note", "offset", "bytes" },
     };
 }
 
 const SidecarEntry = struct {
-    committed_size: u64,
+    // null while the database is closed
+    committed_size: ?u64,
     commit_id: ?u64,
 };
+
+fn checkHashSize(size: u16) void {
+    switch (size) {
+        8, 20, 32, 64 => {},
+        else => die("hash_size must be 8, 20, 32 or 64, got {d}", .{size}),
+    }
+}
 
 const Options = struct {
     io: Io,
@@ -329,6 +350,16 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         // when validating there is no database, and parsing a path only checks it
         db: *DB = undefined,
         validating: bool = false,
+        // what closing and reopening the database needs
+        io: Io = undefined,
+        out: Io.File = undefined,
+        out_path: []const u8 = "",
+        buffer: *Io.Writer.Allocating = undefined,
+        read_only_file: ?Io.File = null,
+        closed: bool = false,
+        // bytes past the committed size are normal from when the file is written to
+        // directly until a transaction next truncates them
+        may_have_leftovers: bool = false,
         // the names of the callbacks around the op being validated
         enclosing: std.ArrayList([]const u8) = .empty,
         env: std.StringHashMapUnmanaged(Entry) = .empty,
@@ -356,8 +387,12 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
 
             if (op.get("note")) |note| _ = asString(note, "note");
             if (op.get("expect_error")) |err| checkErrorName(asString(err, "expect_error"));
-            if (kind_of_op != .run_context and kind_of_op != .db_freeze and kind_of_op != .fail) {
-                checkName(asString(required(op, "on", name), "on"), "on");
+            switch (kind_of_op) {
+                .run_context, .db_freeze, .fail => {},
+                .close, .reopen, .raw_append, .raw_write => {
+                    if (self.enclosing.items.len > 0) die("{s} can only be used at the top level", .{name});
+                },
+                else => checkName(asString(required(op, "on", name), "on"), "on"),
             }
             if (op.get("expect_null")) |v| _ = asBool(v, "expect_null");
 
@@ -420,6 +455,19 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     if (op.get("expect_format_tag")) |v| {
                         if (v != .null) _ = parseFixedBytes(2, self.arena, v, "expect_format_tag");
                     }
+                },
+                .close => {},
+                .reopen => {
+                    if (op.get("read_only")) |v| {
+                        if (asBool(v, "read_only") and kind == .memory) die("the memory storage kind can't be opened read-only", .{});
+                    }
+                    if (op.get("hash_size")) |v| checkHashSize(asInt(u16, v, "hash_size"));
+                },
+                .raw_append => _ = parseBytes(self.arena, required(op, "bytes", name), "bytes"),
+                .raw_write => {
+                    _ = parseBytes(self.arena, required(op, "bytes", name), "bytes");
+                    const offset = asInt(u64, required(op, "offset", name), "offset");
+                    if (offset > MAX_SEEK) die("offset can't go past {d}, got {d}", .{ @as(u64, MAX_SEEK), offset });
                 },
             }
         }
@@ -734,13 +782,89 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             }
         }
 
+        fn initOpts(self: *Self, file: Io.File, file_id: ?u64, hash_id: ?xitdb.HashId) xitdb.InitOpts(kind) {
+            return switch (kind) {
+                .memory => .{ .buffer = self.buffer, .hash_id = hash_id, .file_id = file_id },
+                .file => .{ .file = file, .fsync = false, .hash_id = hash_id, .file_id = file_id },
+                .buffered_file => .{ .file = file, .buffer = self.buffer, .fsync = false, .hash_id = hash_id, .file_id = file_id },
+            };
+        }
+
+        /// opening with a hash size that isn't the file's fails, and that's all it's good for
+        fn openAs(self: *Self, comptime OtherHashInt: type) !void {
+            _ = try xitdb.Database(kind, OtherHashInt).init(self.io, self.initOpts(self.out, null, null));
+            die("the database opened with a hash size that isn't the script's, which is an undefined use", .{});
+        }
+
+        fn writeRaw(self: *Self, offset: u64, bytes: []const u8) !void {
+            if (kind == .memory) {
+                var writer = self.db.core.writer();
+                try writer.seekTo(offset);
+                try writer.interface.writeAll(bytes);
+            } else {
+                try self.out.writePositionalAll(self.io, bytes, offset);
+            }
+        }
+
         fn dispatch(self: *Self, op: ObjectMap) anyerror!void {
             const kind_of_op = std.meta.stringToEnum(OpKind, op.get("op").?.string).?;
 
             switch (kind_of_op) {
+                .close, .reopen, .raw_append, .raw_write => {},
+                else => if (self.closed) die("the database is closed", .{}),
+            }
+
+            switch (kind_of_op) {
+                .close => {
+                    if (self.closed) die("the database is already closed", .{});
+                    try self.db.core.flush();
+                    if (self.read_only_file) |file| {
+                        file.close(self.io);
+                        self.read_only_file = null;
+                    }
+                    self.env.clearRetainingCapacity();
+                    self.closed = true;
+                },
+                .reopen => {
+                    if (!self.closed) die("the database is already open", .{});
+                    if (op.get("hash_size")) |v| {
+                        const size = asInt(u16, v, "hash_size");
+                        if (size != HASH_SIZE) {
+                            switch (size) {
+                                8 => try self.openAs(u64),
+                                20 => try self.openAs(u160),
+                                32 => try self.openAs(u256),
+                                64 => try self.openAs(u512),
+                                else => unreachable,
+                            }
+                        }
+                    }
+                    const read_only = if (op.get("read_only")) |v| v.bool else false;
+                    const file: Io.File = if (read_only) try Io.Dir.cwd().openFile(self.io, self.out_path, .{ .mode = .read_only }) else self.out;
+                    errdefer if (read_only) file.close(self.io);
+                    self.db.* = try DB.init(self.io, self.initOpts(file, null, null));
+                    if (read_only) self.read_only_file = file;
+                    self.closed = false;
+                },
+                .raw_append => {
+                    if (!self.closed) die("the file can only be written to directly while the database is closed", .{});
+                    const end = if (kind == .memory) self.buffer.written().len else try self.out.length(self.io);
+                    try self.writeRaw(end, parseBytes(self.arena, op.get("bytes").?, "bytes"));
+                    self.may_have_leftovers = true;
+                },
+                .raw_write => {
+                    if (!self.closed) die("the file can only be written to directly while the database is closed", .{});
+                    try self.writeRaw(asInt(u64, op.get("offset").?, "offset"), parseBytes(self.arena, op.get("bytes").?, "bytes"));
+                    self.may_have_leftovers = true;
+                },
                 .write_path => {
                     const cursor = self.rwValue(cursorName(op));
                     const path = self.parsePath(op.get("path").?);
+                    if (self.read_only_file != null) {
+                        for (path) |part| {
+                            if (part == .ctx) die("a callback on a read-only file runs or doesn't depending on the storage kind, which is an undefined use", .{});
+                        }
+                    }
                     const next = try cursor.writePath(Ctx, path);
                     if (op.get("as")) |as| self.bind(as.string, .{ .rw = next });
                 },
@@ -768,7 +892,10 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 },
                 .freeze => try self.rwPointer(cursorName(op)).freeze(),
                 .db_freeze => try self.db.freeze(),
-                .run_context => try self.db.runContext(self.parseCtx(op.get("ctx").?)),
+                .run_context => {
+                    if (self.read_only_file != null) die("a callback on a read-only file runs or doesn't depending on the storage kind, which is an undefined use", .{});
+                    try self.db.runContext(self.parseCtx(op.get("ctx").?));
+                },
                 .fail => return error.ScriptAbort,
                 .read_path => {
                     const path = self.parsePath(op.get("path").?);
@@ -890,9 +1017,9 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 defer loc_len = saved_loc;
 
                 self.top_index = i;
-                const before = try self.db.committedSize();
+                const before: ?u64 = if (self.closed) null else try self.db.committedSize();
                 self.execOp(op.object) catch |err| die("unexpected error {s}, which started at {s}", .{ @errorName(err), error_loc_buf[0..error_loc_len] });
-                const after = try self.db.committedSize();
+                const after: ?u64 = if (self.closed) null else try self.db.committedSize();
 
                 // an error handled here was fatal to the op, so if it was a
                 // transaction, it rolled back along with what its callbacks bound
@@ -900,14 +1027,23 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     self.rolled_back.put(self.arena, i, {}) catch die("out of memory", .{});
                 }
 
-                // a transaction either committed or was rolled back, so nothing
-                // can be left past the committed bytes between top-level ops
-                const length = try self.db.core.length();
-                if (length != after) die("{d} bytes are left past the committed size {d}", .{ length - after, after });
+                // a transaction either committed or was rolled back, so unless the
+                // file has been written to directly, nothing can be left past the
+                // committed bytes between top-level ops
+                if (after) |size| {
+                    const length = try self.db.core.length();
+                    if (length == size) {
+                        self.may_have_leftovers = false;
+                    } else if (!self.may_have_leftovers) {
+                        die("{d} bytes are left past the committed size {d}", .{ length - size, size });
+                    }
+                }
 
+                // the size can change without a commit when a file is reopened, but
+                // then the database was closed before the op
                 entry.* = .{
                     .committed_size = after,
-                    .commit_id = if (after != before) try self.readCommitId(after) else null,
+                    .commit_id = if (before != null and after != null and before.? != after.?) try self.readCommitId(after.?) else null,
                 };
             }
         }
@@ -923,22 +1059,19 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             var buffer = Io.Writer.Allocating.init(opts.gpa);
             defer buffer.deinit();
 
-            const init_opts: xitdb.InitOpts(kind) = switch (kind) {
-                .memory => .{ .buffer = &buffer, .hash_id = opts.hash_id, .file_id = opts.file_id },
-                .file => .{ .file = out, .fsync = false, .hash_id = opts.hash_id, .file_id = opts.file_id },
-                .buffered_file => .{ .file = out, .buffer = &buffer, .fsync = false, .hash_id = opts.hash_id, .file_id = opts.file_id },
-            };
-            var db = try DB.init(io, init_opts);
+            var db: DB = undefined;
+            var self: Self = .{ .arena = opts.arena, .db = &db, .io = io, .out = out, .out_path = opts.out_path, .buffer = &buffer };
+            db = try DB.init(io, self.initOpts(out, opts.file_id, opts.hash_id));
             const initial_size = try db.committedSize();
 
-            var self: Self = .{ .arena = opts.arena, .db = &db };
             const entries = try opts.arena.alloc(SidecarEntry, opts.ops.len);
             try self.execTopLevel(opts.ops, entries);
 
-            try db.core.flush();
+            if (!self.closed) try db.core.flush();
+            if (self.read_only_file) |file| file.close(io);
             if (kind == .memory) try out.writeStreamingAll(io, buffer.written());
 
-            const file_size = try db.core.length();
+            const file_size = try out.length(io);
             try writeSidecar(opts, initial_size, file_size, entries);
         }
 
@@ -956,9 +1089,11 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             for (entries, 0..) |entry, i| {
                 try w.writeAll(if (i == 0) "\n" else ",\n");
                 if (entry.commit_id) |id| {
-                    try w.print("    {{\"committed_size\": {d}, \"commit_id\": \"{x:0>16}\"}}", .{ entry.committed_size, id });
+                    try w.print("    {{\"committed_size\": {d}, \"commit_id\": \"{x:0>16}\"}}", .{ entry.committed_size.?, id });
+                } else if (entry.committed_size) |size| {
+                    try w.print("    {{\"committed_size\": {d}, \"commit_id\": null}}", .{size});
                 } else {
-                    try w.print("    {{\"committed_size\": {d}, \"commit_id\": null}}", .{entry.committed_size});
+                    try w.writeAll("    {\"committed_size\": null, \"commit_id\": null}");
                 }
             }
             try w.writeAll(if (entries.len == 0) "]\n}\n" else "\n  ]\n}\n");
@@ -1009,6 +1144,7 @@ pub fn main(init: std.process.Init) !void {
     const file_id = parseHex64(arena, required(script, "file_id", "the script"), "file_id");
     const ops = asArray(required(script, "ops", "the script"), "ops");
     const hash_size = asInt(u16, required(script, "hash_size", "the script"), "hash_size");
+    checkHashSize(hash_size);
 
     switch (kind) {
         inline else => |k| {
@@ -1026,7 +1162,7 @@ pub fn main(init: std.process.Init) !void {
                 20 => try Runner(k, u160).runScript(common),
                 32 => try Runner(k, u256).runScript(common),
                 64 => try Runner(k, u512).runScript(common),
-                else => die("hash_size must be 8, 20, 32 or 64, got {d}", .{hash_size}),
+                else => unreachable,
             }
         },
     }

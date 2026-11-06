@@ -20,6 +20,35 @@ fn fail(comptime fmt: []const u8, args: anytype) noreturn {
     std.process.exit(1);
 }
 
+const Features = struct {
+    reopen: bool = false,
+    raw_file: bool = false,
+    read_only: bool = false,
+
+    fn addOp(self: *Features, op: std.json.ObjectMap) void {
+        const name = op.get("op").?.string;
+        if (std.mem.eql(u8, name, "close") or std.mem.eql(u8, name, "reopen")) self.reopen = true;
+        if (std.mem.eql(u8, name, "raw_append") or std.mem.eql(u8, name, "raw_write")) self.raw_file = true;
+        if (op.get("read_only")) |v| {
+            if (v == .bool and v.bool) self.read_only = true;
+        }
+    }
+
+    fn print(self: Features, w: *Io.Writer) !void {
+        var first = true;
+        try w.writeAll("[");
+        inline for (.{ "reopen", "raw_file", "read_only" }) |name| {
+            if (@field(self, name)) {
+                try w.writeAll(if (first) "\"" else ", \"");
+                try w.writeAll(name);
+                try w.writeAll("\"");
+                first = false;
+            }
+        }
+        try w.writeAll("]");
+    }
+};
+
 const Collections = struct {
     array_list: bool = false,
     hash_map: bool = false,
@@ -126,6 +155,10 @@ pub fn main(init: std.process.Init) !void {
         }
         try w.writeAll(", \"collections\": ");
         try collections.print(w);
+        var features: Features = .{};
+        for (script.get("ops").?.array.items) |op| features.addOp(op.object);
+        try w.writeAll(", \"features\": ");
+        try features.print(w);
         try w.writeAll("}");
     }
     try w.writeAll("\n  ]\n}\n");

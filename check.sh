@@ -39,12 +39,23 @@ echo "== storage kinds and optimization levels"
 for script in scripts/*.json tests/valid/*.json; do
     name=$(basename "$script" .json)
     "$RUN" "$script" "$OUT/$name.file.db" --kind file
-    "$RUN" "$script" "$OUT/$name.memory.db" --kind memory
     "$RELEASE_RUN" "$script" "$OUT/$name.release.db"
     "$DET" "$OUT/$name.a.db" "$OUT/$name.file.db" > /dev/null
-    "$DET" "$OUT/$name.a.db" "$OUT/$name.memory.db" > /dev/null
     "$DET" "$OUT/$name.a.db" "$OUT/$name.release.db" > /dev/null
-    echo "$name: buffered_file == file == memory == release"
+    # the memory kind has no read-only mode, and has to say so
+    if grep -q '"read_only": *true' "$script"; then
+        status=0
+        "$RUN" "$script" "$OUT/$name.memory.db" --kind memory 2> "$OUT/$name.memory.err" || status=$?
+        if [ "$status" -ne 1 ] || ! grep -qF "can't be opened read-only" "$OUT/$name.memory.err"; then
+            echo "$name: the memory kind should have refused to open it read-only"
+            exit 1
+        fi
+        echo "$name: buffered_file == file == release, and memory refuses it"
+    else
+        "$RUN" "$script" "$OUT/$name.memory.db" --kind memory
+        "$DET" "$OUT/$name.a.db" "$OUT/$name.memory.db" > /dev/null
+        echo "$name: buffered_file == file == memory == release"
+    fi
 done
 
 expect_failures() { # folder
@@ -156,6 +167,8 @@ expect_drift "a changed README" "README.md has drifted"
 rm -rf "$COPY"
 
 echo "== detcheck notices changes"
+# a corrupt file can come from a script's raw_write too, but the same in both runs, so
+# detcheck has to accept that a trailer can be gone, and nothing more
 A="$OUT/01-list-root-hash-map.a.db"
 B="$OUT/01-list-root-hash-map.b.db"
 expect_detcheck_failure() { # byte offset, what's there, expected message
@@ -182,5 +195,12 @@ expect_detcheck_failure 21 "the root header" "isn't part of a trailer's commit I
 expect_detcheck_failure "$((trailer + 1))" "a trailer's root slot" "checksum"
 expect_detcheck_failure "$((trailer + 9))" "a trailer's commit ID" "commit ID"
 expect_detcheck_failure "$((trailer + 17))" "a trailer's checksum" "checksum"
+# the same for a trailer past the committed size, which is checked too
+A="$OUT/recovery-lost-commit-at-end.a.db"
+B="$OUT/recovery-lost-commit-at-end.b.db"
+past=$(wc -c < "$B" | tr -d ' ')
+expect_detcheck_failure "$((past - 25 + 9))" "a commit ID past the committed size" "commit ID"
+expect_detcheck_failure "$((past - 1))" "a checksum past the committed size" "checksum"
+expect_detcheck_failure "$((past - 100))" "other bytes past the committed size" "isn't part of a trailer's commit ID or checksum"
 
 echo "== all checks passed"

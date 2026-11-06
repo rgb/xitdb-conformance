@@ -275,6 +275,37 @@ try w.finish();
 `steps` can be empty, which writes a zero-length `bytes` record: unlike `write`, `writer` never produces
 `short_bytes`, however few bytes there are.
 
+**Closing and reopening** model a process stopping and another one starting, with whatever a crash did to the file in
+between. These four ops only appear at the top level, and only `reopen` can have `expect_error`.
+
+| `op` | Other fields | What it does |
+|---|---|---|
+| `close` | | Ends the use of the database. Commits are already in the file, so nothing happens to it. **Every name becomes unbound** |
+| `reopen` | `read_only?`, `hash_size?` | `Database.init` on the file as it is |
+| `raw_append` | `bytes` | Writes the bytes at the end of the file |
+| `raw_write` | `offset`, `bytes` | Writes the bytes at `offset`, which goes up to 2²⁴, leaving zeros if that's past the end |
+
+While the database is closed, only `raw_append`, `raw_write` and `reopen` can run. Anything else is a script failure,
+as are `close` or a raw op at the wrong time: `close` and the raw ops need the opposite state from the one `reopen`
+needs. The raw ops write straight to storage, past the engine.
+
+`reopen` states a hash size: the script's, or `hash_size` if given, which is 8, 20, 32 or 64. It never takes the size
+from the file, so a header that says otherwise is `InvalidHashSize`. If `reopen` fails, the database stays closed.
+With `read_only: true` the file is opened read-only, which the `memory` storage kind doesn't have: `run --kind memory`
+rejects such a script, and the manifest lists it as needing `read_only`.
+
+What happens to **bytes past the committed size**:
+
+| | They |
+|---|---|
+| `reopen`, on any file | stay |
+| reads, and a write path with an empty path | stay |
+| one init part matching the root's tag ([section 8](#8-transactions-and-commit-ids)) | are truncated, with no commit |
+| any transaction, whether it commits or fails | are truncated |
+
+On a **read-only file**, reads work. A transaction fails with `WriteFailed` and leaves the file as it was. A free init
+still works, and truncating silently does nothing, so bytes past the committed size stay.
+
 **Expectations** are assertions on the result, for reads the file can't show:
 
 | Field | Passes when |
@@ -362,6 +393,11 @@ Truncating is all a rollback does, so it doesn't undo a write that landed before
 | `NestedTopLevelWrite` | a non-empty write path on a root cursor inside a transaction |
 | `PathPartMustBeAtEnd` | a `ctx` part that isn't last |
 | `ScriptAbort` | the `fail` op. It isn't an engine error, but it travels like one |
+| `WriteFailed` | a transaction on a read-only file |
+| `InvalidDatabase` | `reopen`: a bad magic number, a committed size below 62, or a last trailer whose checksum doesn't match |
+| `InvalidVersion` | `reopen`: a version other than 1 |
+| `InvalidHashSize` | `reopen`: a hash size in the header other than the one stated |
+| `TruncatedDatabase` | `reopen`: a committed size past the end of the file |
 
 The engine has more errors than these, like `EndOfStream` and `KeyOffsetExceeded`. Reaching them takes an undefined
 use, a corrupt file, or a call scripts can't make.
@@ -388,7 +424,7 @@ commit happens per top-level op, and an op inside a callback never commits. Read
 inside a transaction.
 
 The engine asks its random source for one 64-bit value per commit, and nowhere else (`lib.zig:916`). Creating
-the database doesn't, because the file ID is given and the first commit's ID is 0.
+the database doesn't, because the file ID is given and the first commit's ID is 0, and neither does `reopen`.
 
 ## 9. The sidecar
 
@@ -411,14 +447,18 @@ the database doesn't, because the file ID is given and the first commit's ID is 
 | `format` | exactly `"xitdb-sidecar/1"` |
 | `file_id` | the script's file ID |
 | `initial_size` | the committed size right after creating the database, always 62 |
-| `file_size` | the size of the file after the last op. No bytes are left past the last committed size |
+| `file_size` | the size of the file after the last op. Bytes past the last committed size are only left there by raw ops |
 | `ops` | one entry per **top-level** op in the script, in the same order, including ops that are only reads |
-| `ops[i].committed_size` | `db.committedSize()` after op `i` |
+| `ops[i].committed_size` | `db.committedSize()` after op `i`, or `null` if the database is closed by then |
 | `ops[i].commit_id` | 16 hex digits if op `i` committed, otherwise `null` |
 
-An op committed if the committed size changed. The commit ID's digits are the 8 bytes at `committed_size − 16`, which
-is the trailer's commit ID field, in order. As a number, they are the big-endian value of those bytes, which is what
-`randomU64` returns in Zig.
+An op committed if the database was open before and after it and the committed size changed. `reopen` can move the
+committed size too, if the root header was changed while it was closed, but that isn't a commit. The commit ID's digits
+are the 8 bytes at `committed_size − 16`, which is the trailer's commit ID field, in order. As a number, they are the
+big-endian value of those bytes, which is what `randomU64` returns in Zig.
+
+A commit's trailer doesn't have to be in the final file: if `raw_write` set the root header back, the next transaction
+writes over it. Its commit ID was still used, so it stays in the list.
 
 **To reproduce a file**, give the second implementation a random source that returns the non-null commit IDs in
 order, one per call. At the end, none should be left. Then after each top-level op, check the committed size
@@ -488,6 +528,7 @@ needn't handle them. They are kept out like this:
 | Using a cursor or a slot from a transaction that was rolled back | reads whatever is at that offset by then, which can be anything | `run` fails |
 | Writing a slot whose tag is `index`, `kv_pair` or `sorted_kv_pair` | follows it as if it had been built there, which ends in errors like `KeyOffsetExceeded` | `run` fails |
 | Reading, before the commit, a gap left by a `writer` that seeked past the end | zeros on `file` and `memory`. On `buffered_file`, `EndOfStream` until the gap has been flushed, and zeros after that. The committed bytes are the same on all three | `EndOfStream` can't be expected, and `check.sh` runs every script on all three kinds. A read that gets zeros everywhere isn't caught |
+| On a read-only file, a transaction with a callback, or one that would fail anyway | `file` raises `WriteFailed` at the first write, without running the rest. `buffered_file` runs the rest and only fails at the commit, so it raises `KeyNotFound` for a path that fails by itself, runs the callback, and raises `ScriptAbort` for a callback that fails | `run` fails on the callback. `check.sh` runs every script on both kinds, which catches the rest |
 | A trie 64 levels deep, at a hash size above 32. Two keys need to share their lowest 64 nibbles, which for real hashes would take a 256-bit collision | a depth counter overflows, which panics in a debug build | `run` is a debug build |
 
 **Storage kinds don't otherwise change the bytes.** `check.sh` holds every script in this repository to that, across
@@ -526,6 +567,9 @@ All of these look like mistakes and all of them are what Zig does. `overwriting-
    see.
 10. **A freeze doesn't leave a callback** (section 6). The cursor the outer `write_path` returns has the freeze point
    of the cursor it was called on, whatever its callback did to the cursor it was given.
+11. **Opening a file doesn't clean it up.** Bytes past the committed size stay until a write, and a free init on a
+   read-only file doesn't report that it couldn't truncate them. Only the committed size in the root header is ever
+   read: the root slot next to it can be garbage, and the root comes from the trailer anyway.
 
 ## 12. Worked example
 
@@ -570,6 +614,20 @@ produces.
 
 - Iterators (`iterator`, `iteratorFrom`, `iteratorFromIndex`) and `rank`.
 - Streaming reads (`Cursor.reader`), and reads into a caller's buffer.
-- A byte writer left open across other ops, which is the only way to reach `WriteFailed` and
-  `UnexpectedWriterPosition`.
-- Reopening a database, a file with bytes past its committed size, compaction, and replication.
+- A byte writer left open across other ops, which is the only other way to reach `WriteFailed`, and the only way to
+  reach `UnexpectedWriterPosition`.
+- Compaction and replication.
+
+## 14. Changes to this version
+
+Scripts stay `xitdb-script/1` when the format only grows, because nothing an existing script says changes meaning, and
+a runner that doesn't know an op has to fail when it reaches it (section 1). The manifest says which scripts need what.
+
+**Closing and reopening were added.** A runner written before them runs every earlier script unchanged. To run the new
+ones, it needs:
+
+- the ops `close`, `reopen`, `raw_append` and `raw_write`, and a way to write to storage directly (section 5);
+- to state a hash size when reopening, rather than taking it from the file;
+- the five error names they added (section 7);
+- `null` as a `committed_size` in a sidecar, and to expect a `committed_size` to go down after `reopen` (section 9);
+- to compare the whole file at the end, as before, including any bytes past the last committed size.

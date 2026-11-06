@@ -85,7 +85,9 @@ It was produced from:
 ## What's here
 
 - \`manifest.json\`: every script, what it needs, and whether it should pass or fail. \`collections\` says which of
-  \`array_list\`, \`hash_map\`, \`linked_array_list\` and \`sorted_map\` its path parts use, whether or not they're reached.
+  \`array_list\`, \`hash_map\`, \`linked_array_list\` and \`sorted_map\` its path parts use, whether or not they're
+  reached. \`features\` says which of these it uses: \`reopen\` (closing and reopening), \`raw_file\` (writing to the
+  file directly while it's closed) and \`read_only\` (opening it read-only, which the memory storage kind can't do).
 - \`valid/<name>.json\`: a script that passes, with \`<name>.db\`, the file Zig wrote, and \`<name>.db.sidecar.json\`, its
   committed sizes and commit IDs.
 - \`failing/<name>.json\`: a well-formed script that must fail in every runner. The text after \`expected failure:\` in

@@ -9,6 +9,10 @@
 //! 4. the files differ only inside the commit ID and checksum of each trailer;
 //! 5. writing b's commit IDs into a and recomputing the checksums gives exactly b.
 //!
+//! A commit's trailer can be gone from the file by the end, if the file's root
+//! header was set back and a later transaction wrote over it. Only those still
+//! there are checked, including any past the last committed size.
+//!
 //! The last one is what the Swift runner relies on: the sidecar's commit IDs are
 //! all it takes to reproduce a file.
 
@@ -41,7 +45,8 @@ const Sidecar = struct {
     ops: []const Op,
 
     const Op = struct {
-        committed_size: u64,
+        // null while the database is closed
+        committed_size: ?u64,
         commit_id: ?u64,
     };
 };
@@ -73,8 +78,9 @@ fn readSidecar(io: Io, arena: Allocator, db_path: []const u8) !Sidecar {
     for (ops_json.array.items, ops) |item, *op| {
         if (item != .object) fail("{s}: an op must be an object", .{path});
         const commit_id = field(item.object, "commit_id", path);
+        const committed_size = field(item.object, "committed_size", path);
         op.* = .{
-            .committed_size = parseU64(field(item.object, "committed_size", path), path),
+            .committed_size = if (committed_size == .null) null else parseU64(committed_size, path),
             .commit_id = if (commit_id == .null) null else parseHexId(commit_id, path),
         };
     }
@@ -137,45 +143,81 @@ pub fn main(init: std.process.Init) !void {
     if (a.len < INITIAL_TRAILER_END) fail("{s} is too short to be a database", .{path_a});
     if (readBe64(a, FILE_ID_OFFSET) != side_a.file_id) fail("{s}: the file ID is not the sidecar's", .{path_a});
     if (readBe64(b, FILE_ID_OFFSET) != side_b.file_id) fail("{s}: the file ID is not the sidecar's", .{path_b});
-    if (readBe64(a, ROOT_HEADER_FILE_SIZE_OFFSET) != a.len) fail("{s}: the root header's size is not the file's", .{path_a});
-    if (readBe64(b, ROOT_HEADER_FILE_SIZE_OFFSET) != b.len) fail("{s}: the root header's size is not the file's", .{path_b});
+    checkTrailer(path_a, a, side_a.file_id, INITIAL_TRAILER_END);
+    checkTrailer(path_b, b, side_b.file_id, INITIAL_TRAILER_END);
+
+    // the commits whose trailers are still in the file. a transaction starts at the
+    // committed size, so the trailers past that point are gone by the time it commits.
+    const Commit = struct { position: u64, id_a: u64, id_b: u64, op: usize };
+    const live = try arena.alloc(Commit, side_a.ops.len);
+    var live_len: usize = 0;
+
+    var previous: ?u64 = side_a.initial_size;
+    var commits: usize = 0;
+    for (side_a.ops, side_b.ops, 0..) |op_a, op_b, i| {
+        if (!std.meta.eql(op_a.committed_size, op_b.committed_size)) fail("op {d}: committed sizes differ", .{i});
+        if ((op_a.commit_id == null) != (op_b.commit_id == null)) fail("op {d}: only one run committed", .{i});
+        defer previous = op_a.committed_size;
+
+        const size = op_a.committed_size orelse {
+            if (op_a.commit_id != null) fail("op {d}: it has a commit ID, but no committed size", .{i});
+            continue;
+        };
+        if (op_a.commit_id) |id_a| {
+            const before = previous orelse fail("op {d}: it committed, but the database was closed", .{i});
+            if (size <= before) fail("op {d}: it committed, but the committed size didn't grow", .{i});
+            var kept: usize = 0;
+            for (live[0..live_len]) |commit| {
+                if (commit.position < before) {
+                    live[kept] = commit;
+                    kept += 1;
+                }
+            }
+            live_len = kept;
+            live[live_len] = .{ .position = size - TRAILER_SIZE, .id_a = id_a, .id_b = op_b.commit_id.?, .op = i };
+            live_len += 1;
+            commits += 1;
+        } else if (previous) |before| {
+            // reopening can move the committed size, but nothing else can without committing
+            if (size != before) fail("op {d}: the committed size changed, but it didn't commit", .{i});
+        }
+    }
+    // the trailers of an unfinished transaction can still be there, or be truncated
+    var kept_at_end: usize = 0;
+    for (live[0..live_len]) |commit| {
+        if (commit.position + TRAILER_SIZE <= a.len) {
+            live[kept_at_end] = commit;
+            kept_at_end += 1;
+        }
+    }
+    live_len = kept_at_end;
+
+    // the root header agrees with the last op, unless that op left the database closed
+    if (previous) |size| {
+        if (readBe64(a, ROOT_HEADER_FILE_SIZE_OFFSET) != size) fail("{s}: the root header's size is not the last committed size", .{path_a});
+        if (readBe64(b, ROOT_HEADER_FILE_SIZE_OFFSET) != size) fail("{s}: the root header's size is not the last committed size", .{path_b});
+        if (a.len < size) fail("{s}: the committed size is past the end of the file", .{path_a});
+    }
 
     // what's allowed to differ
     const may_differ = try arena.alloc(bool, a.len);
     @memset(may_differ, false);
     const patched = try arena.dupe(u8, a);
 
-    checkTrailer(path_a, a, side_a.file_id, INITIAL_TRAILER_END);
-    checkTrailer(path_b, b, side_b.file_id, INITIAL_TRAILER_END);
-
-    var previous_size = side_a.initial_size;
-    var commits: usize = 0;
-    for (side_a.ops, side_b.ops, 0..) |op_a, op_b, i| {
-        if (op_a.committed_size != op_b.committed_size) fail("op {d}: committed sizes differ: {d} and {d}", .{ i, op_a.committed_size, op_b.committed_size });
-        if ((op_a.commit_id == null) != (op_b.commit_id == null)) fail("op {d}: only one run committed", .{i});
-        const committed = op_a.committed_size != previous_size;
-        if (committed != (op_a.commit_id != null)) fail("op {d}: the size and the commit ID disagree about whether it committed", .{i});
-        if (op_a.committed_size < previous_size) fail("op {d}: the committed size went down", .{i});
-        previous_size = op_a.committed_size;
-        const id_a = op_a.commit_id orelse continue;
-        const id_b = op_b.commit_id.?;
-        commits += 1;
-
+    for (live[0..live_len]) |commit| {
         // 2. and 3.
-        const position = op_a.committed_size - TRAILER_SIZE;
-        if (readBe64(a, position + TRAILER_COMMIT_ID_OFFSET) != id_a) fail("op {d}: {s} doesn't have the sidecar's commit ID", .{ i, path_a });
-        if (readBe64(b, position + TRAILER_COMMIT_ID_OFFSET) != id_b) fail("op {d}: {s} doesn't have the sidecar's commit ID", .{ i, path_b });
-        checkTrailer(path_a, a, side_a.file_id, op_a.committed_size);
-        checkTrailer(path_b, b, side_b.file_id, op_a.committed_size);
+        if (readBe64(a, commit.position + TRAILER_COMMIT_ID_OFFSET) != commit.id_a) fail("op {d}: {s} doesn't have the sidecar's commit ID", .{ commit.op, path_a });
+        if (readBe64(b, commit.position + TRAILER_COMMIT_ID_OFFSET) != commit.id_b) fail("op {d}: {s} doesn't have the sidecar's commit ID", .{ commit.op, path_b });
+        checkTrailer(path_a, a, side_a.file_id, commit.position + TRAILER_SIZE);
+        checkTrailer(path_b, b, side_b.file_id, commit.position + TRAILER_SIZE);
 
-        @memset(may_differ[@intCast(position + TRAILER_COMMIT_ID_OFFSET)..@intCast(position + TRAILER_SIZE)], true);
+        @memset(may_differ[@intCast(commit.position + TRAILER_COMMIT_ID_OFFSET)..@intCast(commit.position + TRAILER_SIZE)], true);
 
         // what the sidecar alone should turn this trailer into
-        const offset: usize = @intCast(position);
-        std.mem.writeInt(u64, patched[offset + TRAILER_COMMIT_ID_OFFSET..][0..8], id_b, .big);
-        std.mem.writeInt(u64, patched[offset + TRAILER_CHECKSUM_OFFSET..][0..8], computeChecksum(side_a.file_id, position, patched[offset..][0..9], id_b), .big);
+        const offset: usize = @intCast(commit.position);
+        std.mem.writeInt(u64, patched[offset + TRAILER_COMMIT_ID_OFFSET..][0..8], commit.id_b, .big);
+        std.mem.writeInt(u64, patched[offset + TRAILER_CHECKSUM_OFFSET..][0..8], computeChecksum(side_a.file_id, commit.position, patched[offset..][0..9], commit.id_b), .big);
     }
-    if (previous_size != side_a.file_size) fail("the last committed size {d} is not the file size {d}", .{ previous_size, side_a.file_size });
 
     // 4.
     var differing: u64 = 0;
@@ -197,7 +239,7 @@ pub fn main(init: std.process.Init) !void {
         a.len,
         commits,
         differing,
-        commits * 16,
+        live_len * 16,
     });
     try stdout.interface.flush();
 }
