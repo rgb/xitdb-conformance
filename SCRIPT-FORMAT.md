@@ -436,7 +436,7 @@ that holds one.
 | `replication_start` | `state`, `as?`, `expect?` | `current.replicationStart(state)`, `state` being a name holding a replica's state, which can come from any database | `as`: a number |
 | `committed_size` | `as?`, `expect?` | `current.committedSize()` | `as`: a number |
 | `read_committed` | `start`, `end`, `as`, `expect_same?` | `current.readCommitted(start, end, writer)`, with both being numbers, and writing to memory | `as`: committed bytes |
-| `apply_replicated` | `start`, `bytes`, `short_by?` | `current.applyReplicated(start, reader, len)`, with `start` a number, `bytes` a name holding committed bytes, a reader over them, and `len` their length | |
+| `apply_replicated` | `start`, `bytes`, `short_by?` | `current.applyReplicated(start, reader, len)`, with `start` a number, `bytes` a name holding committed bytes, a reader over them as `short_by` leaves them, and `len` their length as it leaves them | |
 
 `expect` on `replication_start` and `committed_size` is a number. `expect_same` is a name holding committed bytes, and
 what was read must be the same bytes. An expected file only says how a database ended up, so this is what scripts use to
