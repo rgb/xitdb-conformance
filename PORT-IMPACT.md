@@ -2,14 +2,17 @@
 
 After its parity gate, the Swift port adopts guards and fixes that the Zig original doesn't have
 (`director/zig-findings.md`, D17, D18 and D19). This says which scripts rely on what each one changes, and what would
-happen to each script. Nothing here has been done: no script has changed, no `.port` variant has been written, and every
-fixture still comes from the Zig original at `6b93af1`.
+happen to each script. Only finding 17 has been done, from the Zig at `185af01`, and its section says what came of it.
+Otherwise no script has changed, no `.port` variant has been written, and every fixture still comes from the Zig original
+at `6b93af1`.
 
 ## How this was found
 
 **The lists are generated.** `run --note-port-changes` prints a line for each place a script relies on one of these, and
 `./impact.sh` fills in the lists below from every script in the repository. The number after a name is how many ops. The
-gate fails if the lists aren't what the scripts do, so a new script that relies on one of these shows up here.
+gate fails if the lists aren't what the scripts do, so a new script that relies on one of these shows up here. A
+`<name>--<commit>` script in `tests/from-other-zig` isn't listed, as it's a version of one that is, and the Zig at
+`6b93af1` can't get to the end of it.
 
 **Three of the changes were tried.** `./impact.sh --prototypes` makes findings 12, 17 and 23 in a scratch copy of Zig
 and runs every script against it. Where this document says "the prototype", that's what ran, and everything else in a
@@ -40,7 +43,7 @@ which is worth holding the port to. It doesn't work for finding 17, which change
 | [3](#finding-3-a-structural-slot-as-a-value) | `write` rejects structural tags | 0, and 3 that `run` refuses | 0 | Nothing |
 | [12](#finding-12-parts-after-a-remove) | Parts after a remove are an error | 2 | 0 | `.port` variant, with an error that already exists |
 | [16](#finding-16-a-failed-op-that-left-something-behind) | A failed op that wrote something poisons its transaction | 3 | 12 | `.port` variant, new from `gen` |
-| [17](#finding-17-write_if_empty-and-the-snapshot) | `write_if_empty` goes by the slot as it is now | 1 | 4 | Needs a Zig with the change, as bytes change |
+| [17](#finding-17-write_if_empty-and-the-snapshot) | `write_if_empty` goes by the slot as it is now | 2 | 4 | Done: regenerated from `185af01` |
 | [22](#finding-22-the-concat) | A concat freezes after its join | 1 changes | 1 changes | Regenerated from `d6f3fee` |
 | [23](#finding-23-a-cursors-freeze) | A freeze holds for every cursor | 2 of 6 change, in the prototype | 2 of 17 change | Waits for a design |
 | [D18](#d18-refusing-a-write-from-before-a-freeze) | A write from before a freeze is refused | 2, and 1 reproduction | 31 | `.port` variant, new from `gen`. **There's a question below** |
@@ -136,32 +139,46 @@ and `expect_error: ScriptAbort` on the top-level op. That rolls it back, and tak
 ## Finding 17: `write_if_empty` and the snapshot
 
 The port goes by the slot as it is now. Nothing raises an error, but what's written changes, so **no script can show this
-without a Zig that has the change**. There are two directions:
+without a Zig that has the change**, which is `185af01` on the `xitdb` session's branch. There are two directions:
 
-Where the snapshot is empty and the slot isn't, so Zig overwrites a value it can't see, and the port leaves it:
+Where the snapshot is empty and the slot isn't, so Zig at `6b93af1` overwrites a value it can't see, and the port leaves it:
 
 <!-- list 17-overwrites -->
+- `tests/from-other-zig`: write-if-empty-emptied-slot (1)
 - `tests/generated`: compact-203 (1), gen-16 (1), reads-101 (1), reads-107 (1)
 - `tests/valid`: path-api-edges (1)
 <!-- end -->
 
-Where the snapshot has something and the slot is empty, so Zig holds back, and the port writes:
+Where the snapshot has something and the slot is empty, so Zig at `6b93af1` holds back, and the port writes:
 
 <!-- list 17-holds-back -->
-- none
+- `tests/from-other-zig`: write-if-empty-emptied-slot (3)
 <!-- end -->
 
-The prototype confirms the first list, with one exception:
+**This has been done.** `tests/zig-commits.txt` says which expected files come from `185af01`. The prototype's prediction
+held for every script:
 
-| Script | In the prototype | What happens |
+| Script | On `185af01` | What happened |
 |---|---|---|
-| `path-api-edges` | fails at the next read, which expects the overwritten value | Regenerated, with that read changed. It exists to pin this |
-| `compact-203`, `gen-16`, `reads-107` | different bytes | Regenerated |
+| `compact-203`, `gen-16`, `reads-107` | different bytes | Regenerated. The scripts are the same |
 | `reads-101` | the same bytes, so what it wrote in Zig doesn't last | Nothing |
+| `path-api-edges` | fails at the read after the write, which expects the overwritten value | It stays, with its expected file from `6b93af1`, as the gate and `mutants.sh` run it there. `tests/from-other-zig/path-api-edges--185af01` is the same script with that read and the note before it turned round, and its expected file is from `185af01`. **No engine passes both**, so the port drops the first when it takes this change |
+| `write-if-empty-emptied-slot` | new | The second direction, in `tests/from-other-zig` as it fails on `6b93af1` |
+| `write-if-empty-unreachable` | new | Where it looks like the second direction and isn't, in `tests/valid` as it has the same bytes on both |
 
-**This needs a decision.** To regenerate these, the `xitdb` session's branch would have to carry the change, which is six
-lines in the prototype. Otherwise the port has no oracle for this. And **no script covers the second direction**, so a
-script for it should be written along with the change.
+**The second direction can't be reached through the wrappers alone in one transaction.** A remove empties the map's own
+slot for the key, and leaves the pair as it was. So a value cursor from `putCursor` points at something that's unreachable
+and not empty, and `put(k, .{ .slot = null })` is no route, since a written none has `full` set, which isn't empty. It takes
+a `kv_pair` cursor from the path API, which points at the map's slot. `src/test.zig` on that branch then puts the pair back
+with the slot it captured. **A script can't do that**: `run` refuses to write a `kv_pair` slot (finding 3), and the port's
+`write` rejects one. So `write-if-empty-emptied-slot` writes a none, which leaves the map working, and a uint, which shows
+that it wrote, as reading that key then raises `UnexpectedTag`.
+
+**A cursor from a rolled-back transaction** has a position past the end of the file. At `185af01`, `write_if_empty` through
+one raises the reader's error, where it used to do nothing if the snapshot had something. No script here can do that,
+because `run` refuses every use of such a cursor (`tests/invalid/cursor-from-rolled-back-transaction`, section 10). So it
+isn't in the lists under finding 1 or finding 24, and nothing happens to any script. The port's guard for reads through a
+stale cursor (D22) is what will report it there.
 
 ## Finding 22: the concat
 

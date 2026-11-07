@@ -103,7 +103,9 @@ if [ "$MODE" = prototypes ]; then
 fi
 
 # one line for each script and change: the change, the script, and how many ops
-for script in scripts/*.json tests/valid/*.json tests/generated/*.json tests/failing/*.json tests/invalid/*.json tests/port-differs/*.json tests/undefined/*.json tests/dump/*.json tests/bench/*.json; do
+for script in scripts/*.json tests/valid/*.json tests/generated/*.json tests/failing/*.json tests/invalid/*.json tests/port-differs/*.json tests/undefined/*.json tests/dump/*.json tests/bench/*.json tests/from-other-zig/*.json; do
+    # another commit's version of a script that's listed already, which this Zig can't get to the end of
+    case "$script" in *--*) continue ;; esac
     name=${script%.json}
     # the memory kind is the one that can tell what a failed op left behind
     kind=memory
