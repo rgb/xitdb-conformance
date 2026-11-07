@@ -205,7 +205,8 @@ The snapshot:
 - `write_path` does not change the cursor it is called on. Its result is a new cursor, bound by `as`.
 - `slot`, `count`, `write_if_empty` and the `read_*` ops go by the snapshot, however stale it is, as do
   `read_path` and `read_path_slot`. So `write_if_empty` on a cursor whose snapshot is empty overwrites a value it
-  can't see.
+  can't see. From Zig commit `185af01` on, it goes by the slot as it is now instead
+  ([section 11](#what-a-later-zig-changes)).
 - `write_path` starts by reading the slot at the cursor's position again, if it has one, so its result sees the
   present.
 
@@ -808,6 +809,25 @@ All of these look like mistakes and all of them are what Zig does. `overwriting-
    moment was never written, compacts to an empty root, and not to a list.
 14. **A failed sync at 0 leaves no database.** It empties the file first, so it can't be opened until a sync at 0
    succeeds. Zig's README says so, and that a caller who minds should write the copy to a new file.
+
+### What a later Zig changes
+
+All of this document is what Zig does at `6b93af1`, apart from what this says. The manifest gives each fixture's
+`zig_commit`, and its expected file is what that commit does.
+
+**At `185af01`, `write_if_empty` goes by the slot as it is now** (finding 17). If the cursor has a position, it reads
+the slot there when it's called, and it writes if that slot is empty. Empty means the tag is `none` and `full` isn't
+set, so a slot written with `{"slot": null}` isn't empty. A root cursor is as it was. This holds for these fixtures,
+and section 4 and item 9 above don't:
+
+| Fixture | What it is |
+|---|---|
+| `compact-203`, `gen-16`, `reads-107` | The same scripts as before, with what they write now |
+| `path-api-edges--185af01` | `path-api-edges`, whose write leaves the value that its snapshot can't see |
+| `write-if-empty-emptied-slot` | The snapshot has something and a remove has emptied the slot, so it writes |
+
+No engine can pass both `path-api-edges` and `path-api-edges--185af01`. The first is what `6b93af1` does, and the gate
+goes on running it there. A runner's calls don't change for any of this, only what the engine under them does.
 
 ## 12. Worked example
 

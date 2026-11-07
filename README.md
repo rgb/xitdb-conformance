@@ -12,6 +12,8 @@ independent of the Swift code.
 - `tests/valid/`: scripts that run the rest of the format, including its corners. `src/longscripts.zig` writes the ones
   that are too long to write by hand, which are named in it.
 - `tests/failing/`: well-formed scripts that must fail in every runner, each for the reason in its description.
+- `tests/from-other-zig/`: scripts that only pass on a later Zig commit, which `tests/zig-commits.txt` names. The gate
+  doesn't run them, and `second-zig.sh` against that commit does.
 - `tests/invalid/`: scripts that `run` must reject, before running them or, for an undefined use, when it gets there.
   A second runner never sees these.
 - `tests/port-differs/`: the reads that the port corrects from the start, with what Zig does and what the port does, so
@@ -89,4 +91,5 @@ Zig, `gen` can write something else for the same seed, and that isn't a reason t
    runs fresh seeds on it. The rules in `gen` that keep it from undefined uses stay until the port has what fixes them, as
    keeping away from something that's now safe does no harm.
 
-Nothing has been regenerated from a fixed Zig yet.
+`tests/zig-commits.txt` says what has been regenerated so far, which is finding 17 from `185af01`. `PORT-IMPACT.md` has
+why each of those fixtures changed.
