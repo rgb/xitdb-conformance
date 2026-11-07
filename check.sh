@@ -79,8 +79,8 @@ for script in "$OUT"/long/*.json; do
     }
     count=$((count + 1))
 done
-if [ "$count" -ne 13 ]; then
-    echo "longscripts should write 13 scripts, and it wrote $count"
+if [ "$count" -ne 14 ]; then
+    echo "longscripts should write 14 scripts, and it wrote $count"
     exit 1
 fi
 echo "longscripts still writes the $count scripts that are committed"

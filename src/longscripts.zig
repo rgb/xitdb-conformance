@@ -906,6 +906,86 @@ fn compactSortedSeparators(w: *Io.Writer) !void {
     try end(w);
 }
 
+const REMOVED_SEPARATOR_KEYS = 150;
+
+/// in order of i, and too long for a slot. they go in in that order, so every eighth is a
+/// separator, and key 64 is also the first separator of the branch that splits off, as it's
+/// where the 17th leaf's split divides the root
+fn ascendingLongKey(buffer: []u8, i: u64) []const u8 {
+    return std.fmt.bufPrint(buffer, "{d:0>3} is a key that is too long for a slot", .{i}) catch unreachable;
+}
+
+fn checkRemovedSeparators(s: *S, put_back: bool) !void {
+    var buffer: [64]u8 = undefined;
+    try s.op("{{\"op\":\"count\",\"on\":\"root\",\"expect\":1,\"note\":\"only the last moment\"}}", .{});
+    try s.readMoment(0);
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"sorted\"}}}}}}],\"as\":\"sorted\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"sorted\",\"expect\":{d}}}", .{@as(u64, if (put_back) 150 else 132)});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"set\"}}}}}}],\"as\":\"set\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"set\",\"expect\":{d}}}", .{@as(u64, if (put_back) 150 else 132)});
+    for (0..REMOVED_SEPARATOR_KEYS) |i| {
+        const key = ascendingLongKey(&buffer, i);
+        const removed = i > 0 and i % 8 == 0;
+        if (removed and !put_back) {
+            try s.op("{{\"op\":\"read_path\",\"on\":\"sorted\",\"path\":[{{\"sorted_map_get\":{{\"value\":\"{s}\"}}}}],\"expect_null\":true}}", .{key});
+            try s.op("{{\"op\":\"read_path\",\"on\":\"set\",\"path\":[{{\"sorted_map_get\":{{\"key\":\"{s}\"}}}}],\"expect_null\":true}}", .{key});
+        } else {
+            try s.op("{{\"op\":\"read_path\",\"on\":\"sorted\",\"path\":[{{\"sorted_map_get\":{{\"value\":\"{s}\"}}}}],\"as\":\"v\"}}", .{key});
+            try s.op("{{\"op\":\"read_uint\",\"on\":\"v\",\"expect\":{d}}}", .{if (removed) 2000 + i else i});
+            try s.op("{{\"op\":\"read_path\",\"on\":\"set\",\"path\":[{{\"sorted_map_get\":{{\"key\":\"{s}\"}}}}],\"as\":\"k\"}}", .{key});
+            try s.op("{{\"op\":\"read_bytes\",\"on\":\"k\",\"expect\":\"{s}\"}}", .{key});
+        }
+    }
+}
+
+fn compactSortedRemovedSeparators(w: *Io.Writer) !void {
+    var s = try begin(w, "Compacting a sorted map and set three levels deep, after removing the key of every separator, so that a branch is all that reaches any of those records. One of them is in the first separator of a branch that split off, which nothing reads, and that branch is visited before the root that has the same record, so looking it up isn't enough. Then the keys are put back in the target, each with a new record, and the target is compacted, so that both records are there.");
+    var buffer: [64]u8 = undefined;
+
+    try s.beginMoment();
+    for (0..REMOVED_SEPARATOR_KEYS) |i| {
+        const key = ascendingLongKey(&buffer, i);
+        try s.write(GET_SORTED ++ ",{{\"sorted_map_get\":{{\"value\":\"{s}\"}}}},{{\"write\":{{\"uint\":{d}}}}}", .{ key, i });
+        try s.write(GET_SORTED_SET ++ ",{{\"sorted_map_get\":{{\"key\":\"{s}\"}}}}", .{key});
+    }
+    try s.endMoment();
+
+    try s.beginMoment();
+    for (0..REMOVED_SEPARATOR_KEYS) |i| {
+        if (i == 0 or i % 8 != 0) continue;
+        const key = ascendingLongKey(&buffer, i);
+        try s.write(GET_SORTED ++ ",{{\"sorted_map_remove\":\"{s}\"}}", .{key});
+        try s.write(GET_SORTED_SET ++ ",{{\"sorted_map_remove\":\"{s}\"}}", .{key});
+    }
+    try s.endMoment();
+
+    try s.op("{{\"op\":\"compact\",\"into\":\"target\",\"file_id\":\"00000000000000bb\",\"offset_map\":\"memory\"}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"target\"}}", .{});
+    try checkRemovedSeparators(&s, false);
+
+    // starting from each side of the first separator of the branch that split off
+    try s.op("{{\"op\":\"iterator\",\"on\":\"sorted\",\"from_key\":\"{s}\",\"as\":\"it\"}}", .{ascendingLongKey(&buffer, 64)});
+    try s.op("{{\"op\":\"next\",\"on\":\"it\",\"as\":\"e\",\"expect_null\":false}}", .{});
+    try s.op("{{\"op\":\"read_key_value_pair\",\"on\":\"e\",\"key_as\":\"k\"}}", .{});
+    try s.op("{{\"op\":\"read_bytes\",\"on\":\"k\",\"expect\":\"{s}\"}}", .{ascendingLongKey(&buffer, 65)});
+    // 64 keys come before it, less the 7 separators' keys among them
+    try s.op("{{\"op\":\"rank\",\"on\":\"set\",\"key\":\"{s}\",\"expect\":57}}", .{ascendingLongKey(&buffer, 64)});
+
+    try s.beginMoment();
+    for (0..REMOVED_SEPARATOR_KEYS) |i| {
+        if (i == 0 or i % 8 != 0) continue;
+        const key = ascendingLongKey(&buffer, i);
+        try s.write(GET_SORTED ++ ",{{\"sorted_map_get\":{{\"value\":\"{s}\"}}}},{{\"write\":{{\"uint\":{d}}}}}", .{ key, 2000 + i });
+        try s.write(GET_SORTED_SET ++ ",{{\"sorted_map_get\":{{\"key\":\"{s}\"}}}}", .{key});
+    }
+    try s.endMoment();
+
+    try s.op("{{\"op\":\"compact\",\"into\":\"again\",\"file_id\":\"00000000000000bc\",\"offset_map\":\"memory\"}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"again\"}}", .{});
+    try checkRemovedSeparators(&s, true);
+    try end(w);
+}
+
 /// too long for a slot, every one of them, and in no order
 fn writeLongKey(buffer: []u8, i: u64) []const u8 {
     return std.fmt.bufPrint(buffer, "a sorted key that is too long for a slot {d:0>4}", .{(i * 7919) % 1000}) catch unreachable;
@@ -1220,6 +1300,7 @@ const SCRIPTS = [_]Script{
     .{ .name = "compact-full-blocks", .write = compactFullBlocks },
     .{ .name = "compact-sorted-separators", .write = compactSortedSeparators },
     .{ .name = "compact-sorted-history", .write = compactSortedHistory },
+    .{ .name = "compact-sorted-removed-separators", .write = compactSortedRemovedSeparators },
     .{ .name = "replicate-history", .write = replicateHistory },
     .{ .name = "replicate-roots", .write = replicateRoots },
 };
