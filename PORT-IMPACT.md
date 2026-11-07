@@ -13,7 +13,7 @@ gate fails if the lists aren't what the scripts do, so a new script that relies 
 
 **Three of the changes were tried.** `./impact.sh --prototypes` makes findings 12, 17 and 23 in a scratch copy of Zig
 and runs every script against it. Where this document says "the prototype", that's what ran, and everything else in a
-"what happens" column is reasoned. Those results are from the scripts at `c88ae9f`, and they aren't in the gate, as it's slow.
+"what happens" column is reasoned. Those results are from the scripts at `c88ae9f`, and from `deep-sorted-existing`, which came after and changes nothing in any of them. They aren't in the gate, as it's slow.
 
 **A script not listed under a change doesn't rely on it.** It can run as it is, as far as that change goes.
 
@@ -42,7 +42,7 @@ which is worth holding the port to. It doesn't work for finding 17, which change
 | [16](#finding-16-a-failed-op-that-left-something-behind) | A failed op that wrote something poisons its transaction | 3 | 12 | `.port` variant, new from `gen` |
 | [17](#finding-17-write_if_empty-and-the-snapshot) | `write_if_empty` goes by the slot as it is now | 1 | 4 | Needs a Zig with the change, as bytes change |
 | [22](#finding-22-the-concat) | A concat freezes after its join | 1 changes | 1 changes | Regenerated from `d6f3fee` |
-| [23](#finding-23-a-cursors-freeze) | A freeze holds for every cursor | 2 of 5 change, in the prototype | 2 of 17 change | Waits for a design |
+| [23](#finding-23-a-cursors-freeze) | A freeze holds for every cursor | 2 of 6 change, in the prototype | 2 of 17 change | Waits for a design |
 | [D18](#d18-refusing-a-write-from-before-a-freeze) | A write from before a freeze is refused | 2, and 1 reproduction | 31 | `.port` variant, new from `gen`. **There's a question below** |
 | [D19](#d19-opening-a-file-whose-root-header-cant-be-trusted) | A file whose root header can't be trusted opens at its last good trailer | 3, and none of the 3 failing ones | 0 | `.port` variant, reads only |
 
@@ -201,7 +201,7 @@ cursor's freeze:
 - `scripts`: 03-clone-and-freeze (1)
 - `tests/generated`: compact-201 (1), compact-203 (3), compact-205 (2), gen-10 (2), gen-12 (1), gen-13 (1), gen-17 (2), gen-2 (2), gen-3 (1), gen-6 (1), gen-7 (1), reads-101 (2), reads-102 (1), reads-103 (2), reads-108 (1), replica-302 (2), replica-305 (2)
 - `tests/undefined`: frozen-clone-linked-append (1), frozen-clone-linked-read (1), frozen-clone-sorted-read (1)
-- `tests/valid`: deep-linked (1), deep-sorted (1), deep-tries (2), path-api-edges (3)
+- `tests/valid`: deep-linked (1), deep-sorted (1), deep-sorted-existing (1), deep-tries (2), path-api-edges (3)
 <!-- end -->
 
 The prototype made a cursor's freeze a freeze of the database, as the simplest version of that:
@@ -210,7 +210,7 @@ The prototype made a cursor's freeze a freeze of the database, as the simplest v
 |---|---|
 | `gen-3`, `deep-tries`, `path-api-edges` | different bytes |
 | `compact-205` | fails at a read that finds nothing. That looks like the lost write of section F in `zig-findings.md`, through a cursor made before the freeze, which D18 would turn into an error, though I haven't traced it |
-| the other 18 fixtures in the list | the same bytes |
+| the other 19 fixtures in the list | the same bytes |
 
 So under that design, most of these don't change. The three in `tests/undefined` weren't part of this. They go from a crash
 to an error on `d6f3fee` already, by the checks in option B.
@@ -241,13 +241,13 @@ And these write through such a cursor with a lone init part, which is how `Datab
 <!-- list 18-init -->
 - `scripts`: 03-clone-and-freeze (1)
 - `tests/generated`: compact-201 (3), compact-202 (6), compact-203 (6), compact-205 (9), compact-206 (7), gen-1 (4), gen-10 (4), gen-11 (3), gen-13 (4), gen-15 (2), gen-16 (3), gen-17 (9), gen-2 (2), gen-3 (5), gen-4 (4), gen-5 (4), gen-7 (5), gen-8 (4), gen-9 (2), reads-101 (3), reads-102 (5), reads-103 (6), reads-105 (1), reads-106 (3), reads-107 (5), reads-108 (1), reads-111 (2), reads-112 (5), replica-302 (6), replica-303 (2), replica-304 (2), replica-305 (5), replica-306 (4)
-- `tests/valid`: deep-linked (1), deep-sorted (1), deep-tries (1)
+- `tests/valid`: deep-linked (1), deep-sorted (1), deep-sorted-existing (1), deep-tries (1)
 <!-- end -->
 
 **A question for whoever designs the guard: these must go on working.** That init writes to the cursor's slot, which is from
 before the freeze, so a guard that goes by the position of what's being written would refuse it. Inside a callback, there's
 no other way on: the callback's cursor is the only way to the moment, and a write on a root cursor raises
-`NestedTopLevelWrite`. If the guard refuses these, then after a freeze nothing more can be written in that callback, and 37
+`NestedTopLevelWrite`. If the guard refuses these, then after a freeze nothing more can be written in that callback, and 38
 more scripts have to change. So the guard has to go by the cursor having been made before the freeze and let an init through,
 or it has to come with something else that gets a callback going again. I can't tell from here which D18 means.
 

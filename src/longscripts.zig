@@ -438,6 +438,81 @@ fn deepSorted(w: *Io.Writer) !void {
     try end(w);
 }
 
+/// `{"key": ...}` on a map, where it copies what it goes through though it only touches the key
+fn sortedTouch(s: *S, i: u64) !void {
+    var buffer: [64]u8 = undefined;
+    try s.write(GET_SORTED ++ ",{{\"sorted_map_get\":{{\"key\":\"{s}\"}}}}", .{writeSortedKey(&buffer, i)});
+}
+
+fn deepSortedExisting(w: *Io.Writer) !void {
+    var s = try begin(w, "A sorted set three levels deep, in later transactions that put keys it already has. That writes nothing below its header, so the branches over an unchanged leaf aren't copied. Around them are keys that do change the tree, a freeze, and a frozen cursor, and in a sorted map the same thing copies the leaf and the branches.");
+
+    // a leaf holds 16 keys and a branch 16 children, so this many need a third level
+    try s.beginMoment();
+    for (0..300) |i| try setPut(&s, i);
+    for (0..300) |i| try sortedPut(&s, i, i);
+    try s.endMoment();
+
+    // every key, and all this moment adds to the set is a copy of its header
+    try s.beginMoment();
+    for (0..300) |i| try setPut(&s, i);
+    try s.endMoment();
+
+    try s.beginMoment();
+    for (0..100) |i| try sortedTouch(&s, i * 3);
+    try s.endMoment();
+
+    // new keys copy their way down, and the existing keys around them, under this
+    // transaction's nodes or older ones, don't change that
+    try s.beginMoment();
+    for (0..40) |i| {
+        try setPut(&s, i);
+        try setPut(&s, 300 + i);
+        try setPut(&s, 300 + i);
+    }
+    for (0..300) |i| try setPut(&s, i);
+    try s.endMoment();
+
+    try s.beginMoment();
+    for (100..120) |i| try setRemove(&s, i);
+    for (100..110) |i| try setPut(&s, i);
+    for (0..100) |i| try setPut(&s, i);
+    try s.endMoment();
+
+    // after a freeze, what this transaction made is old too, and there's still nothing to copy
+    try s.beginMoment();
+    for (340..360) |i| try setPut(&s, i);
+    try s.freeze();
+    for (340..360) |i| try setPut(&s, i);
+    for (0..100) |i| try setPut(&s, i);
+    try cloneFrozen(&s, "set", "set_clone");
+    var buffer: [64]u8 = undefined;
+    for (340..360) |i| try s.op("{{\"op\":\"write_path\",\"on\":\"clone\",\"path\":[{{\"sorted_map_init\":{{\"set\":true}}}},{{\"sorted_map_get\":{{\"key\":\"{s}\"}}}}]}}", .{writeSortedKey(&buffer, i)});
+    for (360..380) |i| try s.op("{{\"op\":\"write_path\",\"on\":\"clone\",\"path\":[{{\"sorted_map_init\":{{\"set\":true}}}},{{\"sorted_map_get\":{{\"key\":\"{s}\"}}}}]}}", .{writeSortedKey(&buffer, i)});
+    for (0..100) |i| try s.op("{{\"op\":\"write_path\",\"on\":\"clone\",\"path\":[{{\"sorted_map_init\":{{\"set\":true}}}},{{\"sorted_map_get\":{{\"key\":\"{s}\"}}}}]}}", .{writeSortedKey(&buffer, i)});
+    try s.endMoment();
+
+    // 40 more, then 20 gone and 10 back, then 20 more
+    for ([_]u64{ 300, 300, 300, 340, 330, 350 }, 0..) |count, moment| {
+        try s.readMoment(@intCast(moment));
+        try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"set\"}}}}}}],\"as\":\"set\"}}", .{});
+        try s.op("{{\"op\":\"count\",\"on\":\"set\",\"expect\":{d}}}", .{count});
+        try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"sorted\"}}}}}}],\"as\":\"sorted\"}}", .{});
+        try s.op("{{\"op\":\"count\",\"on\":\"sorted\",\"expect\":300}}", .{});
+    }
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"set_clone\"}}}}}}],\"as\":\"clone\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"clone\",\"expect\":370}}", .{});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"clone\",\"path\":[{{\"sorted_map_get\":{{\"key\":\"{s}\"}}}}],\"as\":\"k\"}}", .{writeSortedKey(&buffer, 379)});
+    try s.op("{{\"op\":\"read_bytes\",\"on\":\"k\",\"expect\":\"{s}\"}}", .{writeSortedKey(&buffer, 379)});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"set\",\"path\":[{{\"sorted_map_get\":{{\"key\":\"{s}\"}}}}],\"expect_null\":true,\"note\":\"only the clone has this\"}}", .{writeSortedKey(&buffer, 379)});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"set\",\"path\":[{{\"sorted_map_get\":{{\"key\":\"{s}\"}}}}],\"expect_null\":true,\"note\":\"removed, and not one of the ten put back\"}}", .{writeSortedKey(&buffer, 115)});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"set\",\"path\":[{{\"sorted_map_get\":{{\"key\":\"{s}\"}}}}],\"as\":\"k\"}}", .{writeSortedKey(&buffer, 105)});
+    try s.op("{{\"op\":\"read_bytes\",\"on\":\"k\",\"expect\":\"{s}\"}}", .{writeSortedKey(&buffer, 105)});
+    try s.readMoment(2);
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"set\"}}}}}},{{\"sorted_map_get\":{{\"key\":\"{s}\"}}}}],\"expect_null\":true,\"note\":\"not until the next moment\"}}", .{writeSortedKey(&buffer, 300)});
+    try end(w);
+}
+
 // iterators on collections that are several levels deep
 
 const COUNT = 300;
@@ -917,6 +992,7 @@ const SCRIPTS = [_]Script{
     .{ .name = "deep-tries", .write = deepTries },
     .{ .name = "deep-linked", .write = deepLinked },
     .{ .name = "deep-sorted", .write = deepSorted },
+    .{ .name = "deep-sorted-existing", .write = deepSortedExisting },
     .{ .name = "iterator-tiers", .write = iteratorTiers },
     .{ .name = "iterator-tiers-linked", .write = iteratorTiersLinked },
     .{ .name = "iterator-tiers-sorted", .write = iteratorTiersSorted },

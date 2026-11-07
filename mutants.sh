@@ -128,6 +128,14 @@ try_mutant kv-pair-never-copied "if (try self.isOld(ptr, frozen_at)) {" "if (try
 # the nodes of both kinds of tree
 try_mutant tree-node-always-copied "return !old;" "return !old and false;"
 try_mutant tree-node-never-copied "return !old;" "return !old or true;"
+# putting what's already in a sorted tree. a set writes nothing for it, and a map copies what
+# it goes through, so what a branch does about an unchanged child only shows in a set
+try_mutant sorted-unchanged-child-copied "if (!child.added and child.node_ptr == node.children[i].value) {" "if (!child.added and child.node_ptr == node.children[i].value and false) {"
+try_mutant sorted-unchanged-by-added-only "if (!child.added and child.node_ptr == node.children[i].value) {" "if (!child.added) {"
+try_mutant sorted-unchanged-by-pointer-only "if (!child.added and child.node_ptr == node.children[i].value) {" "if (child.node_ptr == node.children[i].value) {"
+try_mutant sorted-set-existing-key-copies-leaf "if (key_only) return .{ .node_ptr = node_ptr, .count = node.num, .entry = node.entries[idx], .added = false, .split = null };" "if (key_only) return .{ .node_ptr = try self.sortedWriteNode(node, node_ptr, frozen_at), .count = node.num, .entry = node.entries[idx], .added = false, .split = null };"
+try_mutant sorted-set-key-makes-a-pair "const key_only = slot_ptr.slot.tag == .sorted_set and target == .key;" "const key_only = slot_ptr.slot.tag == .sorted_set and target == .key and false;"
+try_mutant sorted-map-key-writes-nothing "const key_only = slot_ptr.slot.tag == .sorted_set and target == .key;" "const key_only = target == .key;"
 # everything at once, and the two things it goes by
 try_mutant is-old-always "return ptr < @max(tx_start, frozen_at);" "return ptr < @max(tx_start, frozen_at) or true;"
 try_mutant is-old-never "return ptr < @max(tx_start, frozen_at);" "return ptr < @max(tx_start, frozen_at) and false;"
