@@ -21,13 +21,15 @@ const FILE_ID: u64 = 0x0011223344556677;
 const RUNS = 5;
 const TMP_DIR = "out";
 const TMP_PATH = "out/bench.db";
+// what map_compact compacts into
+const TARGET_PATH = "out/bench-target.db";
 
 fn fail(comptime fmt: []const u8, args: anytype) noreturn {
     std.debug.print("bench: " ++ fmt ++ "\n", args);
     std.process.exit(1);
 }
 
-const Workload = enum { map_insert, list_append, map_transactions, linked_append, sorted_insert };
+const Workload = enum { map_insert, list_append, map_transactions, linked_append, sorted_insert, map_compact };
 
 /// what's worked out before any clock starts
 const Inputs = struct {
@@ -165,6 +167,8 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
                         .{ .ctx = .{ .keys = inputs.keys, .n = n } },
                     });
                 },
+                // its write phase is a compaction, which is compactOnce
+                .map_compact => unreachable,
             }
         }
 
@@ -172,7 +176,7 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
             const hashes = inputs.hashes;
             const moment = (try db.rootCursor().readPath(void, &.{.{ .array_list_get = -1 }})) orelse fail("there is no last moment", .{});
             switch (workload) {
-                .map_insert, .map_transactions => {
+                .map_insert, .map_transactions, .map_compact => {
                     const keys = if (workload == .map_insert) n else 10 * n;
                     var i: u64 = 0;
                     while (i < keys) : (i += 1) {
@@ -214,7 +218,7 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
             var iter = try moment.iterator();
             var count: u64 = 0;
             switch (workload) {
-                .map_insert, .map_transactions => {
+                .map_insert, .map_transactions, .map_compact => {
                     const keys = if (workload == .map_insert) n else 10 * n;
                     var sum: u64 = 0;
                     while (try iter.next()) |entry| {
@@ -255,48 +259,81 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
             }
         }
 
+        /// what makes a new database of this kind. the file, if it has one, is the caller's to close
+        fn newOpts(io: Io, path: []const u8, buffer: *Io.Writer.Allocating, file: *?Io.File) !xitdb.InitOpts(kind) {
+            const hash_id = xitdb.HashId.fromBytes("sha1");
+            switch (kind) {
+                .memory => return .{ .buffer = buffer, .hash_id = hash_id, .file_id = FILE_ID },
+                .file => {
+                    const f = try Io.Dir.cwd().createFile(io, path, .{ .read = true, .truncate = true });
+                    file.* = f;
+                    return .{ .file = f, .fsync = false, .hash_id = hash_id, .file_id = FILE_ID };
+                },
+                .buffered_file => {
+                    const f = try Io.Dir.cwd().createFile(io, path, .{ .read = true, .truncate = true });
+                    file.* = f;
+                    return .{ .file = f, .buffer = buffer, .fsync = false, .hash_id = hash_id, .file_id = FILE_ID };
+                },
+            }
+        }
+
+        /// the read and iterate phases, once the write phase has given this file size and time
+        fn finish(io: Io, db: *DB, workload: Workload, n: u64, inputs: Inputs, write_ms: f64) !Result {
+            const file_size = try db.core.length();
+
+            const read_start = nowNs(io);
+            try readPhase(db, workload, n, inputs);
+            const read_end = nowNs(io);
+
+            const iterate_start = nowNs(io);
+            try iteratePhase(db, workload, n, inputs);
+            const iterate_end = nowNs(io);
+
+            return .{
+                .write_ms = write_ms,
+                .read_ms = elapsedMs(read_start, read_end),
+                .iterate_ms = elapsedMs(iterate_start, iterate_end),
+                .file_size = file_size,
+            };
+        }
+
+        /// map_compact, from a source that's ready. the clock covers the call alone, and the
+        /// phases after it are on the target
+        fn compactOnce(io: Io, gpa: Allocator, source: *DB, n: u64, inputs: Inputs) !Result {
+            var buffer = Io.Writer.Allocating.init(gpa);
+            defer buffer.deinit();
+            var file: ?Io.File = null;
+            defer if (file) |f| f.close(io);
+            const opts = try newOpts(io, TARGET_PATH, &buffer, &file);
+
+            // a new one each run, as a run starts from nothing, so that growing it is on the clock
+            var offset_map = std.AutoHashMap(u64, u64).init(gpa);
+            defer offset_map.deinit();
+
+            const write_start = nowNs(io);
+            var target = try source.compact(kind, opts, &offset_map);
+            const write_end = nowNs(io);
+
+            return finish(io, &target, .map_compact, n, inputs, elapsedMs(write_start, write_end));
+        }
+
         fn once(io: Io, gpa: Allocator, workload: Workload, n: u64, inputs: Inputs) !Result {
             var buffer = Io.Writer.Allocating.init(gpa);
             defer buffer.deinit();
-
-            const hash_id = xitdb.HashId.fromBytes("sha1");
-            var db: DB = undefined;
             var file: ?Io.File = null;
             defer if (file) |f| f.close(io);
-            switch (kind) {
-                .memory => db = try DB.init(io, .{ .buffer = &buffer, .hash_id = hash_id, .file_id = FILE_ID }),
-                .file => {
-                    const f = try Io.Dir.cwd().createFile(io, TMP_PATH, .{ .read = true, .truncate = true });
-                    file = f;
-                    db = try DB.init(io, .{ .file = f, .fsync = false, .hash_id = hash_id, .file_id = FILE_ID });
-                },
-                .buffered_file => {
-                    const f = try Io.Dir.cwd().createFile(io, TMP_PATH, .{ .read = true, .truncate = true });
-                    file = f;
-                    db = try DB.init(io, .{ .file = f, .buffer = &buffer, .fsync = false, .hash_id = hash_id, .file_id = FILE_ID });
-                },
+            var db = try DB.init(io, try newOpts(io, TMP_PATH, &buffer, &file));
+
+            if (workload == .map_compact) {
+                try writePhase(&db, .map_transactions, n, inputs);
+                return compactOnce(io, gpa, &db, n, inputs);
             }
 
             const write_start = nowNs(io);
             try writePhase(&db, workload, n, inputs);
             const write_end = nowNs(io);
 
-            const file_size = try db.core.length();
-
-            const read_start = nowNs(io);
-            try readPhase(&db, workload, n, inputs);
-            const read_end = nowNs(io);
-
-            const iterate_start = nowNs(io);
-            try iteratePhase(&db, workload, n, inputs);
-            const iterate_end = nowNs(io);
-
-            return .{
-                .write_ms = elapsedMs(write_start, write_end),
-                .read_ms = elapsedMs(read_start, read_end),
-                .iterate_ms = elapsedMs(iterate_start, iterate_end),
-                .file_size = file_size,
-            };
+            return finish(io, &db, workload, n, inputs, elapsedMs(write_start, write_end));
         }
 
         fn run(io: Io, gpa: Allocator, w: *Io.Writer, only: ?Workload, workload: Workload, n: u64, inputs: Inputs) !void {
@@ -387,6 +424,7 @@ pub fn main(init: std.process.Init) !void {
 
     try Io.Dir.cwd().createDirPath(io, TMP_DIR);
     defer Io.Dir.cwd().deleteFile(io, TMP_PATH) catch {};
+    defer Io.Dir.cwd().deleteFile(io, TARGET_PATH) catch {};
 
     var stdout_buffer: [1024]u8 = undefined;
     var stdout = Io.File.stdout().writerStreaming(io, &stdout_buffer);
@@ -400,9 +438,12 @@ pub fn main(init: std.process.Init) !void {
     const linked_file_n = 10_000 / divide;
     const sorted_n = 100_000 / divide;
     const sorted_file_n = 10_000 / divide;
+    const compact_n = 2_000 / divide;
+    // at least one, as a compaction with no moment to read has nothing to check
+    const compact_file_n = @max(200 / divide, 1);
 
     // every hash and key is computed before any clock starts
-    const hashes = try computeHashes(gpa, @max(map_n, map_file_n, 10 * transactions));
+    const hashes = try computeHashes(gpa, @max(map_n, map_file_n, 10 * transactions, 10 * compact_n, 10 * compact_file_n));
     defer gpa.free(hashes);
     const inputs: Inputs = .{ .hashes = hashes, .keys = try computeKeys(arena, @max(sorted_n, sorted_file_n)) };
 
@@ -419,4 +460,7 @@ pub fn main(init: std.process.Init) !void {
     try Bench(.memory).run(io, gpa, w, only, .sorted_insert, sorted_n, inputs);
     try Bench(.buffered_file).run(io, gpa, w, only, .sorted_insert, sorted_n, inputs);
     try Bench(.file).run(io, gpa, w, only, .sorted_insert, sorted_file_n, inputs);
+    try Bench(.memory).run(io, gpa, w, only, .map_compact, compact_n, inputs);
+    try Bench(.buffered_file).run(io, gpa, w, only, .map_compact, compact_n, inputs);
+    try Bench(.file).run(io, gpa, w, only, .map_compact, compact_file_n, inputs);
 }

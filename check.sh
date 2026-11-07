@@ -310,11 +310,11 @@ if [ "$status" -ne 1 ] || ! grep -qF "its numbers would mean nothing" "$OUT/benc
 fi
 "$BENCH" --divide 1000 > "$OUT/bench.txt"
 lines=$(wc -l < "$OUT/bench.txt" | tr -d ' ')
-if [ "$lines" -ne 39 ]; then
-    echo "bench should print 39 lines, and it printed $lines"
+if [ "$lines" -ne 48 ]; then
+    echo "bench should print 48 lines, and it printed $lines"
     exit 1
 fi
-echo "bench refuses a debug build, and prints its 39 lines"
+echo "bench refuses a debug build, and prints its 48 lines"
 # the file size is what the Swift side is held to, so bench has to mean what it says.
 # these scripts are its workloads, spelled out as the spec spells them.
 for line in "map_insert 100 memory" "map_insert 100 buffered_file" "map_insert 10 file" "list_append 1000 memory" "list_append 1000 buffered_file" "map_transactions 2 memory" "map_transactions 2 buffered_file" "linked_append 100 memory" "linked_append 100 buffered_file" "linked_append 10 file" "sorted_insert 100 memory" "sorted_insert 100 buffered_file" "sorted_insert 10 file"; do
@@ -348,6 +348,40 @@ for kind in memory buffered_file; do
     fi
 done
 echo "and on sorted_insert with keys past 10,000, which are byte records"
+# map_compact's file size is the target's, which run writes beside the source
+compact_size_is() { # script, kind, what bench printed, what it's about
+    "$RUN" "$1" "$OUT/bench-compact.db" --kind "$2"
+    from_run=$(wc -c < "$OUT/bench-compact.target.db" | tr -d ' ')
+    from_bench=$(grep "\"workload\": \"map_compact\", \"phase\": \"write\", \"kind\": \"$2\"" "$3" | sed -n 's/.*"file_size": \([0-9]*\).*/\1/p')
+    if [ -z "$from_bench" ] || [ "$from_run" != "$from_bench" ]; then
+        echo "map_compact, $4 on $2: bench says the target is $from_bench bytes, and run says $from_run"
+        exit 1
+    fi
+}
+compact_size_is tests/bench/map_compact-2.json memory "$OUT/bench.txt" "t = 2"
+compact_size_is tests/bench/map_compact-2.json buffered_file "$OUT/bench.txt" "t = 2"
+compact_size_is tests/bench/map_compact-1.json file "$OUT/bench.txt" "t = 1"
+# with so few keys the trie is one block, and these scripts are too big to keep
+"$BENCH" --divide 10 --only map_compact > "$OUT/bench-compact.txt"
+compact_script() { # transactions, output
+    awk -v t="$1" 'BEGIN {
+        printf "{\"format\":\"xitdb-script/1\",\"hash_size\":20,\"hash_id\":\"sha1\",\"file_id\":\"0011223344556677\",\"ops\":["
+        for (j = 0; j < t; j++) {
+            printf "{\"op\":\"read_path_slot\",\"on\":\"root\",\"path\":[{\"array_list_get\":-1}],\"as\":\"last\"},{\"op\":\"write_path\",\"on\":\"root\",\"path\":[\"array_list_init\",\"array_list_append\",{\"write\":{\"slot\":{\"var\":\"last\"}}},{\"hash_map_init\":{}},{\"ctx\":{\"as\":\"c\",\"ops\":["
+            for (i = 10 * j; i < 10 * j + 10; i++) {
+                printf "%s{\"op\":\"write_path\",\"on\":\"c\",\"path\":[{\"hash_map_get\":{\"value\":{\"sha1\":\"key-%d\"}}},{\"write\":{\"uint\":%d}}]}", (i > 10 * j ? "," : ""), i, i
+            }
+            printf "]}}]},"
+        }
+        print "{\"op\":\"compact\",\"into\":\"target\",\"file_id\":\"0011223344556677\",\"offset_map\":\"memory\"}]}"
+    }' > "$2"
+}
+compact_script 200 "$OUT/bench-compact-200.json"
+compact_script 20 "$OUT/bench-compact-20.json"
+compact_size_is "$OUT/bench-compact-200.json" memory "$OUT/bench-compact.txt" "t = 200"
+compact_size_is "$OUT/bench-compact-200.json" buffered_file "$OUT/bench-compact.txt" "t = 200"
+compact_size_is "$OUT/bench-compact-20.json" file "$OUT/bench-compact.txt" "t = 20"
+echo "and on map_compact's target, at t = 2 and 1, and at t = 200 and 20"
 
 echo "== coverage of the format by the hand-written scripts"
 COVERAGE=zig-out/bin/coverage
