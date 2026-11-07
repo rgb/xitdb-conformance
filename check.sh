@@ -310,14 +310,14 @@ if [ "$status" -ne 1 ] || ! grep -qF "its numbers would mean nothing" "$OUT/benc
 fi
 "$BENCH" --divide 1000 > "$OUT/bench.txt"
 lines=$(wc -l < "$OUT/bench.txt" | tr -d ' ')
-if [ "$lines" -ne 21 ]; then
-    echo "bench should print 21 lines, and it printed $lines"
+if [ "$lines" -ne 39 ]; then
+    echo "bench should print 39 lines, and it printed $lines"
     exit 1
 fi
-echo "bench refuses a debug build, and prints its 21 lines"
+echo "bench refuses a debug build, and prints its 39 lines"
 # the file size is what the Swift side is held to, so bench has to mean what it says.
 # these scripts are its workloads, spelled out as the spec spells them.
-for line in "map_insert 100 memory" "map_insert 100 buffered_file" "map_insert 10 file" "list_append 1000 memory" "list_append 1000 buffered_file" "map_transactions 2 memory" "map_transactions 2 buffered_file"; do
+for line in "map_insert 100 memory" "map_insert 100 buffered_file" "map_insert 10 file" "list_append 1000 memory" "list_append 1000 buffered_file" "map_transactions 2 memory" "map_transactions 2 buffered_file" "linked_append 100 memory" "linked_append 100 buffered_file" "linked_append 10 file" "sorted_insert 100 memory" "sorted_insert 100 buffered_file" "sorted_insert 10 file"; do
     set -- $line
     "$RUN" "tests/bench/$1-$2.json" "$OUT/bench-$1-$2-$3.db" --kind "$3"
     from_run=$(sed -n 's/.*"file_size": \([0-9]*\).*/\1/p' "$OUT/bench-$1-$2-$3.db.sidecar.json")
@@ -327,7 +327,27 @@ for line in "map_insert 100 memory" "map_insert 100 buffered_file" "map_insert 1
         exit 1
     fi
 done
-echo "bench's file sizes are what run gets for the same operations, on 7 workloads and kinds"
+echo "bench's file sizes are what run gets for the same operations, on 13 workloads and kinds"
+# from 10,000 on, a sorted key is a byte record and not in a slot, which those are too small to
+# reach, and this script is too big to keep
+"$BENCH" --divide 9 --only sorted_insert > "$OUT/bench-sorted.txt"
+awk 'BEGIN {
+    printf "{\"format\":\"xitdb-script/1\",\"hash_size\":20,\"hash_id\":\"sha1\",\"file_id\":\"0011223344556677\",\"ops\":[{\"op\":\"write_path\",\"on\":\"root\",\"path\":[\"array_list_init\",\"array_list_append\",{\"sorted_map_init\":{}},{\"ctx\":{\"as\":\"c\",\"ops\":["
+    for (i = 0; i < 11111; i++) {
+        printf "%s{\"op\":\"write_path\",\"on\":\"c\",\"path\":[{\"sorted_map_get\":{\"value\":\"key-%d\"}},{\"write\":{\"uint\":%d}}]}", (i > 0 ? "," : ""), i, i
+    }
+    print "]}}]}]}"
+}' > "$OUT/bench-sorted.json"
+for kind in memory buffered_file; do
+    "$RUN" "$OUT/bench-sorted.json" "$OUT/bench-sorted-$kind.db" --kind "$kind"
+    from_run=$(sed -n 's/.*"file_size": \([0-9]*\).*/\1/p' "$OUT/bench-sorted-$kind.db.sidecar.json")
+    from_bench=$(grep "\"phase\": \"write\", \"kind\": \"$kind\", \"n\": 11111," "$OUT/bench-sorted.txt" | sed -n 's/.*"file_size": \([0-9]*\).*/\1/p')
+    if [ -z "$from_run" ] || [ "$from_run" != "$from_bench" ]; then
+        echo "sorted_insert at 11111 on $kind: bench says the file is $from_bench bytes, and run says $from_run"
+        exit 1
+    fi
+done
+echo "and on sorted_insert with keys past 10,000, which are byte records"
 
 echo "== coverage of the format by the hand-written scripts"
 COVERAGE=zig-out/bin/coverage

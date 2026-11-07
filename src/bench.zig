@@ -1,4 +1,4 @@
-//! bench [--divide <d>]
+//! bench [--divide <d>] [--only <workload>]
 //!
 //! The Zig side of the workloads in director/spec/benchmarks.md. It prints one JSON
 //! object per line, one line per phase, and the Swift side has to reach the same
@@ -7,6 +7,7 @@
 //! Real numbers need a ReleaseFast build, and it refuses to give them otherwise.
 //! `--divide <d>` divides every size by d, in any build, to check quickly that it
 //! still works and that its file sizes are what `run` gets for the same operations.
+//! `--only <workload>` leaves out the others.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -26,7 +27,17 @@ fn fail(comptime fmt: []const u8, args: anytype) noreturn {
     std.process.exit(1);
 }
 
-const Workload = enum { map_insert, list_append, map_transactions };
+const Workload = enum { map_insert, list_append, map_transactions, linked_append, sorted_insert };
+
+/// what's worked out before any clock starts
+const Inputs = struct {
+    hashes: []const HashInt,
+    // the keys of a sorted map, `key-<i>`
+    keys: []const []const u8,
+};
+
+/// longer than any key here, which is what the spec says to read a key into
+const KEY_BUFFER_SIZE = 16;
 
 const Result = struct { write_ms: f64, read_ms: f64, iterate_ms: f64, file_size: u64 };
 
@@ -75,7 +86,39 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
             }
         };
 
-        fn writePhase(db: *DB, workload: Workload, n: u64, hashes: []const HashInt) !void {
+        /// `["linked_array_list_append", {"write": {"uint": i}}]`, for each i
+        const AppendLinkedValues = struct {
+            n: u64,
+
+            pub fn run(self: AppendLinkedValues, cursor: *RW) !void {
+                var i: u64 = 0;
+                while (i < self.n) : (i += 1) {
+                    _ = try cursor.writePath(void, &.{
+                        .linked_array_list_append,
+                        .{ .write = .{ .uint = i } },
+                    });
+                }
+            }
+        };
+
+        /// `[{"sorted_map_get": {"value": "key-<i>"}}, {"write": {"uint": i}}]`, for each i
+        const PutSortedKeys = struct {
+            keys: []const []const u8,
+            n: u64,
+
+            pub fn run(self: PutSortedKeys, cursor: *RW) !void {
+                var i: u64 = 0;
+                while (i < self.n) : (i += 1) {
+                    _ = try cursor.writePath(void, &.{
+                        .{ .sorted_map_get = .{ .value = self.keys[@intCast(i)] } },
+                        .{ .write = .{ .uint = i } },
+                    });
+                }
+            }
+        };
+
+        fn writePhase(db: *DB, workload: Workload, n: u64, inputs: Inputs) !void {
+            const hashes = inputs.hashes;
             switch (workload) {
                 .map_insert => {
                     _ = try db.rootCursor().writePath(PutKeys, &.{
@@ -106,10 +149,27 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
                         });
                     }
                 },
+                .linked_append => {
+                    _ = try db.rootCursor().writePath(AppendLinkedValues, &.{
+                        .array_list_init,
+                        .array_list_append,
+                        .linked_array_list_init,
+                        .{ .ctx = .{ .n = n } },
+                    });
+                },
+                .sorted_insert => {
+                    _ = try db.rootCursor().writePath(PutSortedKeys, &.{
+                        .array_list_init,
+                        .array_list_append,
+                        .{ .sorted_map_init = .{} },
+                        .{ .ctx = .{ .keys = inputs.keys, .n = n } },
+                    });
+                },
             }
         }
 
-        fn readPhase(db: *DB, workload: Workload, n: u64, hashes: []const HashInt) !void {
+        fn readPhase(db: *DB, workload: Workload, n: u64, inputs: Inputs) !void {
+            const hashes = inputs.hashes;
             const moment = (try db.rootCursor().readPath(void, &.{.{ .array_list_get = -1 }})) orelse fail("there is no last moment", .{});
             switch (workload) {
                 .map_insert, .map_transactions => {
@@ -129,10 +189,27 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
                         if (got != i) fail("index {d} holds {d}", .{ i, got });
                     }
                 },
+                .linked_append => {
+                    var i: u64 = 0;
+                    while (i < n) : (i += 1) {
+                        const value = (try moment.readPath(void, &.{.{ .linked_array_list_get = @as(i65, i) }})) orelse fail("index {d} isn't there", .{i});
+                        const got = try value.readUint();
+                        if (got != i) fail("index {d} holds {d}", .{ i, got });
+                    }
+                },
+                .sorted_insert => {
+                    var i: u64 = 0;
+                    while (i < n) : (i += 1) {
+                        const value = (try moment.readPath(void, &.{.{ .sorted_map_get = .{ .value = inputs.keys[@intCast(i)] } }})) orelse fail("key {d} isn't there", .{i});
+                        const got = try value.readUint();
+                        if (got != i) fail("key {d} holds {d}", .{ i, got });
+                    }
+                },
             }
         }
 
-        fn iteratePhase(db: *DB, workload: Workload, n: u64, hashes: []const HashInt) !void {
+        fn iteratePhase(db: *DB, workload: Workload, n: u64, inputs: Inputs) !void {
+            const hashes = inputs.hashes;
             const moment = (try db.rootCursor().readPath(void, &.{.{ .array_list_get = -1 }})) orelse fail("there is no last moment", .{});
             var iter = try moment.iterator();
             var count: u64 = 0;
@@ -151,7 +228,7 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
                     if (count != keys) fail("{d} entries, and {d} keys were written", .{ count, keys });
                     if (sum != keys * (keys - 1) / 2) fail("the values add up to {d}", .{sum});
                 },
-                .list_append => {
+                .list_append, .linked_append => {
                     while (try iter.next()) |element| {
                         const value = try element.readUint();
                         if (value != count) fail("element {d} holds {d}", .{ count, value });
@@ -159,10 +236,26 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
                     }
                     if (count != n) fail("{d} elements, and {d} were written", .{ count, n });
                 },
+                .sorted_insert => {
+                    // the key before this one is in the buffer this one isn't read into
+                    var buffers: [2][KEY_BUFFER_SIZE]u8 = undefined;
+                    var previous: []const u8 = &.{};
+                    while (try iter.next()) |entry| {
+                        const pair = try entry.readKeyValuePair();
+                        const value = try pair.value_cursor.readUint();
+                        if (value >= n) fail("an entry holds {d}, and there are only {d} keys", .{ value, n });
+                        const key = try pair.key_cursor.readBytes(&buffers[@intCast(count % 2)]);
+                        if (!std.mem.eql(u8, key, inputs.keys[@intCast(value)])) fail("the entry holding {d} has the key {s}", .{ value, key });
+                        if (count > 0 and std.mem.order(u8, key, previous) != .gt) fail("the key {s} comes after the key {s}", .{ key, previous });
+                        previous = key;
+                        count += 1;
+                    }
+                    if (count != n) fail("{d} entries, and {d} keys were written", .{ count, n });
+                },
             }
         }
 
-        fn once(io: Io, gpa: Allocator, workload: Workload, n: u64, hashes: []const HashInt) !Result {
+        fn once(io: Io, gpa: Allocator, workload: Workload, n: u64, inputs: Inputs) !Result {
             var buffer = Io.Writer.Allocating.init(gpa);
             defer buffer.deinit();
 
@@ -185,17 +278,17 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
             }
 
             const write_start = nowNs(io);
-            try writePhase(&db, workload, n, hashes);
+            try writePhase(&db, workload, n, inputs);
             const write_end = nowNs(io);
 
             const file_size = try db.core.length();
 
             const read_start = nowNs(io);
-            try readPhase(&db, workload, n, hashes);
+            try readPhase(&db, workload, n, inputs);
             const read_end = nowNs(io);
 
             const iterate_start = nowNs(io);
-            try iteratePhase(&db, workload, n, hashes);
+            try iteratePhase(&db, workload, n, inputs);
             const iterate_end = nowNs(io);
 
             return .{
@@ -206,13 +299,14 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
             };
         }
 
-        fn run(io: Io, gpa: Allocator, w: *Io.Writer, workload: Workload, n: u64, hashes: []const HashInt) !void {
+        fn run(io: Io, gpa: Allocator, w: *Io.Writer, only: ?Workload, workload: Workload, n: u64, inputs: Inputs) !void {
+            if (only != null and only.? != workload) return;
             var write_times: [RUNS]f64 = undefined;
             var read_times: [RUNS]f64 = undefined;
             var iterate_times: [RUNS]f64 = undefined;
             var file_size: u64 = 0;
             for (0..RUNS) |run_index| {
-                const result = try once(io, gpa, workload, n, hashes);
+                const result = try once(io, gpa, workload, n, inputs);
                 write_times[run_index] = result.write_ms;
                 read_times[run_index] = result.read_ms;
                 iterate_times[run_index] = result.iterate_ms;
@@ -242,6 +336,15 @@ fn printLine(w: *Io.Writer, workload: Workload, phase: []const u8, kind: xitdb.D
     });
 }
 
+fn computeKeys(arena: Allocator, count: u64) ![]const []const u8 {
+    const keys = try arena.alloc([]const u8, @intCast(count));
+    for (keys, 0..) |*key, i| {
+        key.* = try std.fmt.allocPrint(arena, "key-{d}", .{i});
+        if (key.len > KEY_BUFFER_SIZE) fail("the key {s} is longer than what the spec reads it into", .{key.*});
+    }
+    return keys;
+}
+
 fn computeHashes(gpa: Allocator, count: u64) ![]HashInt {
     const hashes = try gpa.alloc(HashInt, @intCast(count));
     var text: [32]u8 = undefined;
@@ -261,12 +364,22 @@ pub fn main(init: std.process.Init) !void {
 
     const args = try init.minimal.args.toSlice(arena);
     var divide: u64 = 1;
-    if (args.len == 3 and std.mem.eql(u8, args[1], "--divide")) {
-        divide = std.fmt.parseInt(u64, args[2], 10) catch fail("--divide needs a number", .{});
-        if (divide == 0) fail("--divide can't be 0", .{});
-    } else if (args.len != 1) {
-        std.debug.print("usage: bench [--divide <d>]\n", .{});
-        std.process.exit(2);
+    var only: ?Workload = null;
+    var arg_index: usize = 1;
+    while (arg_index < args.len) : (arg_index += 2) {
+        if (arg_index + 1 >= args.len) {
+            std.debug.print("usage: bench [--divide <d>] [--only <workload>]\n", .{});
+            std.process.exit(2);
+        }
+        if (std.mem.eql(u8, args[arg_index], "--divide")) {
+            divide = std.fmt.parseInt(u64, args[arg_index + 1], 10) catch fail("--divide needs a number", .{});
+            if (divide == 0) fail("--divide can't be 0", .{});
+        } else if (std.mem.eql(u8, args[arg_index], "--only")) {
+            only = std.meta.stringToEnum(Workload, args[arg_index + 1]) orelse fail("{s} isn't a workload", .{args[arg_index + 1]});
+        } else {
+            std.debug.print("usage: bench [--divide <d>] [--only <workload>]\n", .{});
+            std.process.exit(2);
+        }
     }
     if (divide == 1 and builtin.mode != .fast) {
         fail("this is a {s} build, and its numbers would mean nothing. Build with -Doptimize=ReleaseFast, or use --divide to only check that it works", .{@tagName(builtin.mode)});
@@ -283,16 +396,27 @@ pub fn main(init: std.process.Init) !void {
     const map_file_n = 10_000 / divide;
     const list_n = 1_000_000 / divide;
     const transactions = 2_000 / divide;
+    const linked_n = 100_000 / divide;
+    const linked_file_n = 10_000 / divide;
+    const sorted_n = 100_000 / divide;
+    const sorted_file_n = 10_000 / divide;
 
-    // every hash is computed before any clock starts
+    // every hash and key is computed before any clock starts
     const hashes = try computeHashes(gpa, @max(map_n, map_file_n, 10 * transactions));
     defer gpa.free(hashes);
+    const inputs: Inputs = .{ .hashes = hashes, .keys = try computeKeys(arena, @max(sorted_n, sorted_file_n)) };
 
-    try Bench(.memory).run(io, gpa, w, .map_insert, map_n, hashes);
-    try Bench(.buffered_file).run(io, gpa, w, .map_insert, map_n, hashes);
-    try Bench(.file).run(io, gpa, w, .map_insert, map_file_n, hashes);
-    try Bench(.memory).run(io, gpa, w, .list_append, list_n, hashes);
-    try Bench(.buffered_file).run(io, gpa, w, .list_append, list_n, hashes);
-    try Bench(.memory).run(io, gpa, w, .map_transactions, transactions, hashes);
-    try Bench(.buffered_file).run(io, gpa, w, .map_transactions, transactions, hashes);
+    try Bench(.memory).run(io, gpa, w, only, .map_insert, map_n, inputs);
+    try Bench(.buffered_file).run(io, gpa, w, only, .map_insert, map_n, inputs);
+    try Bench(.file).run(io, gpa, w, only, .map_insert, map_file_n, inputs);
+    try Bench(.memory).run(io, gpa, w, only, .list_append, list_n, inputs);
+    try Bench(.buffered_file).run(io, gpa, w, only, .list_append, list_n, inputs);
+    try Bench(.memory).run(io, gpa, w, only, .map_transactions, transactions, inputs);
+    try Bench(.buffered_file).run(io, gpa, w, only, .map_transactions, transactions, inputs);
+    try Bench(.memory).run(io, gpa, w, only, .linked_append, linked_n, inputs);
+    try Bench(.buffered_file).run(io, gpa, w, only, .linked_append, linked_n, inputs);
+    try Bench(.file).run(io, gpa, w, only, .linked_append, linked_file_n, inputs);
+    try Bench(.memory).run(io, gpa, w, only, .sorted_insert, sorted_n, inputs);
+    try Bench(.buffered_file).run(io, gpa, w, only, .sorted_insert, sorted_n, inputs);
+    try Bench(.file).run(io, gpa, w, only, .sorted_insert, sorted_file_n, inputs);
 }
