@@ -21,8 +21,9 @@ independent of the Swift code.
 - `tests/undefined/`: what happens with the uses `SCRIPT-FORMAT.md` calls undefined, as scripts and through the
   collection wrappers. Some of it crashes the engine, so none of it is among the fixtures.
 - `src/gen.zig`: `gen <seed> <out.script>`, which writes a valid random script, with reads through it if given `--reads`,
-  ending with a compaction if given `--compact`, and with a sync to a replica if given `--replicate`. `tests/generated/` has the ones that are committed, which
-  `gen-fixed.sh` writes, and `gen-live.sh <how many>` runs as many fresh seeds as you like.
+  ending with a compaction if given `--compact`, with a sync to a replica if given `--replicate`, and keeping off what the
+  port changes if given `--port-safe`. `tests/generated/` has the ones that are committed, which `gen-fixed.sh` writes, and
+  `gen-live.sh <how many>` runs as many fresh seeds as you like, or `PORT_SAFE=yes ./gen-live.sh <how many>` with `--port-safe`.
 - `fixtures/`: every script with what Zig produces for it, which the Swift package copies into its test resources.
   `fixtures.sh` regenerates it, and `src/manifest.zig` lists what each script needs.
 - `src/coverage.zig`: `coverage <script>...`, which checks that the scripts use everything in the format.

@@ -1,4 +1,4 @@
-//! gen <seed> <out.script> [--ops <top-level ops>] [--reads] [--compact] [--replicate]
+//! gen <seed> <out.script> [--ops <top-level ops>] [--reads] [--compact] [--replicate] [--port-safe]
 //!
 //! Writes a valid random script. The same seed always gives the same script.
 //!
@@ -15,6 +15,16 @@
 //! With --replicate the script ends by syncing a new database with what it made: up to
 //! one of its commits from 0, which makes a database as of that commit, and then the
 //! rest. Each step's result is compared with the source.
+//!
+//! With --port-safe the script keeps off what the Swift port changes after its parity
+//! gate (PORT-IMPACT.md), so that Zig's result for it is what the port has to give. It
+//! writes through no cursor from an earlier transaction, or from before a freeze other
+//! than with an init. It leaves out a cursor's freeze, a concat, a skipped init or
+//! anything else that writes into committed bytes, a write_if_empty whose snapshot and
+//! slot disagree about being empty, and handling an error from an op that wrote something,
+//! which goes up and rolls back instead. It goes on reading through a cursor from before a
+//! freeze, which stays valid. The same seed gives another script than it does without
+//! this, and that one doesn't change.
 //!
 //! The model of the database that a generator needs is the database: this drives
 //! the real engine as it writes, in memory. It looks at what's there to choose
@@ -92,6 +102,7 @@ fn Gen(comptime HashInt: type) type {
         const Data = DB.WriteableData;
         const HASH_SIZE = @bitSizeOf(HashInt) / 8;
         const TRAILER_SIZE = 25;
+        const ROOT_HEADER_START = 20;
 
         const Ctx = struct {
             g: *Self,
@@ -100,7 +111,7 @@ fn Gen(comptime HashInt: type) type {
             pub fn run(self: Ctx, cursor: *RW) anyerror!void {
                 const g = self.g;
                 const index = g.kept.items.len;
-                g.kept.append(g.arena, .{ .name = self.name, .cursor = cursor.* }) catch oom();
+                g.kept.append(g.arena, .{ .name = self.name, .cursor = cursor.*, .freezes = g.freezes }) catch oom();
                 g.enter();
                 defer g.leave();
                 try g.body(index);
@@ -108,7 +119,12 @@ fn Gen(comptime HashInt: type) type {
             }
         };
 
-        const Named = struct { name: []const u8, cursor: RW };
+        const Named = struct {
+            name: []const u8,
+            cursor: RW,
+            // how many freezes there had been by the time it was made
+            freezes: u64 = 0,
+        };
         const Commit = struct { size: u64, root: [9]u8 };
 
         const PathB = struct {
@@ -161,6 +177,11 @@ fn Gen(comptime HashInt: type) type {
         reads: bool,
         read_rng: Rng,
         read_names: usize = 1_000_000_000,
+        // whether to keep off what the port changes, what that needs to know about the freezes
+        // so far, and for each depth, what the file held when its latest op began
+        port_safe: bool,
+        freezes: u64 = 0,
+        op_start: [MAX_DEPTH + 3]u64 = @splat(0),
 
         // names
 
@@ -189,6 +210,7 @@ fn Gen(comptime HashInt: type) type {
             try self.w.flush();
             if (self.has_ops[self.depth]) try self.w.writeAll(",");
             self.has_ops[self.depth] = true;
+            if (self.port_safe) self.op_start[self.depth] = std.hash.Wyhash.hash(0, self.buffer.written());
             try self.w.writeAll("\n");
             for (0..(self.depth + 2) * 2) |_| try self.w.writeAll(" ");
         }
@@ -228,6 +250,8 @@ fn Gen(comptime HashInt: type) type {
         /// upward, and otherwise says it was expected.
         fn noteError(self: *Self, err: anyerror) anyerror!bool {
             if (!expectable(err)) fail("the engine raised {s}, which a script can't expect", .{@errorName(err)});
+            // the port doesn't let a transaction commit after an op failed having written something
+            if (self.port_safe and self.depth > 0 and std.hash.Wyhash.hash(0, self.buffer.written()) != self.op_start[self.depth]) return true;
             if (self.depth > 0 and !self.tx_dirty and self.rng.chance(15)) return true;
             try self.w.print(",\"expect_error\":\"{s}\"", .{@errorName(err)});
             if (self.depth == 0) self.top_failed = true;
@@ -339,7 +363,9 @@ fn Gen(comptime HashInt: type) type {
             // the trees are left out, because a later init would copy their committed header
             // while it points at a node from this transaction, which gives two headers one tree
             const hash_or_array = tag == .hash_map or tag == .counted_hash_map or tag == .hash_set or tag == .counted_hash_set or tag == .array_list;
-            if (hash_or_array and self.depth > 0 and self.rng.chance(3)) {
+            // with --port-safe this never happens, as a transaction that has done it mustn't fail,
+            // and an op that failed having written something has to fail it
+            if (!self.port_safe and hash_or_array and self.depth > 0 and self.rng.chance(3)) {
                 self.tx_dirty = true;
             } else {
                 self.addInit(p, tag);
@@ -437,6 +463,18 @@ fn Gen(comptime HashInt: type) type {
             // now and then, something that doesn't fit, for the error it raises. it can
             // fit after all, and with no init part before it, that writes into committed bytes
             if (self.rng.chance(3)) {
+                if (self.port_safe) {
+                    // with --port-safe only what can't fit, so that it never writes into committed
+                    // bytes, and a transaction can always fail (see maybeInit)
+                    if (self.sorted_allowed and self.rng.chance(50)) {
+                        self.add(p, .{ .sorted_map_get_index = 0 }, "{\"sorted_map_get_index\":0}");
+                    } else if (tag == .array_list) {
+                        self.addHashGet(p, .value);
+                    } else {
+                        self.add(p, .array_list_append, "\"array_list_append\"");
+                    }
+                    return;
+                }
                 if (self.depth > 0) self.tx_dirty = true;
                 switch (self.rng.below(5)) {
                     0 => self.add(p, .array_list_append, "\"array_list_append\""),
@@ -613,7 +651,7 @@ fn Gen(comptime HashInt: type) type {
             if (result) |next| {
                 if (bind) {
                     const name = self.fresh("c");
-                    self.kept.append(self.arena, .{ .name = name, .cursor = next }) catch oom();
+                    self.kept.append(self.arena, .{ .name = name, .cursor = next, .freezes = self.freezes }) catch oom();
                     try self.w.print(",\"as\":\"{s}\"", .{name});
                 }
                 try self.endOp();
@@ -748,7 +786,7 @@ fn Gen(comptime HashInt: type) type {
                 }
                 try self.writePath(on.name, on.cursor, &p, false);
             }
-            if (collection == .linked_array_list and self.depth == 1) try self.concat(index, hash_get, get_json);
+            if (!self.port_safe and collection == .linked_array_list and self.depth == 1) try self.concat(index, hash_get, get_json);
 
             // what came of it, through the cursor as it is now, since a concat rebinds it
             const current = self.at(index);
@@ -831,12 +869,37 @@ fn Gen(comptime HashInt: type) type {
             try self.w.flush();
             if (on.cursor.writePath(Ctx, p.parts.items)) |next| {
                 self.kept.items[index].cursor = next;
+                self.kept.items[index].freezes = self.freezes;
                 try self.endOp();
             } else |err| {
                 const upward = try self.noteError(err);
                 try self.endOp();
                 if (upward) return err;
             }
+        }
+
+        /// with --port-safe, what a write through this cursor needs if it's from before a freeze,
+        /// which is an init through it, as that's still allowed. it says whether there's a way
+        /// to write through it now, and there isn't if it's not at a collection.
+        fn refresh(self: *Self, index: usize) anyerror!bool {
+            if (self.kept.items[index].freezes == self.freezes) return true;
+            const tag = peekTag(self.at(index).cursor, &.{});
+            switch (tag) {
+                .hash_map, .counted_hash_map, .hash_set, .counted_hash_set, .array_list, .linked_array_list, .sorted_map, .sorted_set => {},
+                else => return false,
+            }
+            try self.reinit(index, tag);
+            return self.kept.items[index].freezes == self.freezes;
+        }
+
+        /// whether write_if_empty does the same by the snapshot as by the slot as it is now
+        fn snapshotAgrees(self: *Self, cursor: RW) bool {
+            const position = cursor.slot_ptr.position orelse return true;
+            // a root cursor reads the last commit, so it's never stale
+            if (position == ROOT_HEADER_START) return true;
+            const bytes = self.buffer.written()[@intCast(position)..][0..9];
+            const current: Slot = @bitCast(std.mem.readInt(u72, bytes, .big));
+            return current.empty() == cursor.slot_ptr.slot.empty();
         }
 
         fn nested(self: *Self, index: usize) anyerror!void {
@@ -873,7 +936,7 @@ fn Gen(comptime HashInt: type) type {
         /// the callback's own cursor, unless that's nested: writing a value over the
         /// moment itself would leave nothing to build on from then on.
         fn someKept(self: *Self, base: usize) ?usize {
-            if (self.tx_kept_start > 0 and self.rng.chance(5)) {
+            if (!self.port_safe and self.tx_kept_start > 0 and self.rng.chance(5)) {
                 self.tx_dirty = true;
                 return self.rng.below(self.tx_kept_start);
             }
@@ -887,7 +950,8 @@ fn Gen(comptime HashInt: type) type {
             const index = self.someKept(base) orelse return self.writeSomething(base);
             const name = self.at(index).name;
             const v = self.value();
-            const ifEmpty = self.rng.chance(25);
+            var ifEmpty = self.rng.chance(25);
+            if (self.port_safe and !self.snapshotAgrees(self.kept.items[index].cursor)) ifEmpty = false;
             try self.beginOp();
             try self.w.print("{{\"op\":\"{s}\",\"on\":\"{s}\",\"data\":{s}", .{ if (ifEmpty) "write_if_empty" else "write", name, v.json });
             const cursor = &self.kept.items[index].cursor;
@@ -937,6 +1001,8 @@ fn Gen(comptime HashInt: type) type {
             self.tx_cloned = false;
             self.tx_frozen_cursor = false;
             self.tx_concat = false;
+            self.freezes += 1;
+            if (self.port_safe) self.first_safe_kept = self.kept.items.len;
         }
 
         fn freezeSomething(self: *Self, base: usize) anyerror!void {
@@ -1007,7 +1073,7 @@ fn Gen(comptime HashInt: type) type {
                 return;
             }
 
-            if (self.rng.chance(50)) {
+            if (!self.port_safe and self.rng.chance(50)) {
                 try self.beginOp();
                 try self.w.print("{{\"op\":\"freeze\",\"on\":\"{s}\"}}", .{self.at(target).name});
                 try self.kept.items[target].cursor.freeze();
@@ -1354,6 +1420,12 @@ fn Gen(comptime HashInt: type) type {
                     try self.extraRead(on.name, on.cursor);
                 }
                 const r = self.rng.below(100);
+                if (self.port_safe) {
+                    // reading through this cursor stays valid if it's from before a freeze, and so
+                    // does freezing, and the root is another cursor. anything else starts it again
+                    const leaves_it = (r >= 36 and r < 48) or (r >= 77 and r < 82) or (self.history and r >= 82 and r < 86) or (r >= 95 and r < 98);
+                    if (!leaves_it and !try self.refresh(base)) continue;
+                }
                 if (r < 36) {
                     try self.writeSomething(base);
                 } else if (r < 48) {
@@ -1610,7 +1682,7 @@ fn Gen(comptime HashInt: type) type {
     };
 }
 
-fn run(comptime HashInt: type, io: Io, arena: Allocator, gpa: Allocator, seed: u64, ops: u64, reads: bool, compact: bool, also_replicate: bool, out_path: []const u8) !void {
+fn run(comptime HashInt: type, io: Io, arena: Allocator, gpa: Allocator, seed: u64, ops: u64, reads: bool, compact: bool, also_replicate: bool, port_safe: bool, out_path: []const u8) !void {
     const G = Gen(HashInt);
     const hash_size = @bitSizeOf(HashInt) / 8;
 
@@ -1628,10 +1700,11 @@ fn run(comptime HashInt: type, io: Io, arena: Allocator, gpa: Allocator, seed: u
     var out_writer = out.writerStreaming(io, &out_buffer);
     const w = &out_writer.interface;
 
-    try w.print("{{\n  \"format\": \"{s}\",\n  \"description\": \"Generated by gen from seed {d}{s}.\",\n  \"hash_size\": {d},\n  \"hash_id\": {s},\n  \"file_id\": \"{x:0>16}\",\n  \"ops\": [", .{
+    try w.print("{{\n  \"format\": \"{s}\",\n  \"description\": \"Generated by gen from seed {d}{s}{s}.\",\n  \"hash_size\": {d},\n  \"hash_id\": {s},\n  \"file_id\": \"{x:0>16}\",\n  \"ops\": [", .{
         SCRIPT_FORMAT,
         seed,
         if (reads and compact and also_replicate) ", with reads, a compaction and a replica" else if (reads and compact) ", with reads and a compaction" else if (reads) ", with reads" else if (compact) ", with a compaction" else if (also_replicate) ", with a replica" else "",
+        if (port_safe) ", keeping off what the port changes" else "",
         hash_size,
         if (hash_size == 20) "\"sha1\"" else "null",
         file_id,
@@ -1640,7 +1713,7 @@ fn run(comptime HashInt: type, io: Io, arena: Allocator, gpa: Allocator, seed: u
     var buffer = Io.Writer.Allocating.init(gpa);
     defer buffer.deinit();
 
-    var g: G = .{ .io = io, .arena = arena, .rng = rng, .w = w, .buffer = &buffer, .read_only_allowed = read_only_allowed, .linked_allowed = linked_allowed, .sorted_allowed = sorted_allowed, .history = history, .reads = reads, .read_rng = .{ .state = seed ^ 0x5245414453 } };
+    var g: G = .{ .io = io, .arena = arena, .rng = rng, .w = w, .buffer = &buffer, .read_only_allowed = read_only_allowed, .linked_allowed = linked_allowed, .sorted_allowed = sorted_allowed, .history = history, .reads = reads, .read_rng = .{ .state = seed ^ 0x5245414453 }, .port_safe = port_safe };
     g.db = try G.DB.init(io, .{ .buffer = &buffer, .file_id = file_id });
 
     try g.generate(ops, compact, also_replicate);
@@ -1655,7 +1728,7 @@ pub fn main(init: std.process.Init) !void {
 
     const args = try init.minimal.args.toSlice(arena);
     if (args.len < 3) {
-        std.debug.print("usage: gen <seed> <out.script> [--ops <top-level ops>] [--reads] [--compact] [--replicate]\n", .{});
+        std.debug.print("usage: gen <seed> <out.script> [--ops <top-level ops>] [--reads] [--compact] [--replicate] [--port-safe]\n", .{});
         std.process.exit(2);
     }
     const seed = std.fmt.parseInt(u64, args[1], 10) catch fail("the seed must be a number", .{});
@@ -1663,6 +1736,7 @@ pub fn main(init: std.process.Init) !void {
     var reads = false;
     var compact = false;
     var also_replicate = false;
+    var port_safe = false;
     var arg_index: usize = 3;
     while (arg_index < args.len) : (arg_index += 1) {
         if (std.mem.eql(u8, args[arg_index], "--reads")) {
@@ -1671,16 +1745,18 @@ pub fn main(init: std.process.Init) !void {
             compact = true;
         } else if (std.mem.eql(u8, args[arg_index], "--replicate")) {
             also_replicate = true;
+        } else if (std.mem.eql(u8, args[arg_index], "--port-safe")) {
+            port_safe = true;
         } else if (std.mem.eql(u8, args[arg_index], "--ops") and arg_index + 1 < args.len) {
             arg_index += 1;
             ops = std.fmt.parseInt(u64, args[arg_index], 10) catch fail("--ops must be a number", .{});
-        } else fail("the options are --ops, --reads, --compact and --replicate", .{});
+        } else fail("the options are --ops, --reads, --compact, --replicate and --port-safe", .{});
     }
 
     // a few scripts use a short hash, written in hex
     if (seed % 8 == 7) {
-        try run(u64, io, arena, init.gpa, seed, ops, reads, compact, also_replicate, args[2]);
+        try run(u64, io, arena, init.gpa, seed, ops, reads, compact, also_replicate, port_safe, args[2]);
     } else {
-        try run(u160, io, arena, init.gpa, seed, ops, reads, compact, also_replicate, args[2]);
+        try run(u160, io, arena, init.gpa, seed, ops, reads, compact, also_replicate, port_safe, args[2]);
     }
 }

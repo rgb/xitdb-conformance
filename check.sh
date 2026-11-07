@@ -2,7 +2,7 @@
 # The gate for this repository. It stops at the first problem.
 #
 # 1. everything builds, gen and longscripts still write the scripts that are committed,
-#    and reads change no bytes;
+#    gen --port-safe keeps off what the port changes, and reads change no bytes;
 # 2. every script runs, twice, and the two files differ only in the commit ID and
 #    checksum of each trailer (see src/detcheck.zig for exactly what's checked);
 # 3. the storage kind and the optimization level make no difference to the bytes;
@@ -40,6 +40,9 @@ RELEASE_RUN=out/release/bin/run
 
 echo "== the generated scripts"
 ./gen-fixed.sh --check
+
+echo "== gen --port-safe keeps off what the port changes"
+PORT_SAFE=yes OUT="$OUT/live-port-safe" ./gen-live.sh 20
 
 echo "== reads change no bytes"
 # the same seed gives the same writes with or without reads

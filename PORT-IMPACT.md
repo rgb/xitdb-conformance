@@ -49,6 +49,33 @@ which is worth holding the port to. It doesn't work for finding 17, which change
 | [D18](#d18-refusing-a-write-from-before-a-freeze) | A write from before a freeze is refused | 2, and 1 reproduction | 31 | `.port` variant, new from `gen`. An init and a read through such a cursor go on working |
 | [D19](#d19-opening-a-file-whose-root-header-cant-be-trusted) | A file whose root header can't be trusted opens at its last good trailer | 3, and none of the 3 failing ones | 0 | `.port` variant, reads only |
 
+## A generator that keeps off all of this
+
+`gen --port-safe` writes scripts that do none of what's listed here, so Zig's result for one is what the port has to give, on
+any seed, before or after these changes go in. The scripts already committed don't change, and neither does what `gen` writes
+without it. `PORT_SAFE=yes ./gen-live.sh <how many>` holds each script to that with `run --note-port-changes`, and the gate
+runs 20. The notes that stay allowed are `18-init`, `18-reads`, `18-reads-earlier` and `1-raises`, which stay valid on the port.
+
+| Item | What it does instead |
+|---|---|
+| 1 | No write through a cursor from an earlier transaction |
+| 2, 3, 12, D19 | `gen` doesn't do these anyway |
+| 16 | An error from an op that wrote something goes up, and rolls the transaction back |
+| 17 | `write_if_empty` only where the snapshot and the slot agree about being empty |
+| 22 | No concat |
+| 23 | No cursor's freeze |
+| D18 | A write through a cursor from before a freeze only after an init through it. Reads through one go on |
+
+**What it costs.** It has no concat, no cursor's freeze, and nothing that writes into committed bytes, so also no skipped init,
+as a transaction that has done that can't be rolled back (`SCRIPT-FORMAT.md` section 10). A path that doesn't fit is always
+one that can't. The committed fixtures go on covering all of those. Over 300 seeds, the other ops come to about the same
+number as without it.
+
+**What was measured.** 2000 fresh seeds went through `gen-live.sh` with no failures. 1000 scripts from it have the same bytes on
+Zig at `6b93af1` and at `185af01`, which has the fixes for findings 2, 8, 9, 17 and 22. Of 1000 scripts from the same seeds
+without it, 55 have different bytes there, and 87 fail, some of them only because a size that `gen` wrote down has moved. This
+can only say what Zig does and what `run` notes. The port's guards don't exist yet, so nothing here has run on them.
+
 ## Finding 1: a write through a cursor from a finished transaction
 
 The port makes this an error. There are two cases, because of what Zig does today.
