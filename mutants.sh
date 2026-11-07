@@ -48,9 +48,22 @@ patch_lib() { # old text, new text, which occurrence
 
 failed=0
 thin=0
+tried=0
 
 try_mutant() { # name, old text, new text, which occurrence
     name=$1
+    # MUTANTS_ONLY is for trying some of them, as a list of patterns for their names
+    wanted=no
+    set -f
+    for pattern in ${MUTANTS_ONLY:-*}; do
+        # shellcheck disable=SC2254
+        case "$name" in
+            $pattern) wanted=yes ;;
+        esac
+    done
+    set +f
+    if [ "$wanted" = no ]; then return 0; fi
+    tried=$((tried + 1))
     cp "$WORK/lib.original.zig" "$WORK/zig/src/lib.zig"
     patch_lib "$2" "$3" "${4:-1}"
     if cmp -s "$WORK/lib.original.zig" "$WORK/zig/src/lib.zig"; then
@@ -134,8 +147,8 @@ try_mutant compact-hash-id-not-inherited "opts.hash_id = target_opts.hash_id ore
 try_mutant compact-hash-id-always-the-source-s "opts.hash_id = target_opts.hash_id orelse self.header.hash_id;" "opts.hash_id = self.header.hash_id;"
 try_mutant compact-loses-format-tags "const format_tag_size: u64 = if (slot.full) 2 else 0;" "const format_tag_size: u64 = if (slot.full and false) 2 else 0;"
 try_mutant compact-loses-full "return .{ .value = new_offset, .tag = slot.tag, .full = slot.full };" "return .{ .value = new_offset, .tag = slot.tag, .full = false };"
-try_mutant compact-memory-offsets-not-cleared "offset_map.clearRetainingCapacity();" "_ = offset_map;"
-try_mutant compact-disk-offsets-not-cleared "try offset_map.reset();" "_ = offset_map;"
+try_mutant compact-memory-offsets-not-cleared "offset_map.clearRetainingCapacity();" "// not cleared"
+try_mutant compact-disk-offsets-not-cleared "try offset_map.reset();" "// not reset"
 try_mutant compact-bytes-not-shared "if (try self.getOffset(slot.value)) |target_offset| {" "if (if (slot.value == slot.value) @as(?u64, null) else try self.getOffset(slot.value)) |target_offset| {"
 try_mutant compact-objects-not-shared "if (try self.getOffset(source_offset)) |target_offset| {" "if (if (source_offset == source_offset) @as(?u64, null) else try self.getOffset(source_offset)) |target_offset| {"
 # replication
@@ -167,6 +180,10 @@ try_mutant apply-leaves-root-header "try self.core.sync();
                 _ = trailer;"
 try_mutant trailer-checksum-not-checked "if (trailer.checksum != RootTrailer.computeChecksum(self.header.file_id, trailer_pos, trailer.root, trailer.commit_id)) return error.InvalidDatabase;" "if (trailer.checksum != RootTrailer.computeChecksum(self.header.file_id, trailer_pos, trailer.root, trailer.commit_id) and false) return error.InvalidDatabase;"
 
+if [ "$tried" -eq 0 ]; then
+    echo "MUTANTS_ONLY matched no mutants"
+    exit 1
+fi
 if [ "$failed" -gt 0 ]; then
     echo "$failed mutants got past every script"
     exit 1
@@ -175,4 +192,4 @@ if [ "$thin" -gt 0 ]; then
     echo "$thin mutants were noticed by only one script"
     exit 1
 fi
-echo "every mutant was noticed by more than one script"
+echo "all $tried mutants were noticed by more than one script"

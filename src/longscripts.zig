@@ -681,6 +681,45 @@ fn compactPartialBlocks(w: *Io.Writer) !void {
     try end(w);
 }
 
+/// a full block is the one thing a list's compaction remembers having copied, so it needs
+/// a list that shares one with another list to show
+fn compactFullBlocks(w: *Io.Writer) !void {
+    var s = try begin(w, "Compacting array lists that share full blocks. Each full block is copied once, and the target's lists go on sharing it, while a partial one is copied for each list that has it. The lists are sizes that end on and just past a block, at two levels.");
+
+    try s.beginMoment();
+    for ([_]u64{ 16, 32, 40, 256, 272 }) |size| {
+        for (0..size) |i| {
+            try s.write("{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"original-{d}\"}}}}}},\"array_list_init\",\"array_list_append\",{{\"write\":{{\"uint\":{d}}}}}", .{ size, i });
+        }
+    }
+    try s.endMoment();
+
+    // clones in a later transaction, so that what they share is what the first one made.
+    // each gets a new element, which only copies the blocks on its way there
+    try s.beginMoment();
+    for ([_]u64{ 16, 32, 40, 256, 272 }) |size| {
+        try s.op("{{\"op\":\"read_path_slot\",\"on\":\"m\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"original-{d}\"}}}}}}],\"as\":\"original\"}}", .{size});
+        try s.write("{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"clone-{d}\"}}}}}},{{\"write\":{{\"slot\":{{\"var\":\"original\"}}}}}}", .{size});
+        try s.write("{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"clone-{d}\"}}}}}},\"array_list_init\",\"array_list_append\",{{\"write\":{{\"uint\":{d}}}}}", .{ size, 1000 + size });
+    }
+    try s.endMoment();
+
+    try s.op("{{\"op\":\"compact\",\"into\":\"target\",\"file_id\":\"00000000000000bb\",\"offset_map\":\"memory\"}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"target\"}}", .{});
+    try s.readMoment(0);
+    for ([_]u64{ 16, 32, 40, 256, 272 }) |size| {
+        try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"original-{d}\"}}}}}}],\"as\":\"list\"}}", .{size});
+        try s.op("{{\"op\":\"count\",\"on\":\"list\",\"expect\":{d}}}", .{size});
+        try s.op("{{\"op\":\"read_path\",\"on\":\"list\",\"path\":[{{\"array_list_get\":{d}}}],\"as\":\"v\"}}", .{size - 1});
+        try s.op("{{\"op\":\"read_uint\",\"on\":\"v\",\"expect\":{d}}}", .{size - 1});
+        try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"clone-{d}\"}}}}}}],\"as\":\"list\"}}", .{size});
+        try s.op("{{\"op\":\"count\",\"on\":\"list\",\"expect\":{d}}}", .{size + 1});
+        try s.op("{{\"op\":\"read_path\",\"on\":\"list\",\"path\":[{{\"array_list_get\":{d}}}],\"as\":\"v\"}}", .{size});
+        try s.op("{{\"op\":\"read_uint\",\"on\":\"v\",\"expect\":{d}}}", .{1000 + size});
+    }
+    try end(w);
+}
+
 // replication
 
 /// a replica sends its state, and the source sends back what it doesn't have yet. `first`
@@ -882,6 +921,7 @@ const SCRIPTS = [_]Script{
     .{ .name = "iterator-tiers-linked", .write = iteratorTiersLinked },
     .{ .name = "iterator-tiers-sorted", .write = iteratorTiersSorted },
     .{ .name = "compact-partial-blocks", .write = compactPartialBlocks },
+    .{ .name = "compact-full-blocks", .write = compactFullBlocks },
     .{ .name = "replicate-history", .write = replicateHistory },
     .{ .name = "replicate-roots", .write = replicateRoots },
 };

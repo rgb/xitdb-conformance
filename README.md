@@ -29,6 +29,8 @@ independent of the Swift code.
   it with `zig build -Doptimize=ReleaseFast --prefix out/release` and run `out/release/bin/bench`.
 - `mutants.sh`: makes copies of the Zig original that get copying or rewriting in place wrong, and compaction and
   replication wrong, one place at a time, and shows which scripts notice. It isn't part of the gate, as it's slow.
+- `PORT-IMPACT.md`: which scripts rely on what the port changes after its parity gate, and what would happen to each.
+  `impact.sh` keeps its lists to what the scripts do, and `impact.sh --prototypes` tries three of the changes on copies of Zig.
 - `second-zig.sh <checkout>`: runs all of this against another commit of the Zig implementation, and says what differs.
 - `check.sh`: the gate. It builds everything and checks all of the above, in debug and release builds and across
   all three storage kinds.

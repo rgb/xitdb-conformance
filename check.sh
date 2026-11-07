@@ -14,8 +14,9 @@
 # 7. the hand-written scripts use everything in the format;
 # 8. the fixtures haven't drifted from what the scripts produce now, and that check
 #    notices drift;
-# 9. second-zig.sh finds nothing against this same Zig, and notices what's changed;
-# 10. detcheck itself notices a changed byte.
+# 9. PORT-IMPACT.md's lists are what the scripts do;
+# 10. second-zig.sh finds nothing against this same Zig, and notices what's changed;
+# 11. detcheck itself notices a changed byte.
 
 set -eu
 cd "$(dirname "$0")"
@@ -78,8 +79,8 @@ for script in "$OUT"/long/*.json; do
     }
     count=$((count + 1))
 done
-if [ "$count" -ne 9 ]; then
-    echo "longscripts should write 9 scripts, and it wrote $count"
+if [ "$count" -ne 10 ]; then
+    echo "longscripts should write 10 scripts, and it wrote $count"
     exit 1
 fi
 echo "longscripts still writes the $count scripts that are committed"
@@ -419,6 +420,25 @@ fresh_copy
 printf ' ' >> "$COPY/README.md"
 expect_drift "a changed README" "README.md has drifted"
 rm -rf "$COPY"
+
+echo "== what the port will change"
+./impact.sh --check
+# and that it can notice, as a list out of date is the failure it's for
+sed 's/^- `tests\/valid`: every-construct-sorted (1)$/- `tests\/valid`: nothing/' PORT-IMPACT.md > "$OUT/impact-edited.md"
+if cmp -s PORT-IMPACT.md "$OUT/impact-edited.md"; then
+    echo "the list this expected to change isn't in PORT-IMPACT.md any more"
+    exit 1
+fi
+if IMPACT_DOC="$OUT/impact-edited.md" ./impact.sh --check > "$OUT/impact.out" 2>&1; then
+    echo "impact.sh didn't notice a list out of date"
+    exit 1
+fi
+if ! grep -qF "aren't what the scripts do" "$OUT/impact.out"; then
+    echo "impact.sh rejected a list out of date for the wrong reason:"
+    cat "$OUT/impact.out"
+    exit 1
+fi
+echo "impact.sh notices a list out of date"
 
 echo "== second-zig.sh"
 # against this same Zig commit, where there's nothing for it to find

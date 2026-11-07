@@ -1,4 +1,4 @@
-//! run <script> <out.db> [--kind buffered_file|file|memory] [--allow-port-differences]
+//! run <script> <out.db> [--kind buffered_file|file|memory] [--allow-port-differences] [--note-port-changes]
 //!
 //! Executes a conformance script (see SCRIPT-FORMAT.md) against the Zig
 //! implementation and writes the database to <out.db> and the sidecar to
@@ -19,6 +19,10 @@
 //! section 10), so a valid script can't use them, and this refuses to run one that
 //! does. --allow-port-differences lets through the scripts in tests/port-differs,
 //! which exist to show what each implementation does there.
+//!
+//! --note-port-changes prints a line beginning `change` for each place a script
+//! relies on something the port will change after its parity gate, which is what
+//! impact.sh makes PORT-IMPACT.md from. It doesn't change what's run.
 
 const std = @import("std");
 const xitdb = @import("xitdb");
@@ -357,6 +361,7 @@ const Options = struct {
     hash_id: ?xitdb.HashId,
     out_path: []const u8,
     allow_port_differences: bool,
+    note_port_changes: bool,
 };
 
 /// what `offset_map: "disk"` keeps the offsets in, as test.zig does
@@ -438,6 +443,8 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             size_before: ?u64 = null,
             // the trailers of commits that are in its file
             trailers: std.ArrayList(Trailer) = .empty,
+            // how many freezes it has had, including a concat's
+            freezes: u64 = 0,
         };
 
         const Entry = struct {
@@ -446,6 +453,10 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             born: usize,
             // how many writes had been run by then, to find changes under an iterator
             writes: u64,
+            // for --note-port-changes: how many freezes its database had had by then, and
+            // whether it's the key cursor of a sorted pair
+            freezes: u64 = 0,
+            sorted_key: bool = false,
         };
 
         /// the callback of a `ctx` path part. the callback's cursor is bound to
@@ -462,6 +473,8 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 defer loc_len = saved_loc;
 
                 r.bind(self.name, .{ .rw = cursor.* });
+                r.callback_depth += 1;
+                defer r.callback_depth -= 1;
                 try r.execOps(self.ops);
 
                 switch (r.env.get(self.name).?.binding) {
@@ -494,6 +507,11 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         writes: u64 = 0,
         writes_after_op: std.ArrayList(u64) = .empty,
         allow_port_differences: bool = false,
+        note_port_changes: bool = false,
+        callback_depth: usize = 0,
+        // where in this transaction a failed op left something behind, which only
+        // matters if the transaction goes on to commit
+        failed_with_writes: std.ArrayList([]const u8) = .empty,
         // the storage behind a `root` reference by pointer
         root_cursor: RW = undefined,
 
@@ -722,7 +740,11 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         // names
 
         fn bind(self: *Self, name: []const u8, binding: Binding) void {
-            self.env.put(self.arena, name, .{ .binding = binding, .born = self.top_index, .writes = self.writes }) catch die("out of memory", .{});
+            var freezes: u64 = 0;
+            if (binding == .rw) {
+                if (self.storeOf(binding.rw.db)) |store| freezes = store.freezes;
+            }
+            self.env.put(self.arena, name, .{ .binding = binding, .born = self.top_index, .writes = self.writes, .freezes = freezes }) catch die("out of memory", .{});
         }
 
         fn entryFor(self: *Self, name: []const u8) *Entry {
@@ -786,6 +808,87 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
 
         fn wrapIterator(iter: anytype) Binding {
             return if (@TypeOf(iter) == *RW.Iter) .{ .iter_rw = iter } else .{ .iter_ro = iter };
+        }
+
+        fn storeOf(self: *Self, db: *DB) ?*Store {
+            for (self.stores.items) |store| {
+                if (&store.db == db) return store;
+            }
+            return null;
+        }
+
+        fn noteChange(self: *Self, comptime id: []const u8) void {
+            std.debug.print("change {s} {s}\n", .{ id, loc_buf[0..loc_len] });
+            _ = self;
+        }
+
+        /// what the port's guards will have to say about a write through this name
+        fn noteWrite(self: *Self, name: []const u8, path: ?[]const Json) void {
+            if (!self.note_port_changes) return;
+            if (isKey(name, "root")) return;
+            const entry = self.env.getPtr(name) orelse return;
+            const cursor = switch (entry.binding) {
+                .rw => |c| c,
+                else => return,
+            };
+            // each write through a root cursor is a transaction of its own
+            if (cursor.slot_ptr.position == ROOT_HEADER_START) return;
+
+            if (entry.sorted_key) self.noteChange("2");
+            if (entry.born != self.top_index) {
+                if (cursor.db.tx_start != null) self.noteChange("1-writes") else self.noteChange("1-raises");
+                return;
+            }
+            const store = self.storeOf(cursor.db) orelse return;
+            if (entry.freezes < store.freezes) {
+                const only_init = if (path) |parts| parts.len == 1 and isInitPart(parts[0]) else false;
+                if (only_init) self.noteChange("18-init") else self.noteChange("18-other");
+            }
+        }
+
+        fn isInitPart(part: Json) bool {
+            const name = switch (part) {
+                .string => |s| s,
+                .object => |o| o.keys()[0],
+                else => return false,
+            };
+            return std.mem.endsWith(u8, name, "_init");
+        }
+
+        fn partName(part: Json) []const u8 {
+            return switch (part) {
+                .string => |s| s,
+                .object => |o| o.keys()[0],
+                else => "",
+            };
+        }
+
+        fn notePath(self: *Self, path: []const Json) void {
+            if (!self.note_port_changes) return;
+            for (path, 0..) |part, i| {
+                const name = partName(part);
+                if (isKey(name, "linked_array_list_concat")) self.noteChange("22");
+                if ((isKey(name, "hash_map_remove") or isKey(name, "sorted_map_remove")) and i + 1 < path.len) self.noteChange("12");
+            }
+        }
+
+        /// write_if_empty goes by the snapshot, and the port will go by the slot as it is now
+        fn noteWriteIfEmpty(self: *Self, name: []const u8) !void {
+            if (!self.note_port_changes or isKey(name, "root")) return;
+            const entry = self.env.getPtr(name) orelse return;
+            const cursor = switch (entry.binding) {
+                .rw => |c| c,
+                else => return,
+            };
+            const position = cursor.slot_ptr.position orelse return;
+            if (position == ROOT_HEADER_START) return;
+            var reader = cursor.db.core.reader();
+            try reader.seekTo(position);
+            var bytes: [9]u8 = undefined;
+            try reader.interface.readSliceAll(&bytes);
+            const current: Slot = @bitCast(std.mem.readInt(u72, &bytes, .big));
+            if (cursor.slot_ptr.slot.empty() and !current.empty()) self.noteChange("17-overwrites");
+            if (!cursor.slot_ptr.slot.empty() and current.empty()) self.noteChange("17-holds-back");
         }
 
         /// the behaviours a valid script can't use, because the port corrects them
@@ -1036,7 +1139,20 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         /// ops, the way `try` would in a Zig callback.
         fn execOp(self: *Self, op: ObjectMap) anyerror!void {
             const expected: ?[]const u8 = if (op.get("expect_error")) |v| v.string else null;
+            // a failed op that left something behind, which only the memory kind can tell
+            const before: ?[]const u8 = if (self.note_port_changes and kind == .memory and expected != null and self.callback_depth > 0)
+                self.arena.dupe(u8, self.store.buffer.written()) catch die("out of memory", .{})
+            else
+                null;
             const result = self.dispatch(op);
+            if (before) |bytes| {
+                if (result) |_| {} else |_| {
+                    if (!std.mem.eql(u8, bytes, self.store.buffer.written())) {
+                        const where = self.arena.dupe(u8, loc_buf[0..loc_len]) catch die("out of memory", .{});
+                        self.failed_with_writes.append(self.arena, where) catch die("out of memory", .{});
+                    }
+                }
+            }
             if (result) |_| {} else |_| noteErrorLoc();
             const want = expected orelse return result;
             if (result) |_| {
@@ -1376,7 +1492,10 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     const read_only = if (op.get("read_only")) |v| v.bool else false;
                     const file: Io.File = if (read_only) try Io.Dir.cwd().openFile(self.io, self.store.out_path, .{ .mode = .read_only }) else self.store.out;
                     errdefer if (read_only) file.close(self.io);
-                    self.store.db = try DB.init(self.io, initOpts(self.store, file, null, null));
+                    self.store.db = DB.init(self.io, initOpts(self.store, file, null, null)) catch |err| {
+                        if (self.note_port_changes and (err == error.InvalidDatabase or err == error.TruncatedDatabase)) self.noteChange("19");
+                        return err;
+                    };
                     if (read_only) self.store.read_only_file = file;
                     self.store.closed = false;
                     self.store.broken = false;
@@ -1396,26 +1515,42 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     self.writes += 1;
                     const cursor = self.rwValue(cursorName(op));
                     const path = self.parsePath(op.get("path").?);
+                    const path_json = op.get("path").?.array.items;
+                    if (path_json.len > 0) {
+                        self.noteWrite(cursorName(op), path_json);
+                        self.notePath(path_json);
+                    }
+                    const concat = for (path_json) |part| {
+                        if (isKey(partName(part), "linked_array_list_concat")) break true;
+                    } else false;
                     if (self.store.read_only_file != null) {
                         for (path) |part| {
                             if (part == .ctx) die("a callback on a read-only file runs or doesn't depending on the storage kind, which is an undefined use", .{});
                         }
                     }
                     const next = try cursor.writePath(Ctx, path);
+                    // a concat freezes everything, and what it gives back is what's refreshed
+                    if (concat) {
+                        if (self.storeOf(cursor.db)) |store| store.freezes += 1;
+                    }
                     if (op.get("as")) |as| self.bind(as.string, .{ .rw = next });
                 },
                 .write => {
                     self.writes += 1;
+                    self.noteWrite(cursorName(op), null);
                     const data = self.parseData(op.get("data").?);
                     try self.rwPointer(cursorName(op)).write(data);
                 },
                 .write_if_empty => {
                     self.writes += 1;
+                    self.noteWrite(cursorName(op), null);
+                    try self.noteWriteIfEmpty(cursorName(op));
                     const data = self.parseData(op.get("data").?);
                     try self.rwPointer(cursorName(op)).writeIfEmpty(data);
                 },
                 .writer => {
                     self.writes += 1;
+                    self.noteWrite(cursorName(op), null);
                     const format_tag: ?[2]u8 = if (op.get("format_tag")) |tag| parseFixedBytes(2, self.arena, tag, "format_tag") else null;
                     var writer = try self.rwPointer(cursorName(op)).writer(&.{});
                     writer.format_tag = format_tag;
@@ -1429,8 +1564,14 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     }
                     try writer.finish();
                 },
-                .freeze => try self.rwPointer(cursorName(op)).freeze(),
-                .db_freeze => try self.store.db.freeze(),
+                .freeze => {
+                    if (self.note_port_changes) self.noteChange("23");
+                    try self.rwPointer(cursorName(op)).freeze();
+                },
+                .db_freeze => {
+                    try self.store.db.freeze();
+                    self.store.freezes += 1;
+                },
                 .run_context => {
                     if (self.store.read_only_file != null) die("a callback on a read-only file runs or doesn't depending on the storage kind, which is an undefined use", .{});
                     try self.store.db.runContext(self.parseCtx(op.get("ctx").?));
@@ -1475,7 +1616,11 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                                 const want = self.parseHash(hash);
                                 if (pair.hash != want) die("expected hash {x}, got {x}", .{ want, pair.hash });
                             }
-                            if (op.get("key_as")) |as| self.bind(as.string, wrap(pair.key_cursor));
+                            if (op.get("key_as")) |as| {
+                                self.bind(as.string, wrap(pair.key_cursor));
+                                const slot = try c.slot();
+                                if (slot.tag == .sorted_kv_pair) self.env.getPtr(as.string).?.sorted_key = true;
+                            }
                             if (op.get("value_as")) |as| self.bind(as.string, wrap(pair.value_cursor));
                         },
                         else => unreachable,
@@ -1666,6 +1811,14 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     }
                 }
 
+                // a failed op that left something behind, in a transaction that committed
+                if (self.note_port_changes) {
+                    if (committed != null) {
+                        for (self.failed_with_writes.items) |where| std.debug.print("change 16 {s}\n", .{where});
+                    }
+                    self.failed_with_writes.clearRetainingCapacity();
+                }
+
                 const described = committed orelse self.compacted_into orelse self.store;
                 entry.* = .{
                     .committed_size = described.size_before,
@@ -1687,6 +1840,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 .main_path = opts.out_path,
                 .script_hash_id = opts.hash_id,
                 .allow_port_differences = opts.allow_port_differences,
+                .note_port_changes = opts.note_port_changes,
                 .offset_map = std.AutoHashMap(u64, u64).init(opts.gpa),
             };
             defer self.offset_map.deinit();
@@ -1793,7 +1947,7 @@ fn parseHashId(arena: Allocator, v: Json) ?xitdb.HashId {
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: run <script> <out.db> [--kind buffered_file|file|memory] [--allow-port-differences]\n", .{});
+    std.debug.print("usage: run <script> <out.db> [--kind buffered_file|file|memory] [--allow-port-differences] [--note-port-changes]\n", .{});
     std.process.exit(2);
 }
 
@@ -1805,10 +1959,13 @@ pub fn main(init: std.process.Init) !void {
     if (args.len < 3) usage();
     var kind: xitdb.DatabaseKind = .buffered_file;
     var allow_port_differences = false;
+    var note_port_changes = false;
     var arg_index: usize = 3;
     while (arg_index < args.len) : (arg_index += 1) {
         if (std.mem.eql(u8, args[arg_index], "--allow-port-differences")) {
             allow_port_differences = true;
+        } else if (std.mem.eql(u8, args[arg_index], "--note-port-changes")) {
+            note_port_changes = true;
         } else if (std.mem.eql(u8, args[arg_index], "--kind") and arg_index + 1 < args.len) {
             arg_index += 1;
             kind = std.meta.stringToEnum(xitdb.DatabaseKind, args[arg_index]) orelse usage();
@@ -1845,6 +2002,7 @@ pub fn main(init: std.process.Init) !void {
                 .hash_id = hash_id,
                 .out_path = args[2],
                 .allow_port_differences = allow_port_differences,
+                .note_port_changes = note_port_changes,
             };
             switch (hash_size) {
                 8 => try Runner(k, u64).runScript(common),
