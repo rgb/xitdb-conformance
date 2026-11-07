@@ -1,8 +1,4 @@
 # Which Zig commit a fixture's expected file comes from, for a fixture that doesn't come from
 # the one at ../../xitdb. One per line: the name of the fixture, then the commit in full.
 # second-zig.sh --regenerate writes these. README.md says how they're used.
-compact-203 185af010a3c7cc0db8af7dc0fcbc49f4cd1c2e27
-gen-16 185af010a3c7cc0db8af7dc0fcbc49f4cd1c2e27
-reads-107 185af010a3c7cc0db8af7dc0fcbc49f4cd1c2e27
-path-api-edges--185af01 185af010a3c7cc0db8af7dc0fcbc49f4cd1c2e27
 write-if-empty-emptied-slot 185af010a3c7cc0db8af7dc0fcbc49f4cd1c2e27

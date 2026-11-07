@@ -48,7 +48,7 @@ fi
 BIN=$REPO/zig-out/bin
 
 source_of() { # name of a fixture
-    for dir in scripts tests/valid tests/generated tests/from-other-zig; do
+    for dir in scripts tests/valid tests/generated tests/from-other-zig tests/port-variants; do
         if [ -f "$dir/$1.json" ]; then
             echo "$dir/$1.json"
             return 0
@@ -63,7 +63,7 @@ if [ -n "$REGENERATE" ]; then
             echo "second-zig: there's no script called $name"
             exit 1
         }
-        "$BIN/run" "$script" "$WORK/runs/$name.db" || {
+        "$BIN/run" "$script" "$WORK/runs/$name.db" --port || {
             echo "second-zig: $name doesn't pass on $SHORT, so it has no expected file to take"
             exit 1
         }
@@ -88,7 +88,7 @@ echo
 echo "== fixtures that should pass"
 # what a script may use was decided by the original, and what's run here is what a commit does
 # with it, so the guard is off. a stream of a sorted key with no position, say, is one that the
-# original can't do and refuses, and that a corrected commit can.
+# original can't do and refuses, and that a corrected commit can. --port is what a fixture is for.
 same=0
 different=0
 failed=0
@@ -102,7 +102,7 @@ for script in "$FIXTURES"/valid/*.json; do
         skipped=$((skipped + 1))
         continue
     fi
-    if ! "$BIN/run" "$script" "$WORK/runs/$name.db" --allow-port-differences > /dev/null 2> "$WORK/runs/$name.err"; then
+    if ! "$BIN/run" "$script" "$WORK/runs/$name.db" --allow-port-differences --port > /dev/null 2> "$WORK/runs/$name.err"; then
         failed=$((failed + 1))
         echo "fails: $name: $(head -n 1 "$WORK/runs/$name.err" | cut -c1-160)"
     elif "$BIN/detcheck" "$WORK/runs/$name.db" "$FIXTURES/valid/$name.db" > /dev/null 2> "$WORK/runs/$name.err"; then
@@ -125,7 +125,7 @@ now_pass=0
 for script in "$FIXTURES"/failing/*.json; do
     name=$(basename "$script" .json)
     code=0
-    "$BIN/run" "$script" "$WORK/runs/failing.db" --allow-port-differences > /dev/null 2>&1 || code=$?
+    "$BIN/run" "$script" "$WORK/runs/failing.db" --allow-port-differences --port > /dev/null 2>&1 || code=$?
     if [ "$code" -eq 1 ]; then
         still=$((still + 1))
     else
@@ -190,6 +190,10 @@ gen_different=0
 for script in tests/generated/*.json; do
     name=$(basename "$script" .json)
     case "$name" in
+        safe-reads-*) "$BIN/gen" "${name#safe-reads-}" "$WORK/runs/gen.json" --reads --port-safe 2> /dev/null || true ;;
+        safe-compact-*) "$BIN/gen" "${name#safe-compact-}" "$WORK/runs/gen.json" --compact --port-safe 2> /dev/null || true ;;
+        safe-replica-*) "$BIN/gen" "${name#safe-replica-}" "$WORK/runs/gen.json" --replicate --port-safe 2> /dev/null || true ;;
+        safe-*) "$BIN/gen" "${name#safe-}" "$WORK/runs/gen.json" --port-safe 2> /dev/null || true ;;
         gen-*) "$BIN/gen" "${name#gen-}" "$WORK/runs/gen.json" 2> /dev/null || true ;;
         reads-*) "$BIN/gen" "${name#reads-}" "$WORK/runs/gen.json" --reads 2> /dev/null || true ;;
         compact-*) "$BIN/gen" "${name#compact-}" "$WORK/runs/gen.json" --compact 2> /dev/null || true ;;

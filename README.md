@@ -5,7 +5,7 @@ for byte identity. It is built from the Zig source and the file format notes onl
 independent of the Swift code.
 
 - `SCRIPT-FORMAT.md`: the script format and the sidecar, enough to write a runner from.
-- `src/run.zig`: `run <script> <out.db>`, the Zig runner.
+- `src/run.zig`: `run <script> <out.db>`, the Zig runner. With `--port` it acts out the guards the port has, on the Zig engine.
 - `src/detcheck.zig`: `detcheck <a.db> <b.db>`, which checks that two runs of a script differ only in their commit
   IDs and checksums.
 - `scripts/`: hand-written scripts for the hard parts of the format.
@@ -14,6 +14,8 @@ independent of the Swift code.
 - `tests/failing/`: well-formed scripts that must fail in every runner, each for the reason in its description.
 - `tests/from-other-zig/`: scripts that only pass on a later Zig commit, which `tests/zig-commits.txt` names. The gate
   doesn't run them, and `second-zig.sh` against that commit does.
+- `tests/port-variants/`: the port's versions of scripts that pin what it refuses, as `<name>--port`, which `run --port` runs.
+  `tests/zig-only.txt` lists what they replace. Those go on running on Zig, and aren't fixtures.
 - `tests/invalid/`: scripts that `run` must reject, before running them or, for an undefined use, when it gets there.
   A second runner never sees these.
 - `tests/port-differs/`: the reads that the port corrects from the start, with what Zig does and what the port does, so
@@ -24,7 +26,8 @@ independent of the Swift code.
   ending with a compaction if given `--compact`, with a sync to a replica if given `--replicate`, and keeping off what the
   port changes if given `--port-safe`. `tests/generated/` has the ones that are committed, which `gen-fixed.sh` writes, and
   `gen-live.sh <how many>` runs as many fresh seeds as you like, or `PORT_SAFE=yes ./gen-live.sh <how many>` with `--port-safe`.
-- `fixtures/`: every script with what Zig produces for it, which the Swift package copies into its test resources.
+- `fixtures/`: every script the port has to pass, with what Zig produces for it under `run --port`, which the Swift package copies
+  into its test resources.
   `fixtures.sh` regenerates it, and `src/manifest.zig` lists what each script needs.
 - `src/coverage.zig`: `coverage <script>...`, which checks that the scripts use everything in the format.
 - `src/dump.zig`: `dump <file>`, which prints what's in a database in a form that doesn't depend on file layout.
@@ -92,5 +95,9 @@ Zig, `gen` can write something else for the same seed, and that isn't a reason t
    runs fresh seeds on it. The rules in `gen` that keep it from undefined uses stay until the port has what fixes them, as
    keeping away from something that's now safe does no harm.
 
-`tests/zig-commits.txt` says what has been regenerated so far, which is finding 17 from `185af01`. `PORT-IMPACT.md` has
-why each of those fixtures changed.
+`tests/zig-commits.txt` says which fixtures need a later commit, which is what's left for `185af01` now that most
+variants have the same bytes on both. `PORT-IMPACT.md` has why.
+
+**What the port refuses** doesn't need another Zig, as a guard writes nothing. A script that does it goes in
+`tests/zig-only.txt`, which the gate holds to what `run --port` refuses, with a version in `tests/port-variants/` if it pins
+something worth having. The fixtures only ever come from `run --port`.

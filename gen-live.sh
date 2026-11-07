@@ -10,9 +10,10 @@
 # A script that doesn't is kept in out/live, with the reason in <seed>.err, and it's a bug in
 # gen, in run, or in the engine.
 #
-# With PORT_SAFE=yes it's gen --port-safe, and each script also has to keep off everything
-# run --note-port-changes notes, other than what stays valid on the port: an init through a
-# cursor from before a freeze, a read through one, and a write that raises ExpectedTxStart.
+# With PORT_SAFE=yes it's gen --port-safe, and each script also has to run the same under
+# run --port, and keep off everything run --note-port-changes notes, other than what stays
+# valid on the port: an init through a cursor from before a freeze, a read through one, and a
+# write that raises ExpectedTxStart.
 
 set -eu
 cd "$(dirname "$0")"
@@ -59,6 +60,8 @@ while [ "$seed" -lt "$last" ]; do
         "$RUN" "$script" "$db.memory" --kind memory 2>> "$err" || ok=no
         if [ "$ok" = yes ]; then "$DET" "$db" "$db.memory" > /dev/null 2>> "$err" || ok=no; fi
     fi
+    if [ "$ok" = yes ] && [ -n "$GEN_FLAGS" ]; then "$RUN" "$script" "$db.port" --port 2>> "$err" || ok=no; fi
+    if [ "$ok" = yes ] && [ -n "$GEN_FLAGS" ]; then "$DET" "$db" "$db.port" > /dev/null 2>> "$err" || ok=no; fi
     if [ "$ok" = yes ] && [ -n "$GEN_FLAGS" ]; then
         # the memory kind is the one that can tell what a failed op left behind
         kind=memory

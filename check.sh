@@ -5,7 +5,8 @@
 #    gen --port-safe keeps off what the port changes, and reads change no bytes;
 # 2. every script runs, twice, and the two files differ only in the commit ID and
 #    checksum of each trailer (see src/detcheck.zig for exactly what's checked);
-# 3. the storage kind and the optimization level make no difference to the bytes;
+# 3. the storage kind and the optimization level make no difference to the bytes, with the
+#    port's guards too, and what's only for Zig really is;
 # 4. every script in tests/failing and tests/invalid fails, for the reason in its
 #    description, and tests/port-differs still shows what it says about the Zig original;
 # 5. dump gives the same text across all of those, doesn't depend on layout, and
@@ -149,6 +150,47 @@ expect_failures() { # folder
     done
     echo "$1: $count scripts failed as they should"
 }
+
+echo "== what the port does"
+count=0
+for script in tests/port-variants/*.json; do
+    name=$(basename "$script" .json)
+    # second-zig.sh runs these
+    if grep -q "^$name " tests/zig-commits.txt; then continue; fi
+    "$RUN" "$script" "$OUT/$name.a.db" --port
+    "$RUN" "$script" "$OUT/$name.b.db" --port
+    "$DET" "$OUT/$name.a.db" "$OUT/$name.b.db" > /dev/null
+    for kind in file memory; do
+        "$RUN" "$script" "$OUT/$name.$kind.db" --kind "$kind" --port
+        "$DET" "$OUT/$name.a.db" "$OUT/$name.$kind.db" > /dev/null
+    done
+    "$RELEASE_RUN" "$script" "$OUT/$name.release.db" --port
+    "$DET" "$OUT/$name.a.db" "$OUT/$name.release.db" > /dev/null
+    count=$((count + 1))
+done
+echo "$count variants come out the same on every kind and in a release build"
+count=0
+while read -r name why; do
+    case "$name" in
+        "" | "#"*) continue ;;
+    esac
+    script=
+    for dir in scripts tests/valid tests/generated; do
+        if [ -f "$dir/$name.json" ]; then script=$dir/$name.json; fi
+    done
+    if [ -z "$script" ]; then
+        echo "tests/zig-only.txt names $name, and there's no such script"
+        exit 1
+    fi
+    status=0
+    "$RUN" "$script" "$OUT/zig-only.db" --port 2> /dev/null > /dev/null || status=$?
+    if [ "$status" -ne 1 ]; then
+        echo "$name is in tests/zig-only.txt, and run --port doesn't refuse it, so it should be a fixture"
+        exit 1
+    fi
+    count=$((count + 1))
+done < tests/zig-only.txt
+echo "$count scripts are only for Zig, and run --port refuses each of them"
 
 echo "== scripts that must fail"
 expect_failures tests/failing
