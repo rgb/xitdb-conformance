@@ -46,7 +46,7 @@ which is worth holding the port to. It doesn't work for finding 17, which change
 | [17](#finding-17-write_if_empty-and-the-snapshot) | `write_if_empty` goes by the slot as it is now | 2 | 4 | Done: regenerated from `185af01` |
 | [22](#finding-22-the-concat) | A concat freezes after its join | 1 changes | 1 changes | Regenerated from `d6f3fee` |
 | [23](#finding-23-a-cursors-freeze) | A freeze holds for every cursor | 2 of 6 change, in the prototype | 2 of 17 change | Waits for a design |
-| [D18](#d18-refusing-a-write-from-before-a-freeze) | A write from before a freeze is refused | 2, and 1 reproduction | 31 | `.port` variant, new from `gen`. **There's a question below** |
+| [D18](#d18-refusing-a-write-from-before-a-freeze) | A write from before a freeze is refused | 2, and 1 reproduction | 31 | `.port` variant, new from `gen`. An init and a read through such a cursor go on working |
 | [D19](#d19-opening-a-file-whose-root-header-cant-be-trusted) | A file whose root header can't be trusted opens at its last good trailer | 3, and none of the 3 failing ones | 0 | `.port` variant, reads only |
 
 ## Finding 1: a write through a cursor from a finished transaction
@@ -178,7 +178,7 @@ that it wrote, as reading that key then raises `UnexpectedTag`.
 one raises the reader's error, where it used to do nothing if the snapshot had something. No script here can do that,
 because `run` refuses every use of such a cursor (`tests/invalid/cursor-from-rolled-back-transaction`, section 10). So it
 isn't in the lists under finding 1 or finding 24, and nothing happens to any script. The port's guard for reads through a
-stale cursor (D22) is what will report it there.
+cursor from a transaction that didn't commit (D22) is what will report it there.
 
 ## Finding 22: the concat
 
@@ -261,12 +261,30 @@ And these write through such a cursor with a lone init part, which is how `Datab
 - `tests/valid`: deep-linked (1), deep-sorted (1), deep-sorted-existing (1), deep-tries (1)
 <!-- end -->
 
-**A question for whoever designs the guard: these must go on working.** That init writes to the cursor's slot, which is from
-before the freeze, so a guard that goes by the position of what's being written would refuse it. Inside a callback, there's
-no other way on: the callback's cursor is the only way to the moment, and a write on a root cursor raises
-`NestedTopLevelWrite`. If the guard refuses these, then after a freeze nothing more can be written in that callback, and 38
-more scripts have to change. So the guard has to go by the cursor having been made before the freeze and let an init through,
-or it has to come with something else that gets a callback going again. I can't tell from here which D18 means.
+**These go on working** (D22). That init writes to the cursor's slot, which is from before the freeze, so a guard that went
+by the position of what's being written would refuse it. Inside a callback, there's no other way on: the callback's cursor
+is the only way to the moment, and a write on a root cursor raises `NestedTopLevelWrite`. So the guard goes by when the
+cursor was made, and lets an init through.
+
+**A read through such a cursor stays allowed too**, as a snapshot read (D22, as narrowed). These do that in the same
+transaction, so they're what hold the port to it:
+
+<!-- list 18-reads -->
+- `tests/generated`: compact-201 (1), compact-203 (2), compact-205 (1), gen-10 (4), gen-12 (1), gen-13 (2), gen-14 (2), gen-17 (7), gen-18 (2), gen-2 (2), gen-3 (5), gen-8 (2), reads-101 (4), reads-103 (3), reads-104 (6), reads-105 (2), reads-108 (1), reads-109 (2), reads-110 (4), replica-302 (2), replica-303 (1), replica-305 (3), replica-306 (1)
+- `tests/undefined`: concat-stale-slot (1)
+- `tests/valid`: every-construct-linked (2)
+<!-- end -->
+
+And these do it through a cursor from an earlier transaction that committed, with a freeze since:
+
+<!-- list 18-reads-earlier -->
+- none
+<!-- end -->
+
+That's safe **because of the guard on writes**. The crash after a concat was a read through a cursor from before a freeze,
+whose tree had been rewritten under it. With stale writes refused, nothing rewrites those bytes, so such a read can be
+stale, and never garbage. A `slot` isn't counted, as it goes by the snapshot and not the file. A read is only refused through
+a cursor from a transaction that didn't commit, which no script can do, as `run` refuses that.
 
 ## D19: opening a file whose root header can't be trusted
 

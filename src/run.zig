@@ -744,10 +744,21 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
 
         fn bind(self: *Self, name: []const u8, binding: Binding) void {
             var freezes: u64 = 0;
-            if (binding == .rw) {
-                if (self.storeOf(binding.rw.db)) |store| freezes = store.freezes;
+            if (dbOf(binding)) |db| {
+                if (self.storeOf(db)) |store| freezes = store.freezes;
             }
             self.env.put(self.arena, name, .{ .binding = binding, .born = self.top_index, .writes = self.writes, .freezes = freezes }) catch die("out of memory", .{});
+        }
+
+        /// the database a cursor or an iterator belongs to
+        fn dbOf(binding: Binding) ?*DB {
+            return switch (binding) {
+                .rw => |c| c.db,
+                .ro => |c| c.db,
+                .iter_rw => |i| i.cursor.db,
+                .iter_ro => |i| i.cursor.db,
+                else => null,
+            };
         }
 
         fn entryFor(self: *Self, name: []const u8) *Entry {
@@ -847,6 +858,27 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 const only_init = if (path) |parts| parts.len == 1 and isInitPart(parts[0]) else false;
                 if (only_init) self.noteChange("18-init") else self.noteChange("18-other");
             }
+        }
+
+        /// a read through a cursor or an iterator made before the last freeze, which the port
+        /// goes on allowing as a snapshot read, so these are what hold it to that. a slot isn't
+        /// counted, as that's the cursor's snapshot and doesn't go to the file. a cursor made
+        /// from a stale one is counted where it was made, and is fresh by the rule that the
+        /// port's guard goes by when a cursor was made
+        fn noteRead(self: *Self, name: []const u8) void {
+            if (!self.note_port_changes or isKey(name, "root")) return;
+            const entry = self.env.getPtr(name) orelse return;
+            const db = dbOf(entry.binding) orelse return;
+            // a root cursor reads the last commit, so it's never stale
+            const position = switch (entry.binding) {
+                .rw => |c| c.slot_ptr.position,
+                .ro => |c| c.slot_ptr.position,
+                else => null,
+            };
+            if (position == ROOT_HEADER_START) return;
+            const store = self.storeOf(db) orelse return;
+            if (entry.freezes >= store.freezes) return;
+            if (entry.born == self.top_index) self.noteChange("18-reads") else self.noteChange("18-reads-earlier");
         }
 
         fn isInitPart(part: Json) bool {
@@ -1420,6 +1452,11 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             switch (kind_of_op) {
                 .close, .reopen, .raw_append, .raw_write, .create_database, .use => {},
                 else => if (self.store.closed) die("the database is closed", .{}),
+            }
+
+            switch (kind_of_op) {
+                .read_path, .read_path_slot, .read_key_value_pair, .read_uint, .read_int, .read_float, .read_bytes, .read_bytes_into, .read_stream, .count, .iterator, .next, .rank => self.noteRead(cursorName(op)),
+                else => {},
             }
 
             switch (kind_of_op) {
