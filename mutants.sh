@@ -155,7 +155,7 @@ try_mutant compact-objects-not-shared "if (try self.getOffset(source_offset)) |t
 try_mutant replica-always-replaced "return if (trailer.checksum == state.checksum) state.committed_size else 0;" "return if (trailer.checksum == state.checksum and false) state.committed_size else 0;"
 try_mutant replica-never-replaced "return if (trailer.checksum == state.checksum) state.committed_size else 0;" "return if (trailer.checksum == state.checksum or true) state.committed_size else 0;"
 try_mutant first-sync-keeps-latest-root-header ".file_size = end, .root = trailer.root" ".file_size = try self.committedSize(), .root = trailer.root"
-try_mutant first-sync-keeps-latest-root-slot ".file_size = end, .root = trailer.root" ".file_size = end, .root = try self.readRootSlot()"
+try_mutant first-sync-keeps-latest-root-slot ".file_size = end, .root = trailer.root" ".file_size = end, .root = if (end == end) try self.readRootSlot() else trailer.root"
 try_mutant replica-ahead-not-noticed "if (state.committed_size > try self.committedSize()) return 0;" "if (state.committed_size > try self.committedSize() and false) return 0;"
 try_mutant read-past-committed-allowed "if (start > end or end > try self.committedSize()) return error.InvalidRange;" "if (start > end) return error.InvalidRange;"
 try_mutant read-backwards-allowed "if (start > end or end > try self.committedSize()) return error.InvalidRange;" "if (end > try self.committedSize()) return error.InvalidRange;"

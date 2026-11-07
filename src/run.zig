@@ -497,6 +497,9 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         offset_map: std.AutoHashMap(u64, u64) = undefined,
         // the database a compaction wrote to, for the sidecar
         compacted_into: ?*Store = null,
+        // what compaction with `offset_map: "disk"` uses
+        offsets_file: ?Io.File = null,
+        offsets: OffsetDB = undefined,
         // the names of the callbacks around the op being validated
         enclosing: std.ArrayList([]const u8) = .empty,
         env: std.StringHashMapUnmanaged(Entry) = .empty,
@@ -1206,15 +1209,17 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             return store;
         }
 
+        fn offsetsPath(self: *Self) []const u8 {
+            return std.mem.concat(self.arena, u8, &.{ self.main_path, ".offsets" }) catch die("out of memory", .{});
+        }
+
         fn compactWithDiskOffsets(self: *Self, opts: xitdb.InitOpts(kind)) !DB {
-            const path = std.mem.concat(self.arena, u8, &.{ self.main_path, ".offsets" }) catch die("out of memory", .{});
-            const file = try Io.Dir.cwd().createFile(self.io, path, .{ .read = true, .truncate = true });
-            defer {
-                file.close(self.io);
-                Io.Dir.cwd().deleteFile(self.io, path) catch {};
+            // one for the whole script, like test.zig's, so that a compaction has to forget
+            // the last one. it has commit IDs of its own, which go nowhere, as this file doesn't either
+            if (self.offsets_file == null) {
+                self.offsets_file = try Io.Dir.cwd().createFile(self.io, self.offsetsPath(), .{ .read = true, .truncate = true });
+                self.offsets = try OffsetDB.init(self.io, .{ .file = self.offsets_file.?, .fsync = false });
             }
-            // it has commit IDs of its own, which go nowhere, as this file doesn't either
-            var offsets = try OffsetDB.init(self.io, .{ .file = file, .fsync = false });
             var result: DB = undefined;
             const InTransaction = struct {
                 source: *DB,
@@ -1226,7 +1231,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     ctx.result.* = try ctx.source.compact(kind, ctx.opts, &map);
                 }
             };
-            try offsets.runContext(InTransaction{ .source = &self.store.db, .opts = opts, .result = &result });
+            try self.offsets.runContext(InTransaction{ .source = &self.store.db, .opts = opts, .result = &result });
             return result;
         }
 
@@ -1875,6 +1880,10 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             for (self.stores.items) |store| {
                 store.out.close(io);
                 store.buffer.deinit();
+            }
+            if (self.offsets_file) |file| {
+                file.close(io);
+                Io.Dir.cwd().deleteFile(io, self.offsetsPath()) catch {};
             }
         }
 

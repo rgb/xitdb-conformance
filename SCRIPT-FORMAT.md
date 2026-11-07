@@ -407,7 +407,8 @@ What `into` names decides what's needed. `compact-targets` has all three cases:
 
 - `"memory"` is an `std.AutoHashMap(u64, u64)`, which `compact` clears at its start.
 - `"disk"` is what `test.zig` calls a disk-backed offsets map: a hash map with 8-byte hashes, in a private database with
-  its own file, in one transaction that lasts for the whole compaction. A runner whose engine takes any object with
+  its own file, in one transaction that lasts for the whole compaction. `compact` resets it at its start, and the Zig
+  runner uses one for the whole script, so that a compaction has to forget the last one. A runner whose engine takes any object with
   `reset`, `get` and `put` should use it, and one whose engine has no such thing can treat it like `"memory"`, and has
   nothing to compare, as the private database is never part of an expected file. The manifest lists these scripts as
   needing `disk_offsets`.
