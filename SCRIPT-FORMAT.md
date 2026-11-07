@@ -342,6 +342,7 @@ between. These four ops only appear at the top level, and only `reopen` can have
 | `raw_write` | `offset`, `bytes` | Writes the bytes at `offset`, which goes up to 2²⁴, leaving zeros if that's past the end |
 
 While the database is closed, only `raw_append`, `raw_write` and `reopen` can run, and they can't run while it's open.
+So can `recover`, which is only in what the port does ([section 11](#what-the-port-does)).
 Anything else is a script failure. The raw ops write straight to storage, past the engine.
 
 `reopen` states a hash size: the script's, or `hash_size` if given, which is 8, 20, 32 or 64. It never takes the size
@@ -543,6 +544,7 @@ Truncating is all a rollback does, so it doesn't undo a write that landed before
 | `PathPartMustBeAtEnd` | a `ctx` part that isn't last |
 | `ScriptAbort` | the `fail` op. It isn't an engine error, but it travels like one |
 | `WriteFailed` | a transaction on a read-only file |
+| `StaleCursor`, `PoisonedTransaction`, `UntrustedRootHeader` | only with `--port`, and in the port ([section 11](#what-the-port-does)) |
 | `InvalidDatabase` | `reopen`: a bad magic number, a committed size below 62, or a last trailer whose checksum doesn't match. `apply_replicated`: bytes that don't end in a trailer, or in one for another file. `read_committed` from 0: an `end` that isn't the end of a trailer |
 | `InvalidVersion` | `reopen`: a version other than 1 |
 | `InvalidHashSize` | `reopen`: a hash size in the header other than the one stated |
@@ -812,22 +814,75 @@ All of these look like mistakes and all of them are what Zig does. `overwriting-
 
 ### What a later Zig changes
 
-All of this document is what Zig does at `6b93af1`, apart from what this says. The manifest gives each fixture's
-`zig_commit`, and its expected file is what that commit does.
+Apart from what this says, all of this document is what Zig does at `6b93af1`. The manifest gives each fixture's
+`zig_commit`, and its expected file is what that commit does. These fixtures are from `185af01`, as they need its bytes:
 
-**At `185af01`, `write_if_empty` goes by the slot as it is now** (finding 17). If the cursor has a position, it reads
-the slot there when it's called, and it writes if that slot is empty. Empty means the tag is `none` and `full` isn't
-set, so a slot written with `{"slot": null}` isn't empty. A root cursor is as it was. This holds for these fixtures,
-and section 4 and item 9 above don't:
-
-| Fixture | What it is |
+| Fixture | What it needs from there |
 |---|---|
-| `compact-203`, `gen-16`, `reads-107` | The same scripts as before, with what they write now |
-| `path-api-edges--185af01` | `path-api-edges`, whose write leaves the value that its snapshot can't see |
-| `write-if-empty-emptied-slot` | The snapshot has something and a remove has emptied the slot, so it writes |
+| `write-if-empty-emptied-slot`, `path-api-edges--port` | Finding 17: `write_if_empty` goes by the slot as it is now, not the snapshot. If the cursor has a position, it reads the slot there when it's called, and it writes if that slot is empty. Empty means the tag is `none` and `full` isn't set, so a slot written with `{"slot": null}` isn't empty. A root cursor is as it was. So section 4 and item 9 above don't hold for them |
+| `every-construct-linked--port` | Finding 22: a concat freezes after its join, so what comes after it in that transaction copies the joined nodes |
 
-No engine can pass both `path-api-edges` and `path-api-edges--185af01`. The first is what `6b93af1` does, and the gate
-goes on running it there. A runner's calls don't change for any of this, only what the engine under them does.
+A runner's calls don't change for any of this, only what the engine under them does.
+
+### What the port does
+
+**The fixtures are what the port has to do**, once it has its guards (D16 to D19 and D22 in `director/decisions.md`). So they
+are what Zig does, apart from this. `run --port` acts it out on the Zig engine, and that's what writes the expected files. It
+can, because **each guard refuses before writing anything**, so the file stays as if the op had never been there.
+`tests/zig-only.txt` lists the scripts that do what the port refuses, which aren't fixtures. `tests/port-variants/` has the
+port's versions of those written by hand, as `<name>--port`.
+
+These are checked in this order, for an op that goes through a cursor. The writes are `write_path`, `write`,
+`write_if_empty` and `writer`, and the reads are the ops that go to the file, so `slot` isn't one.
+
+| | What | It raises |
+|---|---|---|
+| 1 | A read through a cursor from a transaction that was rolled back, whose bytes are gone and whose offsets get reused | `StaleCursor` |
+| 2 | A write through such a cursor | `ExpectedTxStart` with no transaction going, and otherwise `StaleCursor` |
+| 3 | A write in a transaction that's poisoned | `PoisonedTransaction` |
+| 4 | A write through a sorted entry's key cursor, from `read_key_value_pair` (finding 2) | `CursorNotWriteable` |
+| 5 | A write during a transaction through a cursor from an earlier one (finding 1). **That includes an init**, which would rewrite a slot that's committed | `StaleCursor` |
+| 6 | A write through a cursor made before the last freeze in this transaction (D18), unless it's a `write_path` whose path **begins with an init part**. That's the way to go on after a freeze, and what follows it goes through what it made | `StaleCursor` |
+| 7 | A path with anything after `hash_map_remove` or `sorted_map_remove` (finding 12), on any cursor. It raises before removing anything | `PathPartMustBeAtEnd` |
+
+What the words mean:
+
+- **A cursor is made** when the op that binds it runs, or for a callback's own cursor, when the callback starts. That's so for
+  one made through a stale cursor too, which is fresh from then on. `write` and the others that update a cursor don't make it
+  fresh.
+- **A freeze** is `db_freeze` or a concat. It isn't `freeze` on a cursor, which is finding 23, and nothing changes for that. What
+  a concat gives back is made after its freeze, so it's fresh.
+- **A root cursor is never stale**, as it reads the last commit. An empty path is a write here, as it would give a stale cursor
+  a fresh one.
+- **With no transaction going, nothing is stale**, so rows 5 and 6 don't apply: a write raises `ExpectedTxStart` from the engine,
+  as it always has, and a `write_path` with an empty path works.
+- **Reads through a stale cursor stay valid**, apart from row 1. They're snapshot reads, and with stale writes refused,
+  nothing changes those bytes under them.
+
+Anything but those reads and writes through a cursor from a rolled-back transaction, like `slot` or `next`, is still an
+undefined use, as in section 10.
+
+**A transaction is poisoned** by an op in a callback that raises an error that's handled with `expect_error`, having changed the
+file (finding 16). An op refused by the table above changes nothing, so it poisons nothing. From then on every write raises
+`PoisonedTransaction`, and so does the transaction's end: it's rolled back when the outermost callback returns, the top-level
+op raises it, and it takes no commit ID. Reads go on working until then. This is what Zig does with that transaction made to
+fail.
+
+**Opening.** A `reopen` raises `UntrustedRootHeader` if the committed size in the root header is past the end of the file,
+smaller than a new database, or doesn't end at a trailer whose checksum verifies. Those are where Zig raises `TruncatedDatabase`
+or `InvalidDatabase`. A bad magic number is still `InvalidDatabase`, and a bad version or hash size is what it was. It leaves
+the database closed, as any failed `reopen` does.
+
+| `op` | Other fields | What it does |
+|---|---|---|
+| `recover` | | The port's recovery call, at the top level, while the database is closed |
+
+It looks from the end of the file back, a byte at a time, for the last position that ends a trailer whose checksum verifies,
+using the file ID in the file's header. It cuts the file off there, and writes that trailer's root slot and that position in the
+root header, at offset 20. Then it opens the database, which is left open. It takes no commit ID, and a top-level op with it
+in has no commit. A commit past that position is lost, and its commit ID stays in the sidecar, as it was used. With a bad magic
+number, or no trailer that verifies, it raises `InvalidDatabase`, and the database stays closed. So all it leaves is what the
+file held just after that commit, and nothing is dropped except by this call.
 
 ## 12. Worked example
 

@@ -1,4 +1,4 @@
-//! run <script> <out.db> [--kind buffered_file|file|memory] [--allow-port-differences] [--note-port-changes]
+//! run <script> <out.db> [--kind buffered_file|file|memory] [--allow-port-differences] [--note-port-changes] [--port]
 //!
 //! Executes a conformance script (see SCRIPT-FORMAT.md) against the Zig
 //! implementation and writes the database to <out.db> and the sidecar to
@@ -65,6 +65,12 @@ const ERROR_NAMES = [_][]const u8{
     "TargetNotEmpty",
     "InvalidRange",
 };
+
+/// what only the port raises, so only --port lets a script name them
+const PORT_ERROR_NAMES = [_][]const u8{ "StaleCursor", "PoisonedTransaction", "UntrustedRootHeader" };
+
+/// set by --port, which SCRIPT-FORMAT.md says all about
+var port_mode = false;
 
 /// only a read the port corrects can raise this, so only --allow-port-differences lets a script name it
 const PORT_DIFFERENCE_ERROR_NAMES = [_][]const u8{"ExpectedSlotPosition"};
@@ -240,6 +246,11 @@ fn checkErrorName(name: []const u8, op_name: []const u8, allow_port_differences:
     // and applying bytes at 0 that are too short to be a database raises it everywhere,
     // there and from then on when asking that database where its committed bytes end
     const end_of_stream_means_the_same = isKey(op_name, "read_stream") or isKey(op_name, "apply_replicated") or isKey(op_name, "committed_size") or isKey(op_name, "replica_state");
+    if (port_mode) {
+        for (PORT_ERROR_NAMES) |known| {
+            if (isKey(name, known)) return;
+        }
+    }
     if (isKey(name, "EndOfStream") and !end_of_stream_means_the_same and !allow_port_differences) {
         die("expect_error can't name EndOfStream on {s}", .{op_name});
     }
@@ -256,6 +267,7 @@ fn checkBindableField(op: ObjectMap, field: []const u8) void {
 }
 
 const OpKind = enum {
+    recover,
     write_path,
     write,
     write_if_empty,
@@ -316,6 +328,7 @@ fn opFields(kind: OpKind) []const []const u8 {
         .rank => &.{ "op", "note", "expect_error", "on", "key", "expect" },
         .close => &.{ "op", "note" },
         .reopen => &.{ "op", "note", "expect_error", "read_only", "hash_size" },
+        .recover => &.{ "op", "note", "expect_error" },
         .raw_append => &.{ "op", "note", "bytes" },
         .raw_write => &.{ "op", "note", "offset", "bytes" },
         .create_database => &.{ "op", "note", "name", "file_id", "hash_id" },
@@ -400,6 +413,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         // the trailer's size, and where the commit ID is inside it
         const TRAILER_SIZE = 25;
         const TRAILER_COMMIT_ID_OFFSET = 9;
+        const ROOT_HEADER_SIZE = 17;
         // where a root cursor says it is, though it reads the root again each time
         const ROOT_HEADER_START = 20;
         const INITIAL_SIZE = 62;
@@ -445,6 +459,8 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             trailers: std.ArrayList(Trailer) = .empty,
             // how many freezes it has had, including a concat's
             freezes: u64 = 0,
+            // with --port, an op failed in this transaction having written something
+            poisoned: bool = false,
         };
 
         const Entry = struct {
@@ -476,6 +492,9 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 r.callback_depth += 1;
                 defer r.callback_depth -= 1;
                 try r.execOps(self.ops);
+
+                // the port can't commit it. rolling it back here is the same as what it does then
+                if (port_mode and r.callback_depth == 1 and r.store.poisoned) return error.PoisonedTransaction;
 
                 switch (r.env.get(self.name).?.binding) {
                     .rw => |c| cursor.* = c,
@@ -538,7 +557,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             if (op.get("expect_error")) |err| checkErrorName(asString(err, "expect_error"), name, self.allow_port_differences);
             switch (kind_of_op) {
                 .run_context, .db_freeze, .fail => {},
-                .close, .reopen, .raw_append, .raw_write, .create_database, .use, .compact, .replica_state, .replication_start, .committed_size, .read_committed, .apply_replicated => {
+                .close, .reopen, .recover, .raw_append, .raw_write, .create_database, .use, .compact, .replica_state, .replication_start, .committed_size, .read_committed, .apply_replicated => {
                     if (self.enclosing.items.len > 0) die("{s} can only be used at the top level", .{name});
                 },
                 else => checkName(asString(required(op, "on", name), "on"), "on"),
@@ -623,6 +642,9 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     if (op.get("expect")) |v| _ = asInt(u64, v, "expect");
                 },
                 .close => {},
+                .recover => {
+                    if (!port_mode) die("recover is what the port has in place of Zig's errors on opening, so it needs --port", .{});
+                },
                 .reopen => {
                     if (op.get("read_only")) |v| {
                         if (asBool(v, "read_only") and kind == .memory) die("the memory storage kind can't be opened read-only", .{});
@@ -855,8 +877,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             }
             const store = self.storeOf(cursor.db) orelse return;
             if (entry.freezes < store.freezes) {
-                const only_init = if (path) |parts| parts.len == 1 and isInitPart(parts[0]) else false;
-                if (only_init) self.noteChange("18-init") else self.noteChange("18-other");
+                if (beginsWithInit(path)) self.noteChange("18-init") else self.noteChange("18-other");
             }
         }
 
@@ -879,6 +900,124 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             const store = self.storeOf(db) orelse return;
             if (entry.freezes >= store.freezes) return;
             if (entry.born == self.top_index) self.noteChange("18-reads") else self.noteChange("18-reads-earlier");
+        }
+
+        /// an init part through a cursor from before a freeze is what the port allows, as the
+        /// way to go on after one. what follows it in the path goes through what it made
+        fn beginsWithInit(path: ?[]const Json) bool {
+            const parts = path orelse return false;
+            return parts.len > 0 and isInitPart(parts[0]);
+        }
+
+        /// with --port, what the port refuses before it writes anything, which is why it's
+        /// enough to raise the error here and not call the engine: the file stays as if the op
+        /// had never been there. the order is the one SCRIPT-FORMAT.md gives
+        fn portGuard(self: *Self, kind_of_op: OpKind, op: ObjectMap) anyerror!void {
+            const is_write = switch (kind_of_op) {
+                .write_path, .write, .write_if_empty, .writer => true,
+                .read_path, .read_path_slot, .read_key_value_pair, .read_uint, .read_int, .read_float, .read_bytes, .read_bytes_into, .read_stream, .count, .iterator, .rank => false,
+                else => return,
+            };
+            const name = cursorName(op);
+            const entry = if (isKey(name, "root")) null else self.env.getPtr(name);
+            const path: ?[]const Json = if (kind_of_op == .write_path) op.get("path").?.array.items else null;
+
+            // the only cursor that can't be read: its bytes are gone, and the offsets are reused
+            if (entry) |e| {
+                if (self.rolled_back.contains(e.born)) {
+                    const db = dbOf(e.binding) orelse return;
+                    if (is_write and db.tx_start == null) return error.ExpectedTxStart;
+                    return error.StaleCursor;
+                }
+            }
+            if (!is_write) return;
+
+            const cursor: ?RW = if (entry) |e| switch (e.binding) {
+                .rw => |c| c,
+                else => null,
+            } else null;
+            const in_a_transaction = if (cursor) |c| c.db.tx_start != null else self.store.db.tx_start != null;
+            if (in_a_transaction and self.store.poisoned) return error.PoisonedTransaction;
+
+            if (entry != null and cursor != null and cursor.?.slot_ptr.position != ROOT_HEADER_START) {
+                const e = entry.?;
+                const c = cursor.?;
+                if (e.sorted_key) return error.CursorNotWriteable;
+                if (c.db.tx_start != null) {
+                    // an init through one of these would rewrite a slot that's committed
+                    if (e.born != self.top_index) return error.StaleCursor;
+                    const store = self.storeOf(c.db) orelse return;
+                    if (e.freezes < store.freezes and !beginsWithInit(path)) return error.StaleCursor;
+                }
+            }
+
+            if (path) |parts| {
+                for (parts, 0..) |part, i| {
+                    const part_name = partName(part);
+                    if ((isKey(part_name, "hash_map_remove") or isKey(part_name, "sorted_map_remove")) and i + 1 < parts.len) return error.PathPartMustBeAtEnd;
+                }
+            }
+        }
+
+        /// the bytes of a file, as they are in storage. it has to be closed
+        fn rawBytes(self: *Self) ![]const u8 {
+            if (kind == .memory) return self.store.buffer.written();
+            return Io.Dir.cwd().readFileAlloc(self.io, self.store.out_path, self.arena, .unlimited);
+        }
+
+        /// something to tell whether an op wrote anything, whichever storage it's on
+        fn fileHash(self: *Self) !u64 {
+            if (kind == .memory) return std.hash.Wyhash.hash(0, self.store.buffer.written());
+            // a gap that a writer left can't be read from a buffered file until it's flushed
+            try self.store.db.core.flush();
+            const length: usize = @intCast(try self.store.db.core.length());
+            const bytes = try self.gpa.alloc(u8, length);
+            defer self.gpa.free(bytes);
+            var reader = self.store.db.core.reader();
+            try reader.seekTo(0);
+            try reader.interface.readSliceAll(bytes);
+            return std.hash.Wyhash.hash(0, bytes);
+        }
+
+        fn trailerVerifies(bytes: []const u8, file_id: u64, end: usize) bool {
+            const position = end - TRAILER_SIZE;
+            const commit_id = std.mem.readInt(u64, bytes[position + TRAILER_COMMIT_ID_OFFSET..][0..8], .big);
+            const checksum = std.mem.readInt(u64, bytes[position + TRAILER_COMMIT_ID_OFFSET + 8..][0..8], .big);
+            var covered: [33]u8 = undefined;
+            std.mem.writeInt(u64, covered[0..8], file_id, .big);
+            std.mem.writeInt(u64, covered[8..16], position, .big);
+            @memcpy(covered[16..25], bytes[position..][0..9]);
+            std.mem.writeInt(u64, covered[25..33], commit_id, .big);
+            return std.hash.crc.@"CRC-64/XZ".hash(&covered) == checksum;
+        }
+
+        /// what the port's recovery has to do, as Zig has none: the file ends at the last
+        /// trailer that verifies, and its root header says so
+        fn recover(self: *Self) !void {
+            const bytes = try self.rawBytes();
+            const header_size = ROOT_HEADER_START;
+            if (bytes.len < header_size or !std.mem.eql(u8, bytes[0..3], "xit")) return error.InvalidDatabase;
+            const file_id = std.mem.readInt(u64, bytes[header_size - 8..][0..8], .big);
+            const smallest = ROOT_HEADER_START + ROOT_HEADER_SIZE + TRAILER_SIZE;
+            var end: usize = bytes.len;
+            const found: usize = while (end >= smallest) : (end -= 1) {
+                if (trailerVerifies(bytes, file_id, end)) break end;
+            } else return error.InvalidDatabase;
+
+            var root_header: [ROOT_HEADER_SIZE]u8 = undefined;
+            @memcpy(root_header[0..9], bytes[found - TRAILER_SIZE..][0..9]);
+            std.mem.writeInt(u64, root_header[9..17], found, .big);
+            if (kind == .memory) {
+                self.store.buffer.shrinkRetainingCapacity(found);
+            } else {
+                try self.store.out.setLength(self.io, found);
+            }
+            try self.writeRaw(ROOT_HEADER_START, &root_header);
+            removeTrailersFrom(self.store, found);
+            self.store.may_have_leftovers = false;
+            self.store.db = try DB.init(self.io, initOpts(self.store, self.store.out, null, null));
+            self.store.closed = false;
+            self.store.broken = false;
         }
 
         fn isInitPart(part: Json) bool {
@@ -1179,7 +1318,14 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 self.arena.dupe(u8, self.store.buffer.written()) catch die("out of memory", .{})
             else
                 null;
+            const watches_for_poison = port_mode and expected != null and self.callback_depth > 0;
+            const hash_before = if (watches_for_poison) try self.fileHash() else 0;
             const result = self.dispatch(op);
+            if (watches_for_poison) {
+                if (result) |_| {} else |_| {
+                    if (try self.fileHash() != hash_before) self.store.poisoned = true;
+                }
+            }
             if (before) |bytes| {
                 if (result) |_| {} else |_| {
                     if (!std.mem.eql(u8, bytes, self.store.buffer.written())) {
@@ -1450,9 +1596,11 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             const kind_of_op = std.meta.stringToEnum(OpKind, op.get("op").?.string).?;
 
             switch (kind_of_op) {
-                .close, .reopen, .raw_append, .raw_write, .create_database, .use => {},
+                .close, .reopen, .recover, .raw_append, .raw_write, .create_database, .use => {},
                 else => if (self.store.closed) die("the database is closed", .{}),
             }
+
+            if (port_mode) try self.portGuard(kind_of_op, op);
 
             switch (kind_of_op) {
                 .read_path, .read_path_slot, .read_key_value_pair, .read_uint, .read_int, .read_float, .read_bytes, .read_bytes_into, .read_stream, .count, .iterator, .next, .rank => self.noteRead(cursorName(op)),
@@ -1536,11 +1684,21 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     errdefer if (read_only) file.close(self.io);
                     self.store.db = DB.init(self.io, initOpts(self.store, file, null, null)) catch |err| {
                         if (self.note_port_changes and (err == error.InvalidDatabase or err == error.TruncatedDatabase)) self.noteChange("19");
+                        // a bad magic number isn't a database at all, so it stays what it is
+                        if (port_mode and err == error.TruncatedDatabase) return error.UntrustedRootHeader;
+                        if (port_mode and err == error.InvalidDatabase) {
+                            const bytes = try self.rawBytes();
+                            if (bytes.len >= 3 and std.mem.eql(u8, bytes[0..3], "xit")) return error.UntrustedRootHeader;
+                        }
                         return err;
                     };
                     if (read_only) self.store.read_only_file = file;
                     self.store.closed = false;
                     self.store.broken = false;
+                },
+                .recover => {
+                    if (!self.store.closed) die("the database is already open", .{});
+                    try self.recover();
                 },
                 .raw_append => {
                     if (!self.store.closed) die("the file can only be written to directly while the database is closed", .{});
@@ -1807,6 +1965,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
 
                 self.top_index = i;
                 self.compacted_into = null;
+                for (self.stores.items) |store| store.poisoned = false;
                 self.execOp(op.object) catch |err| die("unexpected error {s}, which started at {s}", .{ @errorName(err), error_loc_buf[0..error_loc_len] });
                 self.writes_after_op.append(self.arena, self.writes) catch die("out of memory", .{});
 
@@ -1819,7 +1978,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 // the size can change without a commit when a file is reopened, or
                 // when bytes are applied to it, as those have commits of their own in them
                 const op_name = op.object.get("op").?.string;
-                const can_commit = !isKey(op_name, "reopen") and !isKey(op_name, "apply_replicated");
+                const can_commit = !isKey(op_name, "reopen") and !isKey(op_name, "recover") and !isKey(op_name, "apply_replicated");
 
                 var committed: ?*Store = null;
                 var commit_id: ?u64 = null;
@@ -1993,7 +2152,7 @@ fn parseHashId(arena: Allocator, v: Json) ?xitdb.HashId {
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: run <script> <out.db> [--kind buffered_file|file|memory] [--allow-port-differences] [--note-port-changes]\n", .{});
+    std.debug.print("usage: run <script> <out.db> [--kind buffered_file|file|memory] [--allow-port-differences] [--note-port-changes] [--port]\n", .{});
     std.process.exit(2);
 }
 
@@ -2010,6 +2169,8 @@ pub fn main(init: std.process.Init) !void {
     while (arg_index < args.len) : (arg_index += 1) {
         if (std.mem.eql(u8, args[arg_index], "--allow-port-differences")) {
             allow_port_differences = true;
+        } else if (std.mem.eql(u8, args[arg_index], "--port")) {
+            port_mode = true;
         } else if (std.mem.eql(u8, args[arg_index], "--note-port-changes")) {
             note_port_changes = true;
         } else if (std.mem.eql(u8, args[arg_index], "--kind") and arg_index + 1 < args.len) {

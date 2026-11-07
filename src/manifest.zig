@@ -24,6 +24,7 @@ fn fail(comptime fmt: []const u8, args: anytype) noreturn {
 
 const Features = struct {
     reopen: bool = false,
+    recover: bool = false,
     raw_file: bool = false,
     read_only: bool = false,
     iterators: bool = false,
@@ -40,6 +41,7 @@ const Features = struct {
             const op = item.object;
             const name = op.get("op").?.string;
             if (std.mem.eql(u8, name, "close") or std.mem.eql(u8, name, "reopen")) self.reopen = true;
+            if (std.mem.eql(u8, name, "recover")) self.recover = true;
             if (std.mem.eql(u8, name, "raw_append") or std.mem.eql(u8, name, "raw_write")) self.raw_file = true;
             if (op.get("read_only")) |v| {
                 if (v == .bool and v.bool) self.read_only = true;
@@ -71,7 +73,7 @@ const Features = struct {
     fn print(self: Features, w: *Io.Writer) !void {
         var first = true;
         try w.writeAll("[");
-        inline for (.{ "reopen", "raw_file", "read_only", "iterators", "rank", "byte_stream", "byte_buffers", "several_databases", "compaction", "disk_offsets", "replication" }) |name| {
+        inline for (.{ "reopen", "recover", "raw_file", "read_only", "iterators", "rank", "byte_stream", "byte_buffers", "several_databases", "compaction", "disk_offsets", "replication" }) |name| {
             if (@field(self, name)) {
                 try w.writeAll(if (first) "\"" else ", \"");
                 try w.writeAll(name);
