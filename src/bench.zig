@@ -21,7 +21,7 @@ const FILE_ID: u64 = 0x0011223344556677;
 const RUNS = 5;
 const TMP_DIR = "out";
 const TMP_PATH = "out/bench.db";
-// what map_compact compacts into
+// what map_compact compacts into, and replicate's replica
 const TARGET_PATH = "out/bench-target.db";
 
 fn fail(comptime fmt: []const u8, args: anytype) noreturn {
@@ -29,7 +29,7 @@ fn fail(comptime fmt: []const u8, args: anytype) noreturn {
     std.process.exit(1);
 }
 
-const Workload = enum { map_insert, list_append, map_transactions, linked_append, sorted_insert, map_compact };
+const Workload = enum { map_insert, list_append, map_transactions, linked_append, sorted_insert, map_compact, replicate };
 
 /// what's worked out before any clock starts
 const Inputs = struct {
@@ -119,6 +119,21 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
             }
         };
 
+        /// map_transactions' transactions from `from` up to `to`
+        fn putTransactions(db: *DB, hashes: []const HashInt, from: u64, to: u64) !void {
+            var j = from;
+            while (j < to) : (j += 1) {
+                const last = try db.rootCursor().readPathSlot(void, &.{.{ .array_list_get = -1 }});
+                _ = try db.rootCursor().writePath(PutKeys, &.{
+                    .array_list_init,
+                    .array_list_append,
+                    .{ .write = .{ .slot = last } },
+                    .{ .hash_map_init = .{} },
+                    .{ .ctx = .{ .hashes = hashes, .start = 10 * j, .end = 10 * j + 10 } },
+                });
+            }
+        }
+
         fn writePhase(db: *DB, workload: Workload, n: u64, inputs: Inputs) !void {
             const hashes = inputs.hashes;
             switch (workload) {
@@ -138,19 +153,7 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
                         .{ .ctx = .{ .n = n } },
                     });
                 },
-                .map_transactions => {
-                    var j: u64 = 0;
-                    while (j < n) : (j += 1) {
-                        const last = try db.rootCursor().readPathSlot(void, &.{.{ .array_list_get = -1 }});
-                        _ = try db.rootCursor().writePath(PutKeys, &.{
-                            .array_list_init,
-                            .array_list_append,
-                            .{ .write = .{ .slot = last } },
-                            .{ .hash_map_init = .{} },
-                            .{ .ctx = .{ .hashes = hashes, .start = 10 * j, .end = 10 * j + 10 } },
-                        });
-                    }
-                },
+                .map_transactions => try putTransactions(db, hashes, 0, n),
                 .linked_append => {
                     _ = try db.rootCursor().writePath(AppendLinkedValues, &.{
                         .array_list_init,
@@ -167,8 +170,9 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
                         .{ .ctx = .{ .keys = inputs.keys, .n = n } },
                     });
                 },
-                // its write phase is a compaction, which is compactOnce
-                .map_compact => unreachable,
+                // their write phases are a compaction, which is compactOnce, and a sync,
+                // which is replicateOnce
+                .map_compact, .replicate => unreachable,
             }
         }
 
@@ -209,6 +213,8 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
                         if (got != i) fail("key {d} holds {d}", .{ i, got });
                     }
                 },
+                // its read phase is a sync, which is replicateOnce
+                .replicate => unreachable,
             }
         }
 
@@ -256,6 +262,8 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
                     }
                     if (count != n) fail("{d} entries, and {d} keys were written", .{ count, n });
                 },
+                // replicateOnce iterates as map_transactions does, over its t + 10 transactions
+                .replicate => unreachable,
             }
         }
 
@@ -317,7 +325,69 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
             return finish(io, &target, .map_compact, n, inputs, elapsedMs(write_start, write_end));
         }
 
+        /// replicate: a source of n + 10 transactions is ready, and a full sync brings a new
+        /// replica up to the first n, which is the write phase. an incremental sync brings it
+        /// the other 10, which is the read phase. the bytes go through memory.
+        fn replicateOnce(io: Io, gpa: Allocator, n: u64, inputs: Inputs) !Result {
+            var source_buffer = Io.Writer.Allocating.init(gpa);
+            defer source_buffer.deinit();
+            var source_file: ?Io.File = null;
+            defer if (source_file) |f| f.close(io);
+            var source = try DB.init(io, try newOpts(io, TMP_PATH, &source_buffer, &source_file));
+            try putTransactions(&source, inputs.hashes, 0, n);
+            const size_t = try source.committedSize();
+            try putTransactions(&source, inputs.hashes, n, n + 10);
+
+            var replica_buffer = Io.Writer.Allocating.init(gpa);
+            defer replica_buffer.deinit();
+            var replica_file: ?Io.File = null;
+            defer if (replica_file) |f| f.close(io);
+            var replica = try DB.init(io, try newOpts(io, TARGET_PATH, &replica_buffer, &replica_file));
+
+            // both start with nothing in them, so that growing them is on the clock
+            var full_sync = Io.Writer.Allocating.init(gpa);
+            defer full_sync.deinit();
+            var incremental_sync = Io.Writer.Allocating.init(gpa);
+            defer incremental_sync.deinit();
+
+            const write_start = nowNs(io);
+            try source.readCommitted(0, size_t, &full_sync.writer);
+            var full_reader = Io.Reader.fixed(full_sync.written());
+            try replica.applyReplicated(0, &full_reader, size_t);
+            const write_end = nowNs(io);
+
+            const after_full = try replica.committedSize();
+            if (after_full != size_t) fail("the full sync left a committed size of {d}, and it should be {d}", .{ after_full, size_t });
+
+            const read_start = nowNs(io);
+            const start = try source.replicationStart(try replica.replicaState());
+            const end = try source.committedSize();
+            try source.readCommitted(start, end, &incremental_sync.writer);
+            var incremental_reader = Io.Reader.fixed(incremental_sync.written());
+            try replica.applyReplicated(start, &incremental_reader, end - start);
+            const read_end = nowNs(io);
+
+            if (start != size_t) fail("the incremental sync starts at {d}, and it should be {d}", .{ start, size_t });
+            const after_incremental = try replica.committedSize();
+            if (after_incremental != end) fail("the incremental sync left a committed size of {d}, and it should be {d}", .{ after_incremental, end });
+            const file_size = try replica.core.length();
+            if (file_size != end) fail("the replica's file is {d} bytes, and the source has {d} committed", .{ file_size, end });
+
+            const iterate_start = nowNs(io);
+            try iteratePhase(&replica, .map_transactions, n + 10, inputs);
+            const iterate_end = nowNs(io);
+
+            return .{
+                .write_ms = elapsedMs(write_start, write_end),
+                .read_ms = elapsedMs(read_start, read_end),
+                .iterate_ms = elapsedMs(iterate_start, iterate_end),
+                .file_size = file_size,
+            };
+        }
+
         fn once(io: Io, gpa: Allocator, workload: Workload, n: u64, inputs: Inputs) !Result {
+            if (workload == .replicate) return replicateOnce(io, gpa, n, inputs);
+
             var buffer = Io.Writer.Allocating.init(gpa);
             defer buffer.deinit();
             var file: ?Io.File = null;
@@ -363,7 +433,7 @@ fn Bench(comptime kind: xitdb.DatabaseKind) type {
 }
 
 fn printLine(w: *Io.Writer, workload: Workload, phase: []const u8, kind: xitdb.DatabaseKind, n: u64, median_ms: f64, file_size: u64) !void {
-    try w.print("{{\"workload\": \"{s}\", \"phase\": \"{s}\", \"kind\": \"{s}\", \"n\": {d}, \"median_ms\": {d:.3}, \"file_size\": {d}}}\n", .{
+    try w.print("{{\"workload\": \"{s}\", \"phase\": \"{s}\", \"kind\": \"{s}\", \"n\": {d}, \"median_ms\": {d:.6}, \"file_size\": {d}}}\n", .{
         @tagName(workload),
         phase,
         @tagName(kind),
@@ -441,9 +511,11 @@ pub fn main(init: std.process.Init) !void {
     const compact_n = 2_000 / divide;
     // at least one, as a compaction with no moment to read has nothing to check
     const compact_file_n = @max(200 / divide, 1);
+    const replicate_n = 2_000 / divide;
+    const replicate_file_n = @max(200 / divide, 1);
 
     // every hash and key is computed before any clock starts
-    const hashes = try computeHashes(gpa, @max(map_n, map_file_n, 10 * transactions, 10 * compact_n, 10 * compact_file_n));
+    const hashes = try computeHashes(gpa, @max(map_n, map_file_n, 10 * transactions, 10 * compact_n, 10 * compact_file_n, 10 * (replicate_n + 10), 10 * (replicate_file_n + 10)));
     defer gpa.free(hashes);
     const inputs: Inputs = .{ .hashes = hashes, .keys = try computeKeys(arena, @max(sorted_n, sorted_file_n)) };
 
@@ -463,4 +535,7 @@ pub fn main(init: std.process.Init) !void {
     try Bench(.memory).run(io, gpa, w, only, .map_compact, compact_n, inputs);
     try Bench(.buffered_file).run(io, gpa, w, only, .map_compact, compact_n, inputs);
     try Bench(.file).run(io, gpa, w, only, .map_compact, compact_file_n, inputs);
+    try Bench(.memory).run(io, gpa, w, only, .replicate, replicate_n, inputs);
+    try Bench(.buffered_file).run(io, gpa, w, only, .replicate, replicate_n, inputs);
+    try Bench(.file).run(io, gpa, w, only, .replicate, replicate_file_n, inputs);
 }
