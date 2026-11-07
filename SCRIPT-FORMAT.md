@@ -862,11 +862,20 @@ What the words mean:
 Anything but those reads and writes through a cursor from a rolled-back transaction, like `slot` or `next`, is still an
 undefined use, as in section 10.
 
-**A transaction is poisoned** by an op in a callback that raises an error that's handled with `expect_error`, having changed the
-file (finding 16). An op refused by the table above changes nothing, so it poisons nothing. From then on every write raises
-`PoisonedTransaction`, and so does the transaction's end: it's rolled back when the outermost callback returns, the top-level
-op raises it, and it takes no commit ID. Reads go on working until then. This is what Zig does with that transaction made to
-fail.
+**A transaction is poisoned** by an op in a callback that raises an error that's handled with `expect_error`, having written
+something (finding 16). An op has written something if it issued a write to storage, **other than an init writing back its slot
+unchanged**. An init always writes its slot back, even when it copied nothing, so `[{"hash_map_init": {}}, {"hash_map_remove": ...}]`
+on a key that isn't there has written nothing. That takes no read, as the init has the slot in hand. An op refused by the table
+above writes nothing, so it poisons nothing. From then on every write raises `PoisonedTransaction`, and so does the transaction's
+end: it's rolled back when the outermost callback returns, the top-level op raises it, and it takes no commit ID. Reads go on
+working until then. This is what Zig does with that transaction made to fail.
+
+`run --port` goes by whether a byte of the file changed, as Zig has nowhere to count writes. The two agree on every fixture,
+which was measured with a counter in a copy of the engine. **They can differ in one shape, where a port may poison or not**: a
+`write_path` where a part fails after a `sorted_map_get` on a key that's already there, in a tree made in this transaction. That
+get writes the tree's header back unchanged. It takes the path API, as a wrapper's `put` ends with a write that can't fail
+like that. No fixture does it, and `gen --port-safe` can now and then, with `sorted_map_get_index` as the part that fails, so a
+fresh script can differ there without either side being wrong.
 
 **Opening.** A `reopen` raises `UntrustedRootHeader` if the committed size in the root header is past the end of the file,
 smaller than a new database, or doesn't end at a trailer whose checksum verifies. Those are where Zig raises `TruncatedDatabase`

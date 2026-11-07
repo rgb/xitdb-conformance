@@ -188,9 +188,11 @@ committed. An op that failed before writing anything isn't listed, as it wouldn'
 The oracle for a variant is Zig on the same script with that transaction made to fail, and that's what `run --port` does: it
 rolls back when the outermost callback returns, and that takes no commit ID.
 
-**One thing that may differ.** `run --port` says an op has written something if a byte of the file changed. A port that goes by
-having made a write would also poison on one that wrote the same bytes that were there. No script is known to do this, so this
-wouldn't show up in the fixtures either way.
+**What "written something" means was measured, not reasoned.** `run --port` goes by whether a byte of the file changed. With a
+counter in a copy of the engine, 79 handled failures in the fixtures issued a write and changed no byte, in 34 fixtures, because an
+init always writes its slot back. So the port's definition leaves that out (`SCRIPT-FORMAT.md` section 11), and then the two agree
+on all 121 passing fixtures on `185af01`. Of 37,122 handled failures in fresh scripts, 1 still differs, as a sorted get writes its
+header back too. A port may go either way on that shape, and no fixture has it.
 
 ## Finding 17: `write_if_empty` and the snapshot
 
