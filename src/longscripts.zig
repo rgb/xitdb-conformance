@@ -795,6 +795,226 @@ fn compactFullBlocks(w: *Io.Writer) !void {
     try end(w);
 }
 
+// compaction of sorted trees, whose branches hold keys of their own
+
+const SEPARATED_KEYS = 210;
+
+/// a key as a script writes it, in order of i. they go in in that order, so a leaf that
+/// fills up splits into 8 and 9, and every eighth key is a separator. those come in each
+/// form a key can have: too long for a slot, exactly as long as a slot, one byte longer,
+/// and short but with a zero byte in it, which is a byte record too.
+fn separatedKey(buffer: []u8, i: u64) []const u8 {
+    return (if (i % 8 != 0)
+        (if (i % 3 == 0)
+            std.fmt.bufPrint(buffer, "\"{d:0>3} is a key that is too long for a slot\"", .{i})
+        else
+            std.fmt.bufPrint(buffer, "\"{d:0>3}\"", .{i}))
+    else switch ((i / 8) % 4) {
+        0 => std.fmt.bufPrint(buffer, "\"{d:0>3} is a separator that is too long for a slot\"", .{i}),
+        1 => std.fmt.bufPrint(buffer, "\"{d:0>3}eight\"", .{i}),
+        2 => std.fmt.bufPrint(buffer, "\"{d:0>3}ninety\"", .{i}),
+        else => std.fmt.bufPrint(buffer, "{{\"hex\":\"3{d}3{d}3{d}00\"}}", .{ i / 100, i / 10 % 10, i % 10 }),
+    }) catch unreachable;
+}
+
+fn separatedPut(s: *S, i: u64, value: u64) !void {
+    var buffer: [64]u8 = undefined;
+    const key = separatedKey(&buffer, i);
+    try s.write(GET_SORTED ++ ",{{\"sorted_map_get\":{{\"value\":{s}}}}},{{\"write\":{{\"uint\":{d}}}}}", .{ key, value });
+    try s.write(GET_SORTED_SET ++ ",{{\"sorted_map_get\":{{\"key\":{s}}}}}", .{key});
+}
+
+fn separatedRemove(s: *S, i: u64) !void {
+    var buffer: [64]u8 = undefined;
+    const key = separatedKey(&buffer, i);
+    try s.write(GET_SORTED ++ ",{{\"sorted_map_remove\":{s}}}", .{key});
+    try s.write(GET_SORTED_SET ++ ",{{\"sorted_map_remove\":{s}}}", .{key});
+}
+
+/// every key, through the branches. `put_back` says if key 16 is back
+fn checkSeparated(s: *S, count: u64, put_back: bool) !void {
+    var buffer: [64]u8 = undefined;
+    try s.op("{{\"op\":\"count\",\"on\":\"root\",\"expect\":1,\"note\":\"only the last moment\"}}", .{});
+    try s.readMoment(0);
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"sorted\"}}}}}}],\"as\":\"sorted\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"sorted\",\"expect\":{d}}}", .{count});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"set\"}}}}}}],\"as\":\"set\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"set\",\"expect\":{d}}}", .{count});
+    for (0..SEPARATED_KEYS) |i| {
+        const key = separatedKey(&buffer, i);
+        const gone = i == 24 or i == 32 or (i >= 48 and i < 56) or (i == 16 and !put_back);
+        if (gone) {
+            try s.op("{{\"op\":\"read_path\",\"on\":\"sorted\",\"path\":[{{\"sorted_map_get\":{{\"value\":{s}}}}}],\"expect_null\":true}}", .{key});
+            try s.op("{{\"op\":\"read_path\",\"on\":\"set\",\"path\":[{{\"sorted_map_get\":{{\"key\":{s}}}}}],\"expect_null\":true}}", .{key});
+        } else {
+            const value = if (i == 64) 1064 else if (i == 16) 2016 else i;
+            try s.op("{{\"op\":\"read_path\",\"on\":\"sorted\",\"path\":[{{\"sorted_map_get\":{{\"value\":{s}}}}}],\"as\":\"v\"}}", .{key});
+            try s.op("{{\"op\":\"read_uint\",\"on\":\"v\",\"expect\":{d}}}", .{value});
+            try s.op("{{\"op\":\"read_path\",\"on\":\"set\",\"path\":[{{\"sorted_map_get\":{{\"key\":{s}}}}}],\"as\":\"k\"}}", .{key});
+            try s.op("{{\"op\":\"read_bytes\",\"on\":\"k\",\"expect\":{s}}}", .{key});
+        }
+    }
+}
+
+fn compactSortedSeparators(w: *Io.Writer) !void {
+    var s = try begin(w, "Compacting a sorted map and set three levels deep, whose branches hold keys of every form as separators. A removed key's record stays, as its separator still points at it, and that's all that does, so the compactor has to copy it. A key put back has a new record beside the separator's old one. A branch that split off keeps a key in its first separator, which nothing reads, and that's copied too.");
+    var buffer: [64]u8 = undefined;
+
+    try s.beginMoment();
+    for (0..SEPARATED_KEYS) |i| try separatedPut(&s, i, i);
+    try s.endMoment();
+
+    // the separators stay, including 64's, which is also the first separator of the second
+    // branch one level down. and 48 to 55 are a whole leaf, which stays, empty
+    try s.beginMoment();
+    for ([_]u64{ 16, 24, 32, 64 }) |i| try separatedRemove(&s, i);
+    for (48..56) |i| try separatedRemove(&s, i);
+    try s.endMoment();
+
+    try s.beginMoment();
+    try separatedPut(&s, 64, 1064);
+    try s.endMoment();
+
+    try s.op("{{\"op\":\"compact\",\"into\":\"target\",\"file_id\":\"00000000000000bb\",\"offset_map\":\"memory\"}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"target\"}}", .{});
+    // 210, then 12 gone, then one back
+    try checkSeparated(&s, 199, false);
+
+    // they're looked at when a walk starts from a key, or counts the keys before one. 16 is
+    // gone, with 16 others before it. 48 to 55 are gone, and there's 45 keys before 56
+    try s.op("{{\"op\":\"iterator\",\"on\":\"sorted\",\"from_key\":{s},\"as\":\"it\",\"note\":\"from a key that's gone, whose separator is still there\"}}", .{separatedKey(&buffer, 16)});
+    try s.op("{{\"op\":\"next\",\"on\":\"it\",\"as\":\"e\",\"expect_null\":false}}", .{});
+    try s.op("{{\"op\":\"read_key_value_pair\",\"on\":\"e\",\"key_as\":\"k\"}}", .{});
+    try s.op("{{\"op\":\"read_bytes\",\"on\":\"k\",\"expect\":{s}}}", .{separatedKey(&buffer, 17)});
+    try s.op("{{\"op\":\"iterator\",\"on\":\"set\",\"from_key\":{s},\"as\":\"it\",\"note\":\"from an empty leaf\"}}", .{separatedKey(&buffer, 48)});
+    try s.op("{{\"op\":\"next\",\"on\":\"it\",\"as\":\"e\",\"expect_null\":false}}", .{});
+    try s.op("{{\"op\":\"read_bytes\",\"on\":\"e\",\"expect\":{s}}}", .{separatedKey(&buffer, 56)});
+    try s.op("{{\"op\":\"rank\",\"on\":\"sorted\",\"key\":{s},\"expect\":16}}", .{separatedKey(&buffer, 16)});
+    try s.op("{{\"op\":\"rank\",\"on\":\"set\",\"key\":{s},\"expect\":45}}", .{separatedKey(&buffer, 56)});
+
+    // and written to, where a new key has to find its way past the separators
+    try s.beginMoment();
+    try separatedPut(&s, 16, 2016);
+    try s.write(GET_SORTED ++ ",{{\"sorted_map_get\":{{\"value\":\"016 and just after it\"}}}},{{\"write\":{{\"uint\":3016}}}}", .{});
+    try s.write(GET_SORTED_SET ++ ",{{\"sorted_map_get\":{{\"key\":\"016 and just after it\"}}}}", .{});
+    try s.endMoment();
+
+    // the target is a source like any other. nothing about its separators gives it away
+    try s.op("{{\"op\":\"compact\",\"into\":\"again\",\"file_id\":\"00000000000000bc\",\"offset_map\":\"memory\"}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"again\"}}", .{});
+    try checkSeparated(&s, 201, true);
+    try end(w);
+}
+
+/// too long for a slot, every one of them, and in no order
+fn writeLongKey(buffer: []u8, i: u64) []const u8 {
+    return std.fmt.bufPrint(buffer, "a sorted key that is too long for a slot {d:0>4}", .{(i * 7919) % 1000}) catch unreachable;
+}
+
+fn longPut(s: *S, comptime map: []const u8, comptime set: []const u8, i: u64, value: u64) !void {
+    var buffer: [64]u8 = undefined;
+    const key = writeLongKey(&buffer, i);
+    try s.write("{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"" ++ map ++ "\"}}}}}},{{\"sorted_map_init\":{{}}}},{{\"sorted_map_get\":{{\"value\":\"{s}\"}}}},{{\"write\":{{\"uint\":{d}}}}}", .{ key, value });
+    try s.write("{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"" ++ set ++ "\"}}}}}},{{\"sorted_map_init\":{{\"set\":true}}}},{{\"sorted_map_get\":{{\"key\":\"{s}\"}}}}", .{key});
+}
+
+fn longRemove(s: *S, i: u64) !void {
+    var buffer: [64]u8 = undefined;
+    const key = writeLongKey(&buffer, i);
+    try s.write(GET_SORTED ++ ",{{\"sorted_map_remove\":\"{s}\"}}", .{key});
+    try s.write(GET_SORTED_SET ++ ",{{\"sorted_map_remove\":\"{s}\"}}", .{key});
+}
+
+fn cloneSorted(s: *S, comptime key: []const u8, comptime clone_key: []const u8) !void {
+    try s.op("{{\"op\":\"read_path_slot\",\"on\":\"m\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"" ++ key ++ "\"}}}}}}],\"as\":\"original\"}}", .{});
+    try s.write("{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"" ++ clone_key ++ "\"}}}}}},{{\"write\":{{\"slot\":{{\"var\":\"original\"}}}}}}", .{});
+}
+
+fn checkLong(s: *S, comptime map: []const u8, comptime set: []const u8, count: u64, comptime only_from: u64, comptime only_to: u64) !void {
+    var buffer: [64]u8 = undefined;
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"" ++ map ++ "\"}}}}}}],\"as\":\"sorted\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"sorted\",\"expect\":{d}}}", .{count});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"" ++ set ++ "\"}}}}}}],\"as\":\"set\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"set\",\"expect\":{d}}}", .{count});
+    for (0..340) |i| {
+        const key = writeLongKey(&buffer, i);
+        const there = if (i < 300) i < 100 or i >= 140 else i >= only_from and i < only_to;
+        if (there) {
+            const value = if (i < 300 and i % 3 == 0) 1000 + i / 3 else i;
+            try s.op("{{\"op\":\"read_path\",\"on\":\"sorted\",\"path\":[{{\"sorted_map_get\":{{\"value\":\"{s}\"}}}}],\"as\":\"v\"}}", .{key});
+            try s.op("{{\"op\":\"read_uint\",\"on\":\"v\",\"expect\":{d}}}", .{value});
+            try s.op("{{\"op\":\"read_path\",\"on\":\"set\",\"path\":[{{\"sorted_map_get\":{{\"key\":\"{s}\"}}}}],\"as\":\"k\"}}", .{key});
+            try s.op("{{\"op\":\"read_bytes\",\"on\":\"k\",\"expect\":\"{s}\"}}", .{key});
+        } else {
+            try s.op("{{\"op\":\"read_path\",\"on\":\"sorted\",\"path\":[{{\"sorted_map_get\":{{\"value\":\"{s}\"}}}}],\"expect_null\":true}}", .{key});
+            try s.op("{{\"op\":\"read_path\",\"on\":\"set\",\"path\":[{{\"sorted_map_get\":{{\"key\":\"{s}\"}}}}],\"expect_null\":true}}", .{key});
+        }
+    }
+}
+
+fn compactSortedHistory(w: *Io.Writer) !void {
+    var s = try begin(w, "Compacting sorted maps and sets three levels deep, with every key a byte record, after a history that changed them: values replaced, keys removed, clones that share nodes with what they were made from and then go their own ways, and a sorted map inside another. The records are all over the source, and in the target each is once, where the first thing that reaches it put it.");
+    var buffer: [64]u8 = undefined;
+
+    try s.beginMoment();
+    for (0..300) |i| try longPut(&s, "sorted", "set", i, i);
+    try s.endMoment();
+
+    // a new value copies the pair and the leaf, and not the key's record, and a separator
+    // that was made from it goes on pointing there
+    try s.beginMoment();
+    for (0..100) |i| {
+        try s.write(GET_SORTED ++ ",{{\"sorted_map_get\":{{\"value\":\"{s}\"}}}},{{\"write\":{{\"uint\":{d}}}}}", .{ writeLongKey(&buffer, i * 3), 1000 + i });
+    }
+    for (100..140) |i| try longRemove(&s, i);
+    try s.endMoment();
+
+    try s.beginMoment();
+    try cloneSorted(&s, "sorted", "sorted_clone");
+    try cloneSorted(&s, "set", "set_clone");
+    for (300..320) |i| try longPut(&s, "sorted_clone", "set_clone", i, i);
+    for (320..340) |i| try longPut(&s, "sorted", "set", i, i);
+    for (0..2) |outer| {
+        for (0..20) |i| {
+            var inner_buffer: [64]u8 = undefined;
+            try s.write("{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"outer\"}}}}}},{{\"sorted_map_init\":{{}}}},{{\"sorted_map_get\":{{\"value\":\"{s}\"}}}},{{\"sorted_map_init\":{{}}}},{{\"sorted_map_get\":{{\"value\":\"{s}\"}}}},{{\"write\":{{\"uint\":{d}}}}}", .{ writeLongKey(&buffer, outer), writeLongKey(&inner_buffer, 500 + i), i });
+        }
+    }
+    try s.endMoment();
+
+    try s.op("{{\"op\":\"compact\",\"into\":\"target\",\"file_id\":\"00000000000000bb\",\"offset_map\":\"memory\"}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"target\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"root\",\"expect\":1,\"note\":\"only the last moment\"}}", .{});
+    try s.readMoment(0);
+    // 300 - 40, then 20 more in each
+    try checkLong(&s, "sorted", "set", 280, 320, 340);
+    try checkLong(&s, "sorted_clone", "set_clone", 280, 300, 320);
+    for (0..2) |outer| {
+        try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"outer\"}}}}}},{{\"sorted_map_get\":{{\"value\":\"{s}\"}}}}],\"as\":\"inner\"}}", .{writeLongKey(&buffer, outer)});
+        try s.op("{{\"op\":\"count\",\"on\":\"inner\",\"expect\":20}}", .{});
+        try s.op("{{\"op\":\"read_path\",\"on\":\"inner\",\"path\":[{{\"sorted_map_get\":{{\"value\":\"{s}\"}}}}],\"as\":\"v\"}}", .{writeLongKey(&buffer, 519)});
+        try s.op("{{\"op\":\"read_uint\",\"on\":\"v\",\"expect\":19}}", .{});
+    }
+
+    // and it goes on. what's put back gets a new record, and the separators stay as they were
+    try s.beginMoment();
+    for (340..360) |i| try longPut(&s, "sorted", "set", i, i);
+    for (100..110) |i| try longPut(&s, "sorted", "set", i, i);
+    for (0..10) |i| try longRemove(&s, i);
+    try s.endMoment();
+    try s.readMoment(-1);
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"sorted\"}}}}}}],\"as\":\"sorted\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"sorted\",\"expect\":300}}", .{});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"set\"}}}}}}],\"as\":\"set\"}}", .{});
+    try s.op("{{\"op\":\"count\",\"on\":\"set\",\"expect\":300}}", .{});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"sorted\",\"path\":[{{\"sorted_map_get\":{{\"value\":\"{s}\"}}}}],\"as\":\"v\"}}", .{writeLongKey(&buffer, 105)});
+    try s.op("{{\"op\":\"read_uint\",\"on\":\"v\",\"expect\":105}}", .{});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"sorted\",\"path\":[{{\"sorted_map_get\":{{\"value\":\"{s}\"}}}}],\"expect_null\":true}}", .{writeLongKey(&buffer, 5)});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"set\",\"path\":[{{\"sorted_map_get\":{{\"key\":\"{s}\"}}}}],\"as\":\"k\"}}", .{writeLongKey(&buffer, 359)});
+    try s.op("{{\"op\":\"read_bytes\",\"on\":\"k\",\"expect\":\"{s}\"}}", .{writeLongKey(&buffer, 359)});
+    try end(w);
+}
+
 // replication
 
 /// a replica sends its state, and the source sends back what it doesn't have yet. `first`
@@ -998,6 +1218,8 @@ const SCRIPTS = [_]Script{
     .{ .name = "iterator-tiers-sorted", .write = iteratorTiersSorted },
     .{ .name = "compact-partial-blocks", .write = compactPartialBlocks },
     .{ .name = "compact-full-blocks", .write = compactFullBlocks },
+    .{ .name = "compact-sorted-separators", .write = compactSortedSeparators },
+    .{ .name = "compact-sorted-history", .write = compactSortedHistory },
     .{ .name = "replicate-history", .write = replicateHistory },
     .{ .name = "replicate-roots", .write = replicateRoots },
 };
