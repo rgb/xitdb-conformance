@@ -1,6 +1,6 @@
 {
   "format": "xitdb-fixtures/1",
-  "conformance_commit": "afa522709721d3292a5f9586c2d163673c58c228",
+  "conformance_commit": "2095f490a4b929c78033e5c67766aeb761159ae6",
   "zig_commit": "6b93af1af3a260399fa0a0b1b268ded2cbf5eec5",
   "zig_version": "0.17.1",
   "fixtures": [
@@ -34,6 +34,7 @@
     {"name": "hash-size-64", "outcome": "pass", "format": "xitdb-script/1", "hash_size": 64, "zig_commit": "6b93af1af3a260399fa0a0b1b268ded2cbf5eec5", "script": "valid/hash-size-64.json", "db": "valid/hash-size-64.db", "sidecar": "valid/hash-size-64.db.sidecar.json", "collections": ["array_list", "hash_map"], "features": []},
     {"name": "hash-size-8", "outcome": "pass", "format": "xitdb-script/1", "hash_size": 8, "zig_commit": "6b93af1af3a260399fa0a0b1b268ded2cbf5eec5", "script": "valid/hash-size-8.json", "db": "valid/hash-size-8.db", "sidecar": "valid/hash-size-8.db.sidecar.json", "collections": ["hash_map"], "features": []},
     {"name": "held-init-after-freeze", "outcome": "pass", "format": "xitdb-script/1", "hash_size": 20, "zig_commit": "6b93af1af3a260399fa0a0b1b268ded2cbf5eec5", "script": "valid/held-init-after-freeze.json", "db": "valid/held-init-after-freeze.db", "sidecar": "valid/held-init-after-freeze.db.sidecar.json", "collections": ["array_list", "hash_map"], "features": []},
+    {"name": "held-init-after-root-copy", "outcome": "pass", "format": "xitdb-script/1", "hash_size": 20, "zig_commit": "6b93af1af3a260399fa0a0b1b268ded2cbf5eec5", "script": "valid/held-init-after-root-copy.json", "db": "valid/held-init-after-root-copy.db", "sidecar": "valid/held-init-after-root-copy.db.sidecar.json", "collections": ["array_list", "hash_map"], "features": []},
     {"name": "iterator-after-slice", "outcome": "pass", "format": "xitdb-script/1", "hash_size": 20, "zig_commit": "6b93af1af3a260399fa0a0b1b268ded2cbf5eec5", "script": "valid/iterator-after-slice.json", "db": "valid/iterator-after-slice.db", "sidecar": "valid/iterator-after-slice.db.sidecar.json", "collections": ["array_list"], "features": ["iterators"]},
     {"name": "iterator-tiers-linked", "outcome": "pass", "format": "xitdb-script/1", "hash_size": 20, "zig_commit": "6b93af1af3a260399fa0a0b1b268ded2cbf5eec5", "script": "valid/iterator-tiers-linked.json", "db": "valid/iterator-tiers-linked.db", "sidecar": "valid/iterator-tiers-linked.db.sidecar.json", "collections": ["array_list", "hash_map", "linked_array_list"], "features": ["iterators"]},
     {"name": "iterator-tiers-sorted", "outcome": "pass", "format": "xitdb-script/1", "hash_size": 20, "zig_commit": "6b93af1af3a260399fa0a0b1b268ded2cbf5eec5", "script": "valid/iterator-tiers-sorted.json", "db": "valid/iterator-tiers-sorted.db", "sidecar": "valid/iterator-tiers-sorted.db.sidecar.json", "collections": ["array_list", "hash_map", "sorted_map"], "features": ["iterators", "rank"]},
