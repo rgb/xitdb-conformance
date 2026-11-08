@@ -67,7 +67,7 @@ const ERROR_NAMES = [_][]const u8{
 };
 
 /// what only the port raises, so only --port lets a script name them
-const PORT_ERROR_NAMES = [_][]const u8{ "StaleCursor", "PoisonedTransaction", "UntrustedRootHeader", "EmptyLastMoment", "StructuralSlot" };
+const PORT_ERROR_NAMES = [_][]const u8{ "StaleCursor", "PoisonedTransaction", "UntrustedRootHeader", "EmptyLastMoment", "StructuralSlot", "ImmutableBytes" };
 
 /// set by --port, which SCRIPT-FORMAT.md says all about
 var port_mode = false;
@@ -417,6 +417,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         // where a root cursor says it is, though it reads the root again each time
         const ROOT_HEADER_START = 20;
         const INITIAL_SIZE = 62;
+        const SLOT_SIZE = 9;
 
         const Binding = union(enum) {
             rw: RW,
@@ -489,6 +490,19 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 defer loc_len = saved_loc;
 
                 r.bind(self.name, .{ .rw = cursor.* });
+                if (r.callback_depth == 0) {
+                    r.body_position = cursor.slot_ptr.position;
+                    r.body_db = cursor.db;
+                }
+                // the parts before this callback in its op's path are held to the position check here,
+                // as what's written after it is the ops in it, which are held to it each by itself
+                if (port_mode and r.position_stack.items.len > 0) {
+                    const held = &r.position_stack.items[r.position_stack.items.len - 1];
+                    if (try r.changedBelow(held.before)) {
+                        held.refused = true;
+                        return error.ImmutableBytes;
+                    }
+                }
                 r.callback_depth += 1;
                 defer r.callback_depth -= 1;
                 try r.execOps(self.ops);
@@ -531,6 +545,14 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         allow_port_differences: bool = false,
         note_port_changes: bool = false,
         callback_depth: usize = 0,
+        // with --port: how many freezes the current database had had when the op that's running
+        // began, which is what a cursor it makes is stamped with (D24 item 6a)
+        op_freezes: ?u64 = null,
+        // with --port: where the slot of the transaction's body is, which the position check
+        // exempts, and for each write op that's running, the file before it began
+        body_position: ?u64 = null,
+        body_db: ?*DB = null,
+        position_stack: std.ArrayList(PositionHeld) = .empty,
         // where in this transaction a failed op left something behind, which only
         // matters if the transaction goes on to commit
         failed_with_writes: std.ArrayList([]const u8) = .empty,
@@ -767,7 +789,13 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         fn bind(self: *Self, name: []const u8, binding: Binding) void {
             var freezes: u64 = 0;
             if (dbOf(binding)) |db| {
-                if (self.storeOf(db)) |store| freezes = store.freezes;
+                if (self.storeOf(db)) |store| {
+                    freezes = store.freezes;
+                    // what an op gives back counts as made before any freeze during it, a concat's included
+                    if (store == self.store) if (self.op_freezes) |at_start| {
+                        freezes = @min(freezes, at_start);
+                    };
+                }
             }
             self.env.put(self.arena, name, .{ .binding = binding, .born = self.top_index, .writes = self.writes, .freezes = freezes }) catch die("out of memory", .{});
         }
@@ -877,7 +905,13 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             }
             const store = self.storeOf(cursor.db) orelse return;
             if (entry.freezes < store.freezes) {
-                if (beginsWithInit(path)) self.noteChange("18-init") else self.noteChange("18-other");
+                if (!beginsWithInit(path)) {
+                    self.noteChange("18-other");
+                } else if (self.atBody(cursor)) {
+                    self.noteChange("18-init");
+                } else {
+                    self.noteChange("18-init-held");
+                }
             }
         }
 
@@ -947,7 +981,8 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     // an init through one of these would rewrite a slot that's committed
                     if (e.born != self.top_index) return error.StaleCursor;
                     const store = self.storeOf(c.db) orelse return;
-                    if (e.freezes < store.freezes and !beginsWithInit(path)) return error.StaleCursor;
+                    // after a freeze, only a path that begins with an init, through a cursor at the body's slot (D24)
+                    if (e.freezes < store.freezes and !(self.atBody(c) and beginsWithInit(path))) return error.StaleCursor;
                 }
             }
 
@@ -981,6 +1016,100 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 },
                 else => return false,
             }
+        }
+
+        /// what D24's position check holds a write op to: the file before the op began, and where
+        /// the frozen point was then, the transaction's start or its last freeze
+        const Before = struct { bytes: []u8, frozen: usize };
+        const PositionHeld = struct { before: Before, refused: bool = false };
+
+        /// whether a cursor's slot is the transaction's body's, the slot of the cursor a top-level op's
+        /// callback is given, which nothing in the transaction can copy
+        fn atBody(self: *Self, cursor: RW) bool {
+            const position = self.body_position orelse return false;
+            return cursor.db == self.body_db.? and cursor.slot_ptr.position == position;
+        }
+
+        fn isPositionHeld(op: ObjectMap) bool {
+            const name = op.get("op").?.string;
+            return isKey(name, "write_path") or isKey(name, "write") or isKey(name, "write_if_empty") or isKey(name, "writer");
+        }
+
+        fn hasCallback(op: ObjectMap) bool {
+            const path = op.get("path") orelse return false;
+            const parts = path.array.items;
+            return parts.len > 0 and isKey(partName(parts[parts.len - 1]), "ctx");
+        }
+
+        /// the file as it is now, open or not. the caller frees it
+        fn fileBytes(self: *Self) ![]u8 {
+            if (kind == .memory) return self.gpa.dupe(u8, self.store.buffer.written());
+            try self.store.db.core.flush();
+            return Io.Dir.cwd().readFileAlloc(self.io, self.store.out_path, self.gpa, .unlimited);
+        }
+
+        fn takeBefore(self: *Self) !Before {
+            const frozen: u64 = self.store.db.tx_start orelse try self.store.db.committedSize();
+            return .{ .bytes = try self.fileBytes(), .frozen = @intCast(frozen) };
+        }
+
+        /// whether a write changed a byte below the frozen point. a commit writes the root header,
+        /// and an init through the transaction's body writes the body's slot, which D24 exempts
+        fn changedBelow(self: *Self, before: Before) !bool {
+            const now = try self.fileBytes();
+            defer self.gpa.free(now);
+            const end = @min(before.frozen, @min(before.bytes.len, now.len));
+            for (0..end) |i| {
+                if (before.bytes[i] == now[i]) continue;
+                if (i >= ROOT_HEADER_START and i < ROOT_HEADER_START + ROOT_HEADER_SIZE) continue;
+                if (self.body_position) |body| if (i >= body and i < body + SLOT_SIZE) continue;
+                return true;
+            }
+            return false;
+        }
+
+        /// puts the file back as it was, without what writeRaw does to the trailers it knows of
+        fn restoreBytes(self: *Self, before: Before) !void {
+            if (kind == .memory) {
+                self.store.buffer.shrinkRetainingCapacity(0);
+                try self.store.buffer.writer.writeAll(before.bytes);
+            } else {
+                try self.store.db.core.flush();
+                try self.store.out.writePositionalAll(self.io, before.bytes, 0);
+                try self.store.out.setLength(self.io, before.bytes.len);
+            }
+        }
+
+        /// with --port, a write op that changed committed or frozen bytes, which the port refuses at
+        /// that write (D24 items 2 and 6c), before the part it's in writes anything. what the parts before
+        /// it wrote stays, a copy included, and if that changed a byte, it poisons the transaction as any
+        /// failed op that wrote does. so the file is put back, and then the parts before the refused one,
+        /// found by running the path a part longer each time, are run again. Zig on the script without
+        /// the op, or with its transaction failed, is the oracle
+        fn refuseByPosition(self: *Self, op: ObjectMap, before: Before, succeeded: bool) anyerror!void {
+            if (self.callback_depth == 0 and succeeded and !hasCallback(op)) {
+                die("the port refuses this at the top level with ImmutableBytes, after Zig has committed it, which run --port can't undo", .{});
+            }
+            try self.restoreBytes(before);
+            // at the top level, the transaction fails, and that's the file as it was
+            if (self.callback_depth == 0 or !isKey(op.get("op").?.string, "write_path")) return error.ImmutableBytes;
+
+            const parts = self.parsePath(op.get("path").?);
+            const cursor = self.rwValue(cursorName(op));
+            const n = if (hasCallback(op)) parts.len - 1 else parts.len;
+            var refused_at: usize = n;
+            var length: usize = 1;
+            while (length <= n) : (length += 1) {
+                _ = cursor.writePath(Ctx, parts[0..length]) catch {};
+                const changed = try self.changedBelow(before);
+                try self.restoreBytes(before);
+                if (changed) {
+                    refused_at = length;
+                    break;
+                }
+            }
+            if (refused_at > 1) _ = cursor.writePath(Ctx, parts[0 .. refused_at - 1]) catch {};
+            return error.ImmutableBytes;
         }
 
         /// the bytes of a file, as they are in storage. it has to be closed
@@ -1361,7 +1490,25 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 null;
             const watches_for_poison = port_mode and expected != null and self.callback_depth > 0;
             const hash_before = if (watches_for_poison) try self.fileHash() else 0;
-            const result = self.dispatch(op);
+
+            const saved_op_freezes = self.op_freezes;
+            self.op_freezes = self.store.freezes;
+            defer self.op_freezes = saved_op_freezes;
+
+            const held_by_position = port_mode and isPositionHeld(op);
+            if (held_by_position) {
+                const file_before = try self.takeBefore();
+                self.position_stack.append(self.arena, .{ .before = file_before }) catch die("out of memory", .{});
+            }
+            var result = self.dispatch(op);
+            if (held_by_position) {
+                const held = self.position_stack.pop().?;
+                defer self.gpa.free(held.before.bytes);
+                // an op with a callback was held to it when the callback started
+                if (held.refused or (!hasCallback(op) and try self.changedBelow(held.before))) {
+                    result = self.refuseByPosition(op, held.before, if (result) |_| true else |_| false);
+                }
+            }
             if (watches_for_poison) {
                 if (result) |_| {} else |_| {
                     if (try self.fileHash() != hash_before) self.store.poisoned = true;
@@ -1784,7 +1931,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                         }
                     }
                     const next = try cursor.writePath(Ctx, path);
-                    // a concat freezes everything, and what it gives back is what's refreshed
+                    // a concat freezes everything. what it gives back counts as made before, by its stamp
                     if (concat) {
                         if (self.storeOf(cursor.db)) |store| store.freezes += 1;
                     }
@@ -2033,6 +2180,8 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 defer loc_len = saved_loc;
 
                 self.top_index = i;
+                self.body_position = null;
+                self.body_db = null;
                 self.compacted_into = null;
                 for (self.stores.items) |store| store.poisoned = false;
                 self.execOp(op.object) catch |err| die("unexpected error {s}, which started at {s}", .{ @errorName(err), error_loc_buf[0..error_loc_len] });

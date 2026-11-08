@@ -546,7 +546,7 @@ Truncating is all a rollback does, so it doesn't undo a write that landed before
 | `PathPartMustBeAtEnd` | a `ctx` part that isn't last |
 | `ScriptAbort` | the `fail` op. It isn't an engine error, but it travels like one |
 | `WriteFailed` | a transaction on a read-only file |
-| `StaleCursor`, `PoisonedTransaction`, `UntrustedRootHeader`, `EmptyLastMoment`, `StructuralSlot` | only with `--port`, and in the port ([section 11](#what-the-port-does)) |
+| `StaleCursor`, `PoisonedTransaction`, `UntrustedRootHeader`, `EmptyLastMoment`, `StructuralSlot`, `ImmutableBytes` | only with `--port`, and in the port ([section 11](#what-the-port-does)) |
 | `InvalidDatabase` | `reopen`: a bad magic number, a committed size below 62, or a last trailer whose checksum doesn't match. `apply_replicated`: bytes that don't end in a trailer, or in one for another file. `read_committed` from 0: an `end` that isn't the end of a trailer |
 | `InvalidVersion` | `reopen`: a version other than 1 |
 | `InvalidHashSize` | `reopen`: a hash size in the header other than the one stated |
@@ -780,7 +780,9 @@ All of these look like mistakes and all of them are what Zig does. `overwriting-
    an earlier transaction does the same, however many new cursors were made from it in between. Neither is an error,
    and a rollback doesn't undo them, because truncating only removes bytes past the commit, which is an undefined use
    if what was written points at bytes that were removed (section 10). The collection wrappers don't do this, because
-   they always run the init part. Storage kinds agree on the result.
+   they always run the init part. Storage kinds agree on the result. The port refuses both: the first with `ImmutableBytes`
+   and the second with `StaleCursor` ([below](#what-the-port-does)), so `overwriting-committed-bytes` and its `-linked` and
+   `-sorted` versions are only for Zig, and each has a `--port` version.
 2. **A remove ends the path.** `hash_map_remove` and `sorted_map_remove` return without looking at the parts after
    them, with no error. A `write` after one does nothing, and a `ctx` after one doesn't run.
 3. **`write_path` doesn't update the cursor it's called on** (section 4), so a callback that only uses `write_path`
@@ -830,9 +832,10 @@ A runner's calls don't change for any of this, only what the engine under them d
 
 ### What the port does
 
-**The fixtures are what the port has to do**, once it has its guards (D16 to D19 and D22 in `director/decisions.md`). So they
-are what Zig does, apart from this. `run --port` acts it out on the Zig engine, and that's what writes the expected files. It
-can, because **each guard refuses before writing anything**, so the file stays as if the op had never been there.
+**The fixtures are what the port has to do**, once it has its guards (D16 to D19, D22 and D24 in `director/decisions.md`). So
+they are what Zig does, apart from this. `run --port` acts it out on the Zig engine, and that's what writes the expected files. It
+can, because **each guard refuses before writing anything**, so the file stays as if the op had never been there. The one that
+refuses at the write, row 9, has its own paragraph below.
 `tests/zig-only.txt` lists the scripts that do what the port refuses, which aren't fixtures. `tests/port-variants/` has the
 port's versions of those written by hand, as `<name>--port`, and a few that are an undefined use in Zig, whose oracle is Zig on
 the same script without what the port refuses.
@@ -857,24 +860,32 @@ The port's own tests found that its first guards missed the byte writer for row 
 | 3 | A write in a transaction that's poisoned | `PoisonedTransaction` |
 | 4 | A write through a sorted entry's key cursor, from `read_key_value_pair` (finding 2) | `CursorNotWriteable` |
 | 5 | A write during a transaction through a cursor from an earlier one (finding 1). **That includes an init**, which would rewrite a slot that's committed | `StaleCursor` |
-| 6 | A write through a cursor made before the last freeze in this transaction (D18), unless it's a `write_path` whose path **begins with an init part**. That's the way to go on after a freeze, and what follows it goes through what it made | `StaleCursor` |
+| 6 | A write through a cursor made before the last freeze in this transaction (D24), **an init included**. The one exception is a `write_path` whose path begins with an init part **through a cursor at the transaction's body's slot** (below). That's the way to go on after a freeze, and what follows it goes through what it made. An init through a cursor at any other slot would write that cursor's slot in place, in a record from before the freeze, which a clone or a second way down from the root may have copied, and the write would be lost (findings 29 and 30, `held-init-after-root-copy`) | `StaleCursor` |
 | 7 | A path with anything after `hash_map_remove` or `sorted_map_remove` (finding 12), on any cursor. It raises before removing anything | `PathPartMustBeAtEnd` |
 | 8 | A slot whose tag is `index`, `kv_pair` or `sorted_kv_pair` (finding 3), which is part of a collection's structure: in `write`, in `write_if_empty` whatever the slot holds, or in a path's `write`, before any of the path's parts run. So nothing is written, and through the root no transaction begins. With no transaction going, `write` and `write_path` below the root raise the engine's `ExpectedTxStart` first, as they always do, and `write_if_empty` raises this, as it doesn't try to write | `StructuralSlot` |
+| 9 | A write that would change a byte below the transaction's frozen point, which is where it began or where its last freeze was, apart from the body's own slot: committed or frozen bytes (D24). It's checked at the write, so whatever passed rows 1 to 8, as finding 13's path that skips an init on a fresh cursor does, and what was written before it can poison the transaction (below) | `ImmutableBytes` |
 
 What the words mean:
 
-- **A cursor is made** when the op that binds it runs, or for a callback's own cursor, when the callback starts. That's so for
-  one made through a stale cursor too, which is fresh from then on. `write` and the others that update a cursor don't make it
-  fresh. An iterator is made when `iterator` runs, so `next` on one made in a rolled-back transaction raises `StaleCursor`.
+- **A cursor is made** when the op that binds it begins, or for a callback's own cursor, when the callback starts (D24 item 6a).
+  So what an op gives back counts as made before any freeze during it: a concat's result, and the cursor a path gives back after
+  a `db_freeze` in its callback. One made through a stale cursor is fresh from then on. `write` and the others that update a
+  cursor don't make it fresh. An iterator is made when `iterator` begins, so `next` on one made in a rolled-back transaction
+  raises `StaleCursor`.
+- **The transaction's body** is the cursor a top-level op's callback is given, by the `ctx` part at the end of its path or by
+  `run_context`. Its slot is in the transaction's own record, the root or the moment it appends, which nothing that starts inside
+  the transaction can copy, as a write through the root there raises `NestedTopLevelWrite`, and each write reads the slot again.
+  So **the exception goes by the slot, not the cursor**: an init can go on after a freeze through any cursor whose slot is the
+  body's, made before the freeze or after it, like what `[]` or `[{"hash_map_init": {}}]` through the body gives back.
 - **A read-only view isn't made.** `read_only` gives the cursor it's on, read-only, so the view keeps that cursor's transaction
   and freeze. A read through a view of a cursor from a rolled-back transaction raises `StaleCursor`, as one through the cursor
   does, and `read_only` itself raises nothing.
 - **A freeze** is `db_freeze` or a concat. It isn't `freeze` on a cursor, which is finding 23, and nothing changes for that. What
-  a concat gives back is made after its freeze, so it's fresh.
+  a concat gives back counts as made before its freeze, so it's stale, as is the cursor it was called on.
 - **A root cursor is never stale**, as it reads the last commit. An empty path is a write here, as it would give a stale cursor
   a fresh one.
 - **With no transaction going, nothing is stale**, so rows 5 and 6 don't apply: a write raises `ExpectedTxStart` from the engine,
-  as it always has, and a `write_path` with an empty path works.
+  as it always has, and a `write_path` with an empty path works. Row 9 holds at the top level too, below the committed size.
 - **Reads through a stale cursor stay valid**, apart from row 1. They're snapshot reads, and with stale writes refused,
   nothing changes those bytes under them.
 
@@ -895,6 +906,26 @@ which was measured with a counter in a copy of the engine. **They can differ in 
 get writes the tree's header back unchanged. It takes the path API, as a wrapper's `put` ends with a write that can't fail
 like that. No fixture does it, and `gen --port-safe` can now and then, with `sorted_map_get_index` as the part that fails, so a
 fresh script can differ there without either side being wrong.
+
+**The position check**, row 9, fires at the write it refuses, not before the op (D24 items 2 and 6c). A write that leaves the
+bytes as they were isn't refused, and nor is one at the body's slot. A part that writes a header in place checks where the
+header is first, and writes nothing if it's refused: the linked list's append, insert, remove, slice and concat, the sorted map's
+get in a write path and its remove, the array list's append and slice, and the counted map's get and remove. So does the `write`
+at the end of a path. What the parts before the refused one wrote stays, and **a copy is a write**: an init that copies or makes
+something, a get that copies the record an entry is in or adds one, an append, and the rest. If they changed a byte, the op has
+written something, and it poisons the transaction as any failed op that wrote does: the oracle is Zig with the transaction made to
+fail. If they didn't, the oracle is Zig on the script without the op. So a path that skips an init through the moment's map, whose
+get copies the entry's record before it gets there, poisons, and the same write through a fresh cursor at the committed
+collection doesn't. Only the path API gets this far, as every collection wrapper runs the init part: no other way reaches
+`ImmutableBytes`.
+
+`run --port` acts it out by running the op on Zig and comparing the bytes below the frozen point before and after, leaving out the
+root header, which a commit writes, and the body's slot. If one changed, it puts the file back, and finds the refused part by
+running the path again a part longer each time, putting the file back after each. Then it runs the parts before that one again,
+and raises `ImmutableBytes`, and the transaction is poisoned if they changed a byte, as for any failed op. An op with a callback is held to it when the callback starts, as what's
+written after that is the ops in it, each held to it by itself. At the top level, a refused op's transaction fails, which leaves
+the file as it was, but only if Zig's op failed too or had a callback: one that succeeded has been committed by then, so `run
+--port` can't undo it, and that's a script failure.
 
 **Opening.** A `reopen` raises `UntrustedRootHeader` if the committed size in the root header is past the end of the file,
 smaller than a new database, or doesn't end at a trailer whose checksum verifies. Those are where Zig raises `TruncatedDatabase`
