@@ -3,7 +3,7 @@
   "hash_size": 20,
   "hash_id": "sha1",
   "file_id": "c0f000000000000b",
-  "description": "overwriting-committed-bytes-sorted with what the port does. A path that skips the init part would write into the committed sorted map in place, which the port refuses with ImmutableBytes, at that write (D24). Through a cursor made at the committed collection, nothing is written before the refused write, so the transaction goes on, and with the init the same write goes into a copy. Through the moment's map, as in the original, the get copies the entry's record first, and a copy is a write, so the refusal poisons the transaction, which is rolled back. What the port writes is what Zig writes without the refused op, or with that transaction made to fail.",
+  "description": "overwriting-committed-bytes-sorted with what the port does. A path that skips the init part would write into the committed sorted map in place, which the port refuses with ImmutableBytes, at that write (D24). Through a cursor made at the committed collection, nothing is written before the refused write, so the transaction goes on, and with the init the same write goes into a copy. Through the moment's map, as in the original, the get copies the entry's record first, and a copy is a write, so the refusal poisons the transaction, which is rolled back. What the port writes is what Zig writes without the refused op, or with that transaction made to fail. A fourth transaction adds a key to a committed hash map through a fresh cursor, and the get writes the new entry before the slot that's refused, so that's poisoned too.",
   "ops": [
     {
       "op": "write_path",
@@ -43,6 +43,35 @@
                     }
                   }
                 ]
+              },
+              {
+                "op": "write_path",
+                "on": "m",
+                "path": [
+                  {
+                    "hash_map_get": {
+                      "value": {
+                        "sha1": "d"
+                      }
+                    }
+                  },
+                  {
+                    "hash_map_init": {}
+                  },
+                  {
+                    "hash_map_get": {
+                      "value": {
+                        "sha1": "k"
+                      }
+                    }
+                  },
+                  {
+                    "write": {
+                      "uint": 1
+                    }
+                  }
+                ],
+                "note": "a hash map, for the fourth transaction"
               }
             ]
           }
@@ -283,6 +312,104 @@
       "on": "root",
       "expect": 2,
       "note": "no third moment"
+    },
+    {
+      "op": "read_path_slot",
+      "on": "root",
+      "path": [
+        {
+          "array_list_get": -1
+        }
+      ],
+      "as": "last_for_map"
+    },
+    {
+      "op": "write_path",
+      "on": "root",
+      "path": [
+        "array_list_init",
+        "array_list_append",
+        {
+          "write": {
+            "slot": {
+              "var": "last_for_map"
+            }
+          }
+        },
+        {
+          "hash_map_init": {}
+        },
+        {
+          "ctx": {
+            "as": "m4",
+            "ops": [
+              {
+                "op": "write_path",
+                "on": "m4",
+                "path": [
+                  {
+                    "hash_map_get": {
+                      "value": {
+                        "sha1": "d"
+                      }
+                    }
+                  }
+                ],
+                "as": "map_cursor",
+                "note": "a fresh cursor at d's slot, whose map is committed"
+              },
+              {
+                "op": "write_path",
+                "on": "map_cursor",
+                "path": [
+                  {
+                    "hash_map_get": {
+                      "value": {
+                        "sha1": "j"
+                      }
+                    }
+                  },
+                  {
+                    "write": {
+                      "uint": 2
+                    }
+                  }
+                ],
+                "expect_error": "ImmutableBytes",
+                "note": "no hash_map_init: the get writes j's entry, and then the slot in the committed map is refused"
+              },
+              {
+                "op": "write_path",
+                "on": "m4",
+                "path": [
+                  {
+                    "hash_map_get": {
+                      "value": {
+                        "sha1": "e"
+                      }
+                    }
+                  },
+                  {
+                    "write": {
+                      "uint": 1
+                    }
+                  }
+                ],
+                "expect_error": "PoisonedTransaction",
+                "note": "so the transaction is poisoned"
+              }
+            ]
+          }
+        }
+      ],
+      "expect_error": "PoisonedTransaction",
+      "note": "and rolled back"
+    },
+    {
+      "op": "count",
+      "on": "root",
+      "expect": 2,
+      "note": "still no third moment"
     }
   ]
 }
