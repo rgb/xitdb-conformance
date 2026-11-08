@@ -118,3 +118,9 @@ variants have the same bytes on both. `PORT-IMPACT.md` has why.
 **What the port refuses** doesn't need another Zig, as a guard writes nothing. A script that does it goes in
 `tests/zig-only.txt`, which the gate holds to what `run --port` refuses, with a version in `tests/port-variants/` if it pins
 something worth having. The fixtures only ever come from `run --port`.
+
+## Contributing
+
+Issues are welcome, for a script that should exist, a fixture that looks wrong, or a question, but this repository doesn't
+take pull requests: the fixtures are generated against the original at a stated commit and the gate decides what lands, so
+a change starts as an issue.
