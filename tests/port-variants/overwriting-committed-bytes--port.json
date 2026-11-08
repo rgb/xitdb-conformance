@@ -1,6 +1,6 @@
 {
   "format": "xitdb-script/1",
-  "description": "overwriting-committed-bytes with what the port does. A path that skips a collection's init part still writes straight into what's committed, as that's finding 13, which doesn't change. A cursor kept from an earlier transaction can't any more: it raises StaleCursor, before writing, even for an init, which would rewrite a committed slot. It can still be read, as a snapshot. A cursor from a transaction that was rolled back can't be read either, as its bytes are gone and the offsets get reused. It ends with a write through a cursor from before a db_freeze, which is refused too, as it would change what the freeze kept, and the init that's allowed instead.",
+  "description": "overwriting-committed-bytes with what the port does. A path that skips a collection's init part would write straight into what's committed, which is finding 13, and the port refuses that write with ImmutableBytes (D24). Here each goes through a fresh cursor at the committed collection, so nothing is written before it, the transaction isn't poisoned, and the earlier moment is as it was. Through the moment's map, as in the original, the get would copy the entry's record first, and the refusal would then poison the transaction, as overwriting-committed-bytes-linked--port shows. A cursor kept from an earlier transaction can't any more: it raises StaleCursor, before writing, even for an init, which would rewrite a committed slot. It can still be read, as a snapshot. A cursor from a transaction that was rolled back can't be read either, as its bytes are gone and the offsets get reused. It ends with a write through a cursor from before a db_freeze, which is refused too, as it would change what the freeze kept, and the init that's allowed instead.",
   "hash_size": 20,
   "hash_id": "sha1",
   "file_id": "c0f0000000000006",
@@ -15,11 +15,13 @@
     { "op": "read_path_slot", "on": "root", "path": [{ "array_list_get": -1 }], "as": "last" },
 
     { "op": "write_path", "on": "root", "path": ["array_list_init", "array_list_append", { "write": { "slot": { "var": "last" } } }, { "hash_map_init": {} }, { "ctx": { "as": "m", "ops": [
-      { "op": "write_path", "on": "m", "path": [{ "hash_map_get": { "value": { "sha1": "list" } } }, { "array_list_get": 0 }, { "write": { "uint": 99 } }],
-        "note": "no array_list_init, so this writes into the list's committed index block" },
-      { "op": "write_path", "on": "m", "path": [{ "hash_map_get": { "value": { "sha1": "list" } } }, "array_list_append", { "write": { "uint": 2 } }],
-        "note": "and this into its committed header" },
-      { "op": "write_path", "on": "m", "path": [{ "hash_map_get": { "value": { "sha1": "map" } } }, { "hash_map_get": { "value": { "sha1": "y" } } }, { "write": { "uint": 2 } }] },
+      { "op": "write_path", "on": "m", "path": [{ "hash_map_get": { "value": { "sha1": "list" } } }], "as": "list_cursor", "note": "a fresh cursor at the list's slot, whose list is committed" },
+      { "op": "write_path", "on": "list_cursor", "path": [{ "array_list_get": 0 }, { "write": { "uint": 99 } }],
+        "expect_error": "ImmutableBytes", "note": "no array_list_init, so this would write into the list's committed index block. Nothing is written before it, so nothing is poisoned" },
+      { "op": "write_path", "on": "list_cursor", "path": ["array_list_append", { "write": { "uint": 2 } }],
+        "expect_error": "ImmutableBytes", "note": "and this into its committed header" },
+      { "op": "write_path", "on": "m", "path": [{ "hash_map_get": { "value": { "sha1": "map" } } }], "as": "map_cursor" },
+      { "op": "write_path", "on": "map_cursor", "path": [{ "hash_map_get": { "value": { "sha1": "y" } } }, { "write": { "uint": 2 } }], "expect_error": "ImmutableBytes", "note": "and this into the committed map" },
       { "op": "write", "on": "kept", "data": { "uint": 2 }, "expect_error": "StaleCursor", "note": "a cursor from the previous transaction can't write where it always pointed" },
       { "op": "read_path", "on": "moment0", "path": [{ "hash_map_get": { "value": { "sha1": "kept" } } }], "as": "c" },
       { "op": "read_uint", "on": "c", "expect": 1 },
@@ -31,10 +33,10 @@
     ] } }] },
 
     { "op": "read_path", "on": "moment0", "path": [{ "hash_map_get": { "value": { "sha1": "list" } } }], "as": "c" },
-    { "op": "count", "on": "c", "expect": 2, "note": "the first moment's list has grown" },
+    { "op": "count", "on": "c", "expect": 1, "note": "the first moment's list is as it was" },
     { "op": "read_path", "on": "c", "path": [{ "array_list_get": 0 }], "as": "c" },
-    { "op": "read_uint", "on": "c", "expect": 99, "note": "and its element has changed" },
-    { "op": "read_path_slot", "on": "moment0", "path": [{ "hash_map_get": { "value": { "sha1": "map" } } }, { "hash_map_get": { "value": { "sha1": "y" } } }], "expect": { "tag": "uint", "value": 2 } },
+    { "op": "read_uint", "on": "c", "expect": 1, "note": "and so is its element" },
+    { "op": "read_path", "on": "moment0", "path": [{ "hash_map_get": { "value": { "sha1": "map" } } }, { "hash_map_get": { "value": { "sha1": "y" } } }], "expect_null": true },
     { "op": "read_path", "on": "moment0", "path": [{ "hash_map_get": { "value": { "sha1": "kept" } } }], "as": "c" },
     { "op": "read_uint", "on": "c", "expect": 1 },
 

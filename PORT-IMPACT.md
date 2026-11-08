@@ -41,20 +41,22 @@ refuse, unless the script says so with `expect_error`. So a fixture can't rely o
 and the gate runs them all that way.
 
 **A script that does what the port refuses isn't a fixture.** It goes on running on Zig, in the gate and `mutants.sh`, as
-what Zig does hasn't changed. `tests/zig-only.txt` lists all 44, with the gate holding it to what `run --port` refuses. That's
-34 of the 42 generated scripts, and these 10, each with a version of its own in `tests/port-variants`:
+what Zig does hasn't changed. `tests/zig-only.txt` lists all 48, with the gate holding it to what `run --port` refuses. That's
+34 of the 42 generated scripts, and these 14, each with a version of its own in `tests/port-variants`:
 
 | Script | Its variant `<name>--port` | Expected file from |
 |---|---|---|
 | `04-rollback` | The transaction that used to commit after a failed op is poisoned, and rolled back. A new one shows that an op that failed before writing anything poisons nothing | `6b93af1` |
-| `overwriting-committed-bytes` | Each write through a kept cursor raises `StaleCursor`, an init too, and nothing is overwritten. The writes that only skip an init part stay, as finding 13 hasn't changed. It also has a read and a write through a cursor from a rolled-back transaction | `6b93af1` |
+| `overwriting-committed-bytes` | Each write through a kept cursor raises `StaleCursor`, an init too, and nothing is overwritten. The writes that only skip an init part raise `ImmutableBytes` (D24), and the earlier moment is as it was. It also has a read and a write through a cursor from a rolled-back transaction, and ends with a write from before a `db_freeze` | `6b93af1` |
 | `path-api-edges` | The part after a remove raises `PathPartMustBeAtEnd`. What poisons is in a transaction of its own, so that the other corners go on committing. `write_if_empty` goes by the slot as it is now | `185af01` |
 | `path-api-edges-sorted` | The same | `6b93af1` |
-| `every-construct-linked` | What a concat gives back is fresh, and the cursors from before it raise `StaleCursor`, on each kind of write. They can still be read, and an init goes on from there | `185af01` |
+| `every-construct-linked` | What a concat gives back counts as made before it, so it and the cursors from before it raise `StaleCursor`, on each kind of write, an init included. They can still be read. The way on is an init through the transaction's body, and finding 22's pin goes that way | `185af01` |
 | `every-construct-sorted` | Writing a key through a pair raises `CursorNotWriteable` | `6b93af1` |
 | `recovery-open-errors` | `UntrustedRootHeader` where the root header can't be trusted, and then `recover`, down to losing the last commit and going on from there | `6b93af1` |
 | `replicate-bad-trailer`, `replicate-failed-first-sync` | The same, on a replica | `6b93af1` |
 | `compact-roots` | The two compactions of a history with no last moment raise `EmptyLastMoment`, and so does one into a target with something in it. Written, the last moment compacts. A new case has three moments written and a fourth appended | `6b93af1` |
+| `held-init-after-freeze`, `held-init-after-root-copy` | Each init through a cursor held from before a freeze raises `StaleCursor` (D24), and the way on is from the transaction's body or through a cursor made from it since the freeze. Nothing is lost, and the clone is as it was | `6b93af1` |
+| `overwriting-committed-bytes-linked`, `overwriting-committed-bytes-sorted` | The write that skips an init part raises `ImmutableBytes`. Through a fresh cursor at the committed collection nothing is written before it, and the same write with the init goes into a copy. Through the moment's map, as in the original, the get copies first, so the transaction is poisoned and rolled back | `6b93af1` |
 
 "From `6b93af1`" means the gate runs it, and that `185af01` gives the same bytes. Recovering leaves what Zig writes for the
 script without the damage: for `recovery-open-errors`, that was compared with a script of only what came after, and only the
@@ -80,7 +82,7 @@ same bytes, and valid on both. **`write-if-empty-emptied-slot`** and `write-if-e
 
 **`gen-fixed.sh` also writes the 42 seeds again with `--port-safe`**, as `safe-*`. They're fixtures, and valid on both.
 
-**What the port fails at the start of its brief**, before any of this is in it: the 10 variants, and
+**What the port fails at the start of its brief**, before any of this is in it: the 14 variants, and
 `write-if-empty-emptied-slot`. Those are what fail without `--port` on `6b93af1` too, and everything else passes both ways.
 
 ## Summary
@@ -97,7 +99,7 @@ same bytes, and valid on both. **`write-if-empty-emptied-slot`** and `write-if-e
 | [23](#finding-23-a-cursors-freeze) | A freeze holds for every cursor | 2 of 6 change, in the prototype | 2 of 17 change | Deferred, so nothing happens |
 | [28](#finding-28-compacting-a-history-with-no-last-moment) | Compacting a history with no last moment is refused | 1 | 0 | Variant |
 | [29](#finding-29-an-init-on-a-held-cursor-after-a-freeze) | Nothing: an init on a held cursor after a freeze changes a clone that shares its record, on both | 1 | 0 | Nothing, and a fixture pins it |
-| [D18](#d18-refusing-a-write-from-before-a-freeze) | A write from before a freeze is refused | 2, and 1 reproduction | 31 | Variant, `safe-*`. An init and a read through such a cursor go on working |
+| [D18, D24](#d18-and-d24-refusing-a-write-from-before-a-freeze) | A write from before a freeze is refused, an init too unless it's at the transaction's body's slot, and so is a write into committed or frozen bytes | 8, and 1 reproduction | 31, and 2 `safe-*` since D24 | Variant, `safe-*`, only for Zig. A read through such a cursor goes on working |
 | [D19](#d19-opening-a-file-whose-root-header-cant-be-trusted) | A file whose root header can't be trusted raises an error, until `recover` is called | 3, and none of the 3 failing ones | 0 | Variant, with `recover` |
 
 ## A generator that keeps off all of this
@@ -116,7 +118,7 @@ runs 20. The notes that stay allowed are `18-init`, `18-reads`, `18-reads-earlie
 | 17 | `write_if_empty` only where the snapshot and the slot agree about being empty |
 | 22 | No concat |
 | 23 | No cursor's freeze |
-| D18 | A write through a cursor from before a freeze only after an init through it. Reads through one go on |
+| D18, D24 | After a freeze, a write only through a cursor at the transaction's body's slot, with an init, or through one made since the freeze. Nothing is kept from an op that froze during it. Reads through a cursor from before a freeze go on |
 
 **What it costs.** It has no concat, no cursor's freeze, and nothing that writes into committed bytes, so also no skipped init,
 as a transaction that has done that can't be rolled back (`SCRIPT-FORMAT.md` section 10). A path that doesn't fit is always
@@ -313,24 +315,28 @@ to an error on `d6f3fee` already, by the checks in option B.
 
 ## Finding 29: an init on a held cursor after a freeze
 
-**Nothing changes, on either side**, and that's why it's here: it's the reason the Swift layer's handles resolve themselves from
-the root (D18 item 3). After a freeze, an init through a cursor held from before it is allowed, as the way to go on (D22 item 1).
+**The port refuses it, since D24**, which is why this is here. After a freeze, an init through a cursor held from before it was
+allowed, as the way to go on (D22 item 1), and Zig still allows it.
 It copies the collection, and writes where the copy is into the cursor's slot in place. That slot is in a record made before
 the freeze, and a clone made before the freeze by copying a map's slot shares the record, so the clone changes too. Zig's own
 comment on `freeze` gives the same advice, to reinitialize writable collections, and the docs session found what it does to a
-clone. The engine can't tell a shared record from one that isn't, so there's no guard.
+clone. The engine can't tell a shared record from one that isn't, so D24 allows an init after a freeze only through the
+transaction's body, whose slot nothing in the transaction can copy, and the Swift layer's handles resolve themselves from the
+root (D18 item 3) to give the convenience back.
 
 `tests/valid/held-init-after-freeze` pins it, in two transactions. In the first, `a` has a list of one element, `b` is a clone of
 `a`, and after a `db_freeze` an init and an append through the cursor held on `a.list` give `a.list` and `b.list` two elements
 each. In the second, the same done by going down from the root again, with an init at each level, copies the record, so
-`c.list` has two and `d.list` keeps one. Its bytes are the same on Zig at `6b93af1` and at `185af01`, and under `--port`, on
-each kind. Both of its writes after the freezes are `18-init`.
+`c.list` has two and `d.list` keeps one. It's only for Zig now, and `held-init-after-freeze--port` refuses the first init with
+`StaleCursor` and goes on from the body instead, so `a.list` has two and `b.list` keeps one.
 
 **It can lose a write, too.** If something has copied the record the held cursor's slot is in, the root doesn't reach what the
 init writes there, which is section F's lost write in `zig-findings.md`. `tests/valid/held-init-after-root-copy` pins two ways:
 a path from the root that copies the root's record before the init through the held cursor, and, with nothing from the root, an
 init through one held cursor whose get copies the record another held cursor's slot is in. Each loses its write, on Zig at
-`6b93af1` and at `185af01` and under `--port`, on each kind, and each of its four writes after a freeze is `18-init`.
+`6b93af1` and at `185af01`. It's only for Zig now: `held-init-after-root-copy--port` refuses the three inits through held
+cursors with `StaleCursor`, and writes what they would have through the body or a cursor made from it since the freeze, so
+nothing is lost.
 
 ## Finding 28: compacting a history with no last moment
 
@@ -357,11 +363,14 @@ every other script as it was, and none of the committed ones has the case. Over 
 got that write, none was noted `28`, and all of them gave Zig's bytes under `--port`. `gen-live.sh` with `PORT_SAFE=yes` would
 reject a script that did it, as `28` isn't one of the notes it allows.
 
-## D18: refusing a write from before a freeze
+## D18 and D24: refusing a write from before a freeze
 
-The port refuses a write through a cursor made before the last freeze, whether that's `db_freeze` or a concat, with a concat
-refreshing the wrapper that called it. It also gets option B, which is errors in place of traps, and Swift handles that
-resolve themselves. B and the handles don't touch any script.
+The port refuses a write through a cursor made before the last freeze, whether that's `db_freeze` or a concat, **an init
+included, unless the cursor's slot is the transaction's body's** (D24, which narrows D18 and D22). A cursor counts as made when the op
+that made it began, so what a concat gives back is stale too, and so is what a path gives back after a `db_freeze` in its
+callback. And it refuses a write that would change committed or frozen bytes, by position, with `ImmutableBytes`, which is
+finding 13's shape too. It also gets option B, which is errors in place of traps, and Swift handles that resolve themselves.
+B and the handles don't touch any script.
 
 These write through a cursor made before a freeze in the same transaction, other than with a path that begins with an init part:
 
@@ -375,29 +384,54 @@ These write through a cursor made before a freeze in the same transaction, other
 | `every-construct-linked` | Variant, which pins the guard on each kind of write |
 | `several-databases` | Its one write through `e` now comes before the `db_freeze`, with the same bytes |
 | `tests/undefined/concat-stale-slot` | Nothing. It's a reproduction, and only ever run on Zig |
-| the generated scripts | Only for Zig. `gen --port-safe` treats every cursor from before a freeze as gone for a write, other than with an init, and fine for a read |
+| the generated scripts | Only for Zig. `gen --port-safe` treats every cursor from before a freeze as gone for a write, apart from one at the transaction's body's slot, with an init, and fine for a read |
 
-And these write through such a cursor with a path that begins with an init part, which is how `Database.freeze`'s comment says to carry on:
+These go on with a path that begins with an init part **through a cursor at the transaction's body's slot**, which is how
+`Database.freeze`'s comment says to carry on, and which the port still allows:
 
 <!-- list 18-init -->
 - `scripts`: 03-clone-and-freeze (1)
-- `tests/generated`: compact-201 (46), compact-202 (9), compact-203 (11), compact-205 (71), compact-206 (7), gen-1 (4), gen-10 (12), gen-11 (3), gen-12 (2), gen-13 (55), gen-15 (2), gen-16 (3), gen-17 (16), gen-18 (2), gen-2 (96), gen-3 (82), gen-4 (4), gen-5 (4), gen-7 (11), gen-8 (47), gen-9 (2), reads-101 (49), reads-102 (10), reads-103 (9), reads-104 (8), reads-105 (6), reads-106 (3), reads-107 (5), reads-108 (4), reads-110 (9), reads-111 (2), reads-112 (5), replica-302 (13), replica-303 (48), replica-304 (2), replica-305 (95), replica-306 (42), safe-1 (6), safe-10 (3), safe-12 (2), safe-13 (4), safe-15 (3), safe-17 (5), safe-2 (7), safe-3 (4), safe-4 (6), safe-5 (5), safe-6 (4), safe-7 (2), safe-8 (3), safe-9 (3), safe-compact-201 (5), safe-compact-202 (3), safe-compact-203 (4), safe-compact-205 (3), safe-reads-101 (4), safe-reads-102 (3), safe-reads-103 (3), safe-reads-104 (2), safe-reads-105 (2), safe-reads-106 (5), safe-reads-107 (4), safe-reads-108 (6), safe-reads-110 (2), safe-reads-111 (5), safe-replica-301 (2), safe-replica-302 (2), safe-replica-303 (4), safe-replica-304 (6), safe-replica-305 (4), safe-replica-306 (2)
+- `tests/generated`: compact-201 (45), compact-202 (8), compact-203 (9), compact-205 (69), compact-206 (7), gen-1 (4), gen-10 (11), gen-11 (3), gen-12 (2), gen-13 (54), gen-15 (2), gen-16 (3), gen-17 (15), gen-18 (2), gen-2 (96), gen-3 (82), gen-4 (4), gen-5 (4), gen-7 (10), gen-8 (47), gen-9 (2), reads-101 (47), reads-102 (9), reads-103 (9), reads-104 (8), reads-105 (4), reads-106 (3), reads-107 (5), reads-108 (3), reads-110 (9), reads-111 (2), reads-112 (5), replica-302 (10), replica-303 (48), replica-304 (2), replica-305 (93), replica-306 (42), safe-1 (6), safe-10 (3), safe-12 (2), safe-13 (4), safe-15 (3), safe-17 (5), safe-2 (7), safe-3 (4), safe-4 (6), safe-5 (5), safe-6 (4), safe-7 (2), safe-8 (3), safe-9 (3), safe-compact-201 (5), safe-compact-202 (3), safe-compact-203 (4), safe-compact-205 (3), safe-reads-101 (2), safe-reads-102 (3), safe-reads-103 (3), safe-reads-104 (2), safe-reads-105 (2), safe-reads-106 (5), safe-reads-107 (4), safe-reads-108 (6), safe-reads-110 (2), safe-reads-111 (5), safe-replica-301 (2), safe-replica-302 (2), safe-replica-303 (4), safe-replica-304 (6), safe-replica-305 (4), safe-replica-306 (2)
 - `tests/undefined`: concat-stale-slot (3)
-- `tests/valid`: deep-linked (1), deep-sorted (1), deep-sorted-existing (1), deep-tries (1), held-init-after-freeze (2), held-init-after-root-copy (4)
+- `tests/valid`: deep-linked (1), deep-sorted (1), deep-sorted-existing (1), deep-tries (1), held-init-after-freeze (1), held-init-after-root-copy (1)
 <!-- end -->
 
-**These go on working** (D22). That init writes to the cursor's slot, which is from before the freeze, so a guard that went
-by the position of what's being written would refuse it. Inside a callback, there's no other way on: the callback's cursor
-is the only way to the moment, and a write on a root cursor raises `NestedTopLevelWrite`. So the guard goes by when the
-cursor was made, and lets an init through. What follows the init in the path goes through what it made, so that's allowed too,
-and it's safe, as that's the same as the init and then a write through its result. The exception is a cursor from an earlier
-transaction: an init through one would rewrite a slot that's committed, which is finding 1, so that's refused.
+And these do it through a cursor at any other slot, which **the port refuses since D24**:
+
+<!-- list 18-init-held -->
+- `tests/generated`: compact-201 (1), compact-202 (1), compact-203 (2), compact-205 (2), gen-10 (1), gen-13 (1), gen-17 (1), gen-7 (1), reads-101 (2), reads-102 (1), reads-105 (2), reads-108 (1), replica-302 (3), replica-305 (2)
+- `tests/valid`: held-init-after-freeze (1), held-init-after-root-copy (3)
+<!-- end -->
+
+**Why the init through a held cursor went** (D24). An init writes to the cursor's slot, which is from before the freeze, in place.
+If something has copied the record that slot is in, a clone made before the freeze or a second way down from the root since, the
+root no longer reaches what the init wrote, and the write is lost (findings 29 and 30, `held-init-after-root-copy`). The body's
+slot is in the transaction's own record, which nothing in the transaction can copy, so an init at that slot can't be lost,
+through whichever cursor. The package's engine goes by that position, so the format does too. What follows the init in the path
+goes through what it made. Rule C, which kept the exception until a root path had copied something,
+was modelled and found unsound in two of three cases.
+
+**What it cost**, measured on the fixtures before the change, with the package's engine showing the same 9 fixtures failing:
+of 198 inits after a freeze, 193 are at the body's slot and keep working. The fixtures that change are these 9, with 16 writes:
+
+| Fixture | What happened |
+|---|---|
+| `held-init-after-freeze`, `held-init-after-root-copy` | Only for Zig, with variants that refuse each init at another slot (1 and 3) and show nothing lost |
+| `every-construct-linked--port` | 2 writes: through what the concat gave back, which is finding 22's pin, and the init through `la`. Both go on through the body now, and its expected file is from `185af01` again |
+| `stale-cursors--port` | 2 writes: the init through a cursor from before the `db_freeze`, with the way on through the body, and an empty path through what the concat gave back |
+| `safe-reads-101`, `safe-reads-108` | 3 writes, lost on Zig: in each, a path begins with an init, a `db_freeze` in its callback runs, and what it gives back was kept. Its slot is in the record the init copied before the freeze, and the next op copies that record again. With a cursor counting as made when its op began (D24 item 6a), that's stale, and `safe-reads-101` also had an init through a nested callback's cursor. `gen --port-safe` keeps nothing from an op that froze during it, and stops writing through a nested callback's cursor after a freeze. Their bytes change |
+| `overwriting-committed-bytes--port`, `-linked`, `-sorted` | 5 writes of finding 13's shape, with no freeze at all: a path that skips an init part and writes into committed bytes, refused by position with `ImmutableBytes`. The last two are only for Zig now, with variants. Each variant has the refusal both ways: through a fresh cursor at the committed collection nothing is written before it, and through the moment's map the get copies the entry's record first, which poisons the transaction |
+
+Rule B as modelled first went by the handle, the callback's own cursor, and counted 31 writes in 23 fixtures. Most of those went
+through the body's name after a generated script had bound to it what an init through the body gave back. That's a cursor at the
+body's slot, which the engine allows, and so does the format now. `gen --port-safe` changed five `safe-*` scripts, three of them
+with the same bytes.
 
 **A read through such a cursor stays allowed too**, as a snapshot read (D22, as narrowed). These do that in the same
 transaction, so they're what hold the port to it:
 
 <!-- list 18-reads -->
-- `tests/generated`: compact-201 (1), compact-203 (2), compact-205 (1), gen-10 (4), gen-12 (1), gen-13 (2), gen-14 (2), gen-17 (7), gen-18 (2), gen-2 (2), gen-3 (5), gen-8 (2), reads-101 (4), reads-103 (3), reads-104 (6), reads-105 (2), reads-108 (1), reads-109 (2), reads-110 (4), replica-302 (2), replica-303 (1), replica-305 (3), replica-306 (1), safe-14 (1), safe-3 (1), safe-compact-201 (1), safe-reads-101 (1), safe-reads-103 (3), safe-reads-104 (3), safe-reads-106 (4), safe-reads-110 (2), safe-replica-306 (1)
+- `tests/generated`: compact-201 (1), compact-203 (2), compact-205 (1), gen-10 (4), gen-12 (1), gen-13 (2), gen-14 (2), gen-17 (7), gen-18 (2), gen-2 (2), gen-3 (5), gen-8 (2), reads-101 (4), reads-103 (3), reads-104 (6), reads-105 (2), reads-108 (1), reads-109 (2), reads-110 (4), replica-302 (2), replica-303 (1), replica-305 (3), replica-306 (1), safe-14 (1), safe-3 (1), safe-compact-201 (1), safe-reads-103 (3), safe-reads-104 (3), safe-reads-106 (4), safe-reads-110 (2), safe-replica-306 (1)
 - `tests/undefined`: concat-stale-slot (1)
 - `tests/valid`: every-construct-linked (2)
 <!-- end -->
