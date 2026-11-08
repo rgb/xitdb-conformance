@@ -23,7 +23,9 @@
 //! anything else that writes into committed bytes, a write_if_empty whose snapshot and
 //! slot disagree about being empty, and handling an error from an op that wrote something,
 //! which goes up and rolls back instead. It goes on reading through a cursor from before a
-//! freeze, which stays valid. The same seed gives another script than it does without
+//! freeze, which stays valid. With --compact, a list at the root with no last moment, as
+//! it has none or the last was never written, gets one written before it's compacted, as
+//! the port refuses to compact it. The same seed gives another script than it does without
 //! this, and that one doesn't change.
 //!
 //! The model of the database that a generator needs is the database: this drives
@@ -1669,11 +1671,33 @@ fn Gen(comptime HashInt: type) type {
             try self.op("{{\"op\":\"use\",\"name\":\"main\"}}", .{});
         }
 
+        /// the port refuses to compact a list at the root with no last moment (finding 28), so
+        /// --port-safe writes one first. a history always has one, but a list root that isn't
+        /// a history can be sliced to nothing, or end with an append that wrote nothing
+        fn writeLastMoment(self: *Self) anyerror!void {
+            const root = self.db.rootCursor();
+            if ((try root.slot()).tag != .array_list) return;
+            if ((root.readPathSlot(Ctx, &.{.{ .array_list_get = -1 }}) catch null) != null) return;
+            const before = try self.db.committedSize();
+            self.tx_dirty = false;
+            self.tx_cloned = false;
+            self.tx_frozen_cursor = false;
+            self.tx_concat = false;
+            self.first_safe_kept = 0;
+            defer self.noteCommit(before) catch {};
+            var p: PathB = .{};
+            self.add(&p, .array_list_init, "\"array_list_init\"");
+            self.add(&p, .array_list_append, "\"array_list_append\"");
+            self.add(&p, .{ .write = .{ .uint = 1 } }, "{\"write\":{\"uint\":1}}");
+            try self.topLevelWrite(&p);
+        }
+
         fn generate(self: *Self, ops: u64, compact: bool, also_replicate: bool) anyerror!void {
             for (0..ops) |_| {
                 try self.topLevelOp();
             }
             if (compact) {
+                if (self.port_safe) try self.writeLastMoment();
                 try self.beginOp();
                 try self.w.writeAll("{\"op\":\"compact\",\"into\":\"compacted\",\"file_id\":\"00000000000000cc\",\"offset_map\":\"memory\"}");
             }

@@ -94,7 +94,8 @@ runs 20. The notes that stay allowed are `18-init`, `18-reads`, `18-reads-earlie
 | Item | What it does instead |
 |---|---|
 | 1 | No write through a cursor from an earlier transaction |
-| 2, 3, 12, 28, D19 | `gen` doesn't do these anyway |
+| 2, 3, 12, D19 | `gen` doesn't do these anyway |
+| 28 | With `--compact`, a list at the root with no last moment gets one written first |
 | 16 | An error from an op that wrote something goes up, and rolls the transaction back |
 | 17 | `write_if_empty` only where the snapshot and the slot agree about being empty |
 | 22 | No concat |
@@ -311,9 +312,13 @@ moments written and a fourth appended, into an empty target, which stays as it w
 compactions left out, which was compared with a copy that has a `committed_size` in their place: every one of its 42 databases
 is the same bytes on each kind, apart from commit IDs.
 
-`gen` can't do it: every moment it commits has a hash map in it, and `undo` copies one, so a history it makes always has a
-last moment. `gen-live.sh` would reject a script that did, with `PORT_SAFE=yes`, as `28` isn't one of the notes it allows.
-Over 1200 fresh seeds with `--compact`, half of them with `--port-safe`, none did.
+**`gen` does it now and then.** A history it makes always has a last moment, as every moment it commits has a hash map in
+it, and `undo` copies one. But a list at the root that isn't a history can be sliced to nothing, or end with an append that
+wrote nothing, as the gate's seed 1000015 does. So with `--compact`, `gen --port-safe` writes a last moment first, if there
+isn't one, with a top-level `write_path` of `["array_list_init", "array_list_append", {"write": {"uint": 1}}]`. That leaves
+every other script as it was, and none of the committed ones has the case. Over 2000 fresh seeds with `gen-live.sh`'s flags, 2
+got that write, none was noted `28`, and all of them gave Zig's bytes under `--port`. `gen-live.sh` with `PORT_SAFE=yes` would
+reject a script that did it, as `28` isn't one of the notes it allows.
 
 ## D18: refusing a write from before a freeze
 
