@@ -326,6 +326,12 @@ each. In the second, the same done by going down from the root again, with an in
 `c.list` has two and `d.list` keeps one. Its bytes are the same on Zig at `6b93af1` and at `185af01`, and under `--port`, on
 each kind. Both of its writes after the freezes are `18-init`.
 
+**It can lose a write, too.** If something has copied the record the held cursor's slot is in, the root doesn't reach what the
+init writes there, which is section F's lost write in `zig-findings.md`. `tests/valid/held-init-after-root-copy` pins two ways:
+a path from the root that copies the root's record before the init through the held cursor, and, with nothing from the root, an
+init through one held cursor whose get copies the record another held cursor's slot is in. Each loses its write, on Zig at
+`6b93af1` and at `185af01` and under `--port`, on each kind, and each of its four writes after a freeze is `18-init`.
+
 ## Finding 28: compacting a history with no last moment
 
 Zig compacts a list at the root with no elements, or whose last element was appended and never written, to an empty root. So
@@ -377,7 +383,7 @@ And these write through such a cursor with a path that begins with an init part,
 - `scripts`: 03-clone-and-freeze (1)
 - `tests/generated`: compact-201 (46), compact-202 (9), compact-203 (11), compact-205 (71), compact-206 (7), gen-1 (4), gen-10 (12), gen-11 (3), gen-12 (2), gen-13 (55), gen-15 (2), gen-16 (3), gen-17 (16), gen-18 (2), gen-2 (96), gen-3 (82), gen-4 (4), gen-5 (4), gen-7 (11), gen-8 (47), gen-9 (2), reads-101 (49), reads-102 (10), reads-103 (9), reads-104 (8), reads-105 (6), reads-106 (3), reads-107 (5), reads-108 (4), reads-110 (9), reads-111 (2), reads-112 (5), replica-302 (13), replica-303 (48), replica-304 (2), replica-305 (95), replica-306 (42), safe-1 (6), safe-10 (3), safe-12 (2), safe-13 (4), safe-15 (3), safe-17 (5), safe-2 (7), safe-3 (4), safe-4 (6), safe-5 (5), safe-6 (4), safe-7 (2), safe-8 (3), safe-9 (3), safe-compact-201 (5), safe-compact-202 (3), safe-compact-203 (4), safe-compact-205 (3), safe-reads-101 (4), safe-reads-102 (3), safe-reads-103 (3), safe-reads-104 (2), safe-reads-105 (2), safe-reads-106 (5), safe-reads-107 (4), safe-reads-108 (6), safe-reads-110 (2), safe-reads-111 (5), safe-replica-301 (2), safe-replica-302 (2), safe-replica-303 (4), safe-replica-304 (6), safe-replica-305 (4), safe-replica-306 (2)
 - `tests/undefined`: concat-stale-slot (3)
-- `tests/valid`: deep-linked (1), deep-sorted (1), deep-sorted-existing (1), deep-tries (1), held-init-after-freeze (2)
+- `tests/valid`: deep-linked (1), deep-sorted (1), deep-sorted-existing (1), deep-tries (1), held-init-after-freeze (2), held-init-after-root-copy (4)
 <!-- end -->
 
 **These go on working** (D22). That init writes to the cursor's slot, which is from before the freeze, so a guard that went
