@@ -910,19 +910,21 @@ fresh script can differ there without either side being wrong.
 **The position check**, row 9, fires at the write it refuses, not before the op (D24 items 2 and 6c). A write that leaves the
 bytes as they were isn't refused, and nor is one at the body's slot. A part that writes a header in place checks where the
 header is first, and writes nothing if it's refused: the linked list's append, insert, remove, slice and concat, the sorted map's
-get in a write path and its remove, the array list's append and slice, and the counted map's get and remove. So does the `write`
-at the end of a path. What the parts before the refused one wrote stays, and **a copy is a write**: an init that copies or makes
-something, a get that copies the record an entry is in or adds one, an append, and the rest. If they changed a byte, the op has
-written something, and it poisons the transaction as any failed op that wrote does: the oracle is Zig with the transaction made to
-fail. If they didn't, the oracle is Zig on the script without the op. So a path that skips an init through the moment's map, whose
-get copies the entry's record before it gets there, poisons, and the same write through a fresh cursor at the committed
-collection doesn't. Only the path API gets this far, as every collection wrapper runs the init part: no other way reaches
+get in a write path and its remove, the array list's append and slice, and the counted map's get and remove. Any other part, or op,
+can have written before the write that's refused, as Zig's order has it: a hash map's get that adds a key writes the new entry and
+then its slot, an init its copy and then the slot, a `write` of a value that doesn't fit in a slot the value, and a `writer` its
+bytes, before the slot. What was written before the refused write stays, and **a copy is a write**. If it changed a byte, the op
+has written something, and it poisons the transaction as any failed op that wrote does: the oracle is Zig with the transaction made
+to fail. If it didn't, the oracle is Zig on the script without the op. So a path that skips an init through the moment's map, whose
+get copies the entry's record before it gets there, poisons, and an append through a fresh cursor at the committed list doesn't. Only the path API gets this far, as every collection wrapper runs the init part: no other way reaches
 `ImmutableBytes`.
 
 `run --port` acts it out by running the op on Zig and comparing the bytes below the frozen point before and after, leaving out the
 root header, which a commit writes, and the body's slot. If one changed, it puts the file back, and finds the refused part by
 running the path again a part longer each time, putting the file back after each. Then it runs the parts before that one again,
-and raises `ImmutableBytes`, and the transaction is poisoned if they changed a byte, as for any failed op. An op with a callback is held to it when the callback starts, as what's
+and the refused part too if it isn't one that checks first, putting back the bytes below the frozen point after it. For `write`,
+`write_if_empty` and `writer`, the op is the refused part. Then it raises `ImmutableBytes`, and the transaction is poisoned if a
+byte changed, as for any failed op. An op with a callback is held to it when the callback starts, as what's
 written after that is the ops in it, each held to it by itself. At the top level, a refused op's transaction fails, which leaves
 the file as it was, but only if Zig's op failed too or had a callback: one that succeeded has been committed by then, so `run
 --port` can't undo it, and that's a script failure.

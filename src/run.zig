@@ -1080,20 +1080,62 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             }
         }
 
-        /// with --port, a write op that changed committed or frozen bytes, which the port refuses at
-        /// that write (D24 items 2 and 6c), before the part it's in writes anything. what the parts before
-        /// it wrote stays, a copy included, and if that changed a byte, it poisons the transaction as any
-        /// failed op that wrote does. so the file is put back, and then the parts before the refused one,
-        /// found by running the path a part longer each time, are run again. Zig on the script without
-        /// the op, or with its transaction failed, is the oracle
+        /// a part that writes a header in place checks where the header is first, and writes nothing if
+        /// it's refused, as the package's engine does (D24). any other part can have written before the
+        /// write that's refused: a hash map's get that adds a key writes the entry first, an init its copy
+        fn checksFirst(part: Json, at: RW) bool {
+            const name = partName(part);
+            for ([_][]const u8{ "linked_array_list_append", "linked_array_list_insert", "linked_array_list_remove", "linked_array_list_slice", "linked_array_list_concat", "sorted_map_get", "sorted_map_remove", "array_list_append", "array_list_slice" }) |first| {
+                if (isKey(name, first)) return true;
+            }
+            if (isKey(name, "hash_map_get") or isKey(name, "hash_map_remove")) {
+                return at.slot_ptr.slot.tag == .counted_hash_map or at.slot_ptr.slot.tag == .counted_hash_set;
+            }
+            return false;
+        }
+
+        /// puts back the bytes below the frozen point, apart from the ones the position check exempts,
+        /// keeping whatever was written past it
+        fn restoreBelow(self: *Self, before: Before) !void {
+            const now = try self.fileBytes();
+            defer self.gpa.free(now);
+            const end = @min(before.frozen, @min(before.bytes.len, now.len));
+            for (0..end) |i| {
+                if (i >= ROOT_HEADER_START and i < ROOT_HEADER_START + ROOT_HEADER_SIZE) continue;
+                if (self.body_position) |body| if (i >= body and i < body + SLOT_SIZE) continue;
+                now[i] = before.bytes[i];
+            }
+            if (kind == .memory) {
+                @memcpy(self.store.buffer.written()[0..end], now[0..end]);
+            } else {
+                try self.store.db.core.flush();
+                try self.store.out.writePositionalAll(self.io, now[0..end], 0);
+            }
+        }
+
+        /// with --port, a write op that changed committed or frozen bytes, which the port refuses at that
+        /// write (D24 items 2 and 6c). what was written before it stays, a copy included, and if that
+        /// changed a byte, it poisons the transaction as any failed op that wrote does. so the file is put
+        /// back, the refused part is found by running the path a part longer each time, and the parts
+        /// before it are run again. so is the refused part, if it isn't one that checks first, and then the
+        /// bytes below the frozen point are put back. Zig on the script without the op, or with its
+        /// transaction failed, is the oracle
         fn refuseByPosition(self: *Self, op: ObjectMap, before: Before, succeeded: bool) anyerror!void {
             if (self.callback_depth == 0 and succeeded and !hasCallback(op)) {
                 die("the port refuses this at the top level with ImmutableBytes, after Zig has committed it, which run --port can't undo", .{});
             }
-            try self.restoreBytes(before);
             // at the top level, the transaction fails, and that's the file as it was
-            if (self.callback_depth == 0 or !isKey(op.get("op").?.string, "write_path")) return error.ImmutableBytes;
-
+            if (self.callback_depth == 0) {
+                try self.restoreBytes(before);
+                return error.ImmutableBytes;
+            }
+            // write, write_if_empty and writer are one part each, which has run
+            if (!isKey(op.get("op").?.string, "write_path")) {
+                try self.restoreBelow(before);
+                return error.ImmutableBytes;
+            }
+            try self.restoreBytes(before);
+            const parts_json = op.get("path").?.array.items;
             const parts = self.parsePath(op.get("path").?);
             const cursor = self.rwValue(cursorName(op));
             const n = if (hasCallback(op)) parts.len - 1 else parts.len;
@@ -1108,7 +1150,12 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     break;
                 }
             }
-            if (refused_at > 1) _ = cursor.writePath(Ctx, parts[0 .. refused_at - 1]) catch {};
+            var at = cursor;
+            if (refused_at > 1) at = cursor.writePath(Ctx, parts[0 .. refused_at - 1]) catch return error.ImmutableBytes;
+            if (!checksFirst(parts_json[refused_at - 1], at)) {
+                _ = at.writePath(Ctx, parts[refused_at - 1 .. refused_at]) catch {};
+                try self.restoreBelow(before);
+            }
             return error.ImmutableBytes;
         }
 
