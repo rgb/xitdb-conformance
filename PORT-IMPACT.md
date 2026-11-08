@@ -81,6 +81,7 @@ same bytes, and valid on both. **`write-if-empty-emptied-slot`** and `write-if-e
 | [22](#finding-22-the-concat) | A concat freezes after its join | 1 changes | 1 changes | Variant, from `185af01` |
 | [23](#finding-23-a-cursors-freeze) | A freeze holds for every cursor | 2 of 6 change, in the prototype | 2 of 17 change | Deferred, so nothing happens |
 | [28](#finding-28-compacting-a-history-with-no-last-moment) | Compacting a history with no last moment is refused | 1 | 0 | Variant |
+| [29](#finding-29-an-init-on-a-held-cursor-after-a-freeze) | Nothing: an init on a held cursor after a freeze changes a clone that shares its record, on both | 1 | 0 | Nothing, and a fixture pins it |
 | [D18](#d18-refusing-a-write-from-before-a-freeze) | A write from before a freeze is refused | 2, and 1 reproduction | 31 | Variant, `safe-*`. An init and a read through such a cursor go on working |
 | [D19](#d19-opening-a-file-whose-root-header-cant-be-trusted) | A file whose root header can't be trusted raises an error, until `recover` is called | 3, and none of the 3 failing ones | 0 | Variant, with `recover` |
 
@@ -295,6 +296,21 @@ The prototype made a cursor's freeze a freeze of the database, as the simplest v
 So under that design, most of these don't change. The three in `tests/undefined` weren't part of this. They go from a crash
 to an error on `d6f3fee` already, by the checks in option B.
 
+## Finding 29: an init on a held cursor after a freeze
+
+**Nothing changes, on either side**, and that's why it's here: it's the reason the Swift layer's handles resolve themselves from
+the root (D18 item 3). After a freeze, an init through a cursor held from before it is allowed, as the way to go on (D22 item 1).
+It copies the collection, and writes where the copy is into the cursor's slot in place. That slot is in a record made before
+the freeze, and a clone made before the freeze by copying a map's slot shares the record, so the clone changes too. Zig's own
+comment on `freeze` gives the same advice, to reinitialize writable collections, and the docs session found what it does to a
+clone. The engine can't tell a shared record from one that isn't, so there's no guard.
+
+`tests/valid/held-init-after-freeze` pins it, in two transactions. In the first, `a` has a list of one element, `b` is a clone of
+`a`, and after a `db_freeze` an init and an append through the cursor held on `a.list` give `a.list` and `b.list` two elements
+each. In the second, the same done by going down from the root again, with an init at each level, copies the record, so
+`c.list` has two and `d.list` keeps one. Its bytes are the same on Zig at `6b93af1` and at `185af01`, and under `--port`, on
+each kind. Both of its writes after the freezes are `18-init`.
+
 ## Finding 28: compacting a history with no last moment
 
 Zig compacts a list at the root with no elements, or whose last element was appended and never written, to an empty root. So
@@ -346,7 +362,7 @@ And these write through such a cursor with a path that begins with an init part,
 - `scripts`: 03-clone-and-freeze (1)
 - `tests/generated`: compact-201 (46), compact-202 (9), compact-203 (11), compact-205 (71), compact-206 (7), gen-1 (4), gen-10 (12), gen-11 (3), gen-12 (2), gen-13 (55), gen-15 (2), gen-16 (3), gen-17 (16), gen-18 (2), gen-2 (96), gen-3 (82), gen-4 (4), gen-5 (4), gen-7 (11), gen-8 (47), gen-9 (2), reads-101 (49), reads-102 (10), reads-103 (9), reads-104 (8), reads-105 (6), reads-106 (3), reads-107 (5), reads-108 (4), reads-110 (9), reads-111 (2), reads-112 (5), replica-302 (13), replica-303 (48), replica-304 (2), replica-305 (95), replica-306 (42), safe-1 (6), safe-10 (3), safe-12 (2), safe-13 (4), safe-15 (3), safe-17 (5), safe-2 (7), safe-3 (4), safe-4 (6), safe-5 (5), safe-6 (4), safe-7 (2), safe-8 (3), safe-9 (3), safe-compact-201 (5), safe-compact-202 (3), safe-compact-203 (4), safe-compact-205 (3), safe-reads-101 (4), safe-reads-102 (3), safe-reads-103 (3), safe-reads-104 (2), safe-reads-105 (2), safe-reads-106 (5), safe-reads-107 (4), safe-reads-108 (6), safe-reads-110 (2), safe-reads-111 (5), safe-replica-301 (2), safe-replica-302 (2), safe-replica-303 (4), safe-replica-304 (6), safe-replica-305 (4), safe-replica-306 (2)
 - `tests/undefined`: concat-stale-slot (3)
-- `tests/valid`: deep-linked (1), deep-sorted (1), deep-sorted-existing (1), deep-tries (1)
+- `tests/valid`: deep-linked (1), deep-sorted (1), deep-sorted-existing (1), deep-tries (1), held-init-after-freeze (2)
 <!-- end -->
 
 **These go on working** (D22). That init writes to the cursor's slot, which is from before the freeze, so a guard that went
