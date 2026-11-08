@@ -43,6 +43,13 @@ independent of the Swift code.
 
 It uses the Zig original by path, as `../../xitdb`, without modifying it. It needs Zig 0.17.1.
 
+Commits here carry no `Co-Authored-By` line. `scripts/git-hooks/commit-msg` takes any out, once a clone points git at it,
+which is once per clone:
+
+```
+git config core.hooksPath scripts/git-hooks
+```
+
 ```
 ./check.sh
 zig-out/bin/run scripts/01-list-root-hash-map.json out/01.db
