@@ -155,16 +155,28 @@ end_mutant() {
     if [ "$noticed" -eq 1 ]; then thin=$((thin + 1)); fi
 }
 
-# a write through a cursor from before the last freeze in this transaction (D18, row 6)
+# a write through a cursor from before the last freeze in this transaction (D24, row 6)
 begin_mutant pre-freeze-write-allowed
-patch_run "if (e.freezes < store.freezes and !beginsWithInit(path)) return error.StaleCursor;" \
-    "if (false and e.freezes < store.freezes and !beginsWithInit(path)) return error.StaleCursor;"
+patch_run "if (e.freezes < store.freezes and !(self.atBody(c) and beginsWithInit(path))) return error.StaleCursor;" \
+    "if (false and e.freezes < store.freezes and !(self.atBody(c) and beginsWithInit(path))) return error.StaleCursor;"
 end_mutant
 
-# and the other way: an init through one, which is the way to go on after a freeze (D22 item 1)
-begin_mutant pre-freeze-init-refused
-patch_run "if (e.freezes < store.freezes and !beginsWithInit(path)) return error.StaleCursor;" \
+# an init through the transaction's body, which is the way to go on after a freeze, refused, and one
+# through any other cursor from before it let through, as D22 item 1 had it before D24
+begin_mutant pre-freeze-init-through-body-refused
+patch_run "if (e.freezes < store.freezes and !(self.atBody(c) and beginsWithInit(path))) return error.StaleCursor;" \
     "if (e.freezes < store.freezes) return error.StaleCursor;"
+end_mutant
+
+begin_mutant pre-freeze-init-through-held-allowed
+patch_run "if (e.freezes < store.freezes and !(self.atBody(c) and beginsWithInit(path))) return error.StaleCursor;" \
+    "if (e.freezes < store.freezes and !beginsWithInit(path)) return error.StaleCursor;"
+end_mutant
+
+# no cursor is at the body's slot, so there's no way on after a freeze
+begin_mutant body-cursor-not-exempt
+patch_run "return cursor.db == self.body_db.? and cursor.slot_ptr.position == position;" \
+    "return false and cursor.db == self.body_db.? and cursor.slot_ptr.position == position;"
 end_mutant
 
 # a write through a cursor from an earlier transaction (finding 1, row 5), and an init through one
@@ -305,14 +317,35 @@ begin_mutant concat-not-a-freeze
 patch_run "if (self.storeOf(cursor.db)) |store| store.freezes += 1;" "if (self.storeOf(cursor.db)) |store| store.freezes += 0;"
 end_mutant
 
-begin_mutant concat-result-stale
-patch_run "                    if (concat) {
-                        if (self.storeOf(cursor.db)) |store| store.freezes += 1;
-                    }
-                    if (op.get(\"as\")) |as| self.bind(as.string, .{ .rw = next });" "                    if (op.get(\"as\")) |as| self.bind(as.string, .{ .rw = next });
-                    if (concat) {
-                        if (self.storeOf(cursor.db)) |store| store.freezes += 1;
-                    }"
+# what a concat gives back counted as made after its freeze, and what any op gives back after a freeze
+# during it, which D24 item 6a counts as made before it
+begin_mutant concat-result-fresh
+patch_run "if (self.storeOf(cursor.db)) |store| store.freezes += 1;" \
+    "if (self.storeOf(cursor.db)) |store| {
+                            store.freezes += 1;
+                            self.op_freezes = store.freezes;
+                        }"
+end_mutant
+
+begin_mutant result-stamped-when-bound
+patch_run "freezes = @min(freezes, at_start);" "freezes = @max(freezes, at_start);"
+end_mutant
+
+# the position check (D24 items 2 and 6c): not made, the body's slot not exempt, and what the parts
+# before the refused write wrote not kept, so nothing is poisoned
+begin_mutant position-check-missing
+patch_run "if (held.refused or (!hasCallback(op) and try self.changedBelow(held.before))) {" \
+    "if (false and (held.refused or (!hasCallback(op) and try self.changedBelow(held.before)))) {"
+patch_run "                    if (try r.changedBelow(held.before)) {" "                    if (false and try r.changedBelow(held.before)) {"
+end_mutant
+
+begin_mutant body-position-not-exempt
+patch_run "if (self.body_position) |body| if (i >= body and i < body + SLOT_SIZE) continue;" "_ = &self.body_position;"
+end_mutant
+
+begin_mutant position-refusal-never-poisons
+patch_run "if (refused_at > 1) _ = cursor.writePath(Ctx, parts[0 .. refused_at - 1]) catch {};" \
+    "if (false and refused_at > 1) _ = cursor.writePath(Ctx, parts[0 .. refused_at - 1]) catch {};"
 end_mutant
 
 # opening and recovering (D19, D22 item 4)
