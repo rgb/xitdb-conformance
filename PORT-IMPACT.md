@@ -392,8 +392,8 @@ whose checksum verifies (D22). So nothing is dropped except by that call. Every 
 | `recovery-open-errors`: a bad magic number | `InvalidDatabase` | The same error, as this isn't a database |
 | `recovery-open-errors`: a committed size smaller than a new database, past the end of the file, or that doesn't end at a trailer | `InvalidDatabase`, `TruncatedDatabase`, `InvalidDatabase` | `UntrustedRootHeader` |
 | `recovery-open-errors`: a changed root slot in the last trailer | `InvalidDatabase` | `UntrustedRootHeader`, and `recover` loses that commit |
-| `replicate-bad-trailer`: a last trailer with its commit ID and checksum overwritten | `InvalidDatabase` | The same, and `recover` goes back to 62 |
-| `replicate-failed-first-sync`: a file a byte short of what its root header says, after a failed sync | `TruncatedDatabase` | The same, and `recover` goes back to 62 |
+| `replicate-bad-trailer`: a last trailer with its commit ID and checksum overwritten | `InvalidDatabase` | `UntrustedRootHeader`, as its magic number is good, and `recover` goes back to 62 |
+| `replicate-failed-first-sync`: a file a byte short of what its root header says, after a failed sync | `TruncatedDatabase` | `UntrustedRootHeader`, and `recover` goes back to 62 |
 | `op-after-failed-reopen`, `reopen-error-not-handled`, `reopen-wrong-error` | `InvalidDatabase`, as all three have a bad magic number | The same error, so they still fail |
 
 **The variants of those three** expect the error, then `recover`, then the reads. A `reopen` writes nothing, so that's the same
