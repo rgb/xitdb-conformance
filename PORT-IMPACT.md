@@ -15,7 +15,7 @@ gate fails if the lists aren't what the scripts do, so a new script that relies 
 
 **Three of the changes were tried.** `./impact.sh --prototypes` makes findings 12, 17 and 23 in a scratch copy of Zig
 and runs every script against it. Where this document says "the prototype", that's what ran, and everything else in a
-"what happens" column is reasoned. Those results are from the scripts at `c88ae9f`, and from `deep-sorted-existing`, which came after and changes nothing in any of them. They aren't in the gate, as it's slow.
+"what happens" column is reasoned. Those results are from the scripts at `1d56fbe`, and from `deep-sorted-existing`, which came after and changes nothing in any of them. They aren't in the gate, as it's slow.
 
 **A script not listed under a change doesn't rely on it.** It can run as it is, as far as that change goes.
 
