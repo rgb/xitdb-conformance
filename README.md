@@ -47,6 +47,12 @@ independent of the Swift code.
 
 It uses the Zig original by path, as `../../xitdb`, without modifying it. It needs Zig 0.17.1.
 
+`.github/workflows/gate.yml` runs `check.sh` on a self-hosted macOS runner at every push and pull request. It checks
+this repository out, with its history, at `xitdb-swift/conformance` and clones `xit-vcs/xitdb` at `6b93af1`, the commit
+the fixtures come from, into `xitdb` beside it, which is where `build.zig.zon` looks; when the fixtures follow another
+commit, the ref in the workflow moves with them. The runner needs Zig 0.17.1 and git (the Xcode Command Line Tools) on
+its PATH, and nothing else.
+
 Commits here carry no `Co-Authored-By` line. `scripts/git-hooks/commit-msg` takes any out, once a clone points git at it,
 which is once per clone:
 

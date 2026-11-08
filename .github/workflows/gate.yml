@@ -1,0 +1,88 @@
+# The gate on a self-hosted macOS runner: ./check.sh at every push and pull request.
+#
+# The runner needs Zig 0.17.1 and git on the PATH the runner's service has, which is short:
+# put Zig's folder in the runner's .path file, or link zig into /usr/local/bin. git is the
+# Xcode Command Line Tools' /usr/bin/git, which actions/checkout needs too: without it,
+# checkout downloads the files with no repository, and fixtures.sh can't ask git anything.
+# Everything else check.sh uses (sed, awk, od, dd, cmp, tar) comes with macOS. Nothing is cached.
+#
+# build.zig.zon takes the original xitdb from ../../xitdb, so this repository is checked out
+# at xitdb-swift/conformance and the original at xitdb, as they sit in the development
+# workspace. The original is cloned from xit-vcs/xitdb at the commit the fixtures were made
+# from, which fixtures.sh --check holds the manifest to; when the fixtures follow another
+# commit, the ref below moves with them. tests/zig-commits.txt names the later commit single
+# fixtures need; the gate only checks that those files are there, as it does locally. To use
+# a checkout kept on the runner instead, replace the second checkout step with a step that
+# links it to xitdb: fixtures.sh needs it clean and at this commit.
+name: Gate
+
+on:
+  push:
+  pull_request:
+
+# A new push to the same branch or pull request cancels the run before it.
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: Gate on macOS
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check the toolchain
+        run: |
+          expected="0.17.1"
+          if ! git --version > /dev/null 2>&1; then
+            echo "::error::git doesn't run on the runner's PATH; install the Xcode Command Line Tools (xcode-select --install)"
+            exit 1
+          fi
+          if ! command -v zig > /dev/null; then
+            echo "::error::zig is not on the runner's PATH; the gate needs Zig $expected (add its folder to the runner's .path file)"
+            exit 1
+          fi
+          version=$(zig version)
+          echo "zig $version"
+          if [ "$version" != "$expected" ]; then
+            echo "::error::the gate needs Zig $expected, and the runner's zig is $version"
+            exit 1
+          fi
+
+      - name: Check out the harness
+        uses: actions/checkout@v4
+        with:
+          path: xitdb-swift/conformance
+          # all of it: fixtures.sh --check holds the manifest's conformance commit to being in
+          # HEAD's history, and that commit is always before the one that regenerated the fixtures
+          fetch-depth: 0
+
+      - name: Check out the original xitdb
+        uses: actions/checkout@v4
+        with:
+          repository: xit-vcs/xitdb
+          ref: 6b93af1af3a260399fa0a0b1b268ded2cbf5eec5
+          path: xitdb
+
+      - name: Check the original's commit
+        run: |
+          # what fixtures.sh --check would otherwise say at the end of the gate as "manifest.json has drifted"
+          manifest=xitdb-swift/conformance/fixtures/manifest.json
+          wanted=$(sed -n 's/^  "zig_commit": "\([0-9a-f]*\)",$/\1/p' "$manifest")
+          actual=$(git -C xitdb rev-parse HEAD)
+          if [ -z "$wanted" ]; then
+            echo "::error::$manifest doesn't name the Zig commit the fixtures come from"
+            exit 1
+          fi
+          if [ "$actual" != "$wanted" ]; then
+            echo "::error::the original is at $actual, and $manifest says the fixtures come from $wanted; move the ref in gate.yml with them"
+            exit 1
+          fi
+          echo "the original is at $actual, the fixtures' commit"
+
+      - name: Run the gate
+        working-directory: xitdb-swift/conformance
+        run: ./check.sh
