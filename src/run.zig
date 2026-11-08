@@ -67,7 +67,7 @@ const ERROR_NAMES = [_][]const u8{
 };
 
 /// what only the port raises, so only --port lets a script name them
-const PORT_ERROR_NAMES = [_][]const u8{ "StaleCursor", "PoisonedTransaction", "UntrustedRootHeader", "EmptyLastMoment" };
+const PORT_ERROR_NAMES = [_][]const u8{ "StaleCursor", "PoisonedTransaction", "UntrustedRootHeader", "EmptyLastMoment", "StructuralSlot" };
 
 /// set by --port, which SCRIPT-FORMAT.md says all about
 var port_mode = false;
@@ -915,7 +915,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         fn portGuard(self: *Self, kind_of_op: OpKind, op: ObjectMap) anyerror!void {
             const is_write = switch (kind_of_op) {
                 .write_path, .write, .write_if_empty, .writer => true,
-                .read_path, .read_path_slot, .read_key_value_pair, .read_uint, .read_int, .read_float, .read_bytes, .read_bytes_into, .read_stream, .count, .iterator, .rank => false,
+                .read_path, .read_path_slot, .read_key_value_pair, .read_uint, .read_int, .read_float, .read_bytes, .read_bytes_into, .read_stream, .count, .iterator, .next, .rank => false,
                 else => return,
             };
             const name = cursorName(op);
@@ -1125,10 +1125,27 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         }
 
         fn parseData(self: *Self, v: Json) Data {
+            return self.parseDataAllowing(v, false);
+        }
+
+        /// whether it's a slot that's part of a collection's structure
+        fn isStructural(data: Data) bool {
+            const slot = switch (data) {
+                .slot => |s| s orelse return false,
+                else => return false,
+            };
+            return switch (slot.tag) {
+                .index, .kv_pair, .sorted_kv_pair => true,
+                else => false,
+            };
+        }
+
+        fn parseDataAllowing(self: *Self, v: Json, structural_allowed: bool) Data {
             const only = onlyKey(asObject(v, "write data"), "write data");
             if (isKey(only.key, "slot")) {
                 const slot = self.parseSlot(only.value);
                 if (slot) |s| {
+                    if (structural_allowed) return .{ .slot = slot };
                     switch (s.tag) {
                         // part of a collection's structure. written anywhere, the engine
                         // would follow it as if it had been built there, which is an undefined use
@@ -1752,8 +1769,17 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 .write => {
                     self.writes += 1;
                     self.noteWrite(cursorName(op), null);
-                    const data = self.parseData(op.get("data").?);
-                    try self.rwPointer(cursorName(op)).write(data);
+                    const cursor = self.rwPointer(cursorName(op));
+                    // the port refuses a structural slot before writing it. with no transaction going,
+                    // a write below the root raises the engine's ExpectedTxStart first, as any write does
+                    if (port_mode) {
+                        const data = self.parseDataAllowing(op.get("data").?, true);
+                        const would_write = cursor.db.tx_start != null or cursor.slot_ptr.position == ROOT_HEADER_START;
+                        if (would_write and isStructural(data)) return error.StructuralSlot;
+                        try cursor.write(data);
+                    } else {
+                        try cursor.write(self.parseData(op.get("data").?));
+                    }
                 },
                 .write_if_empty => {
                     self.writes += 1;
@@ -1819,8 +1845,21 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     if (op.get("as")) |as| self.bind(as.string, .{ .slot = result });
                 },
                 .read_only => {
-                    const result = self.rwValue(cursorName(op)).readOnly();
-                    self.bind(op.get("as").?.string, .{ .ro = result });
+                    const name = cursorName(op);
+                    // with --port, a view is the cursor it's from, read-only, so it keeps that one's
+                    // transaction and freeze, and a read through it from a rolled-back one is refused
+                    const from: ?Entry = if (port_mode and !isKey(name, "root")) self.env.get(name) else null;
+                    const result = if (from) |e| switch (e.binding) {
+                        .rw => |c| c.readOnly(),
+                        else => self.rwValue(name).readOnly(),
+                    } else self.rwValue(name).readOnly();
+                    const as = op.get("as").?.string;
+                    self.bind(as, .{ .ro = result });
+                    if (from) |e| {
+                        const view = self.env.getPtr(as).?;
+                        view.born = e.born;
+                        view.freezes = e.freezes;
+                    }
                 },
                 .read_key_value_pair => {
                     switch (self.anyCursor(cursorName(op))) {

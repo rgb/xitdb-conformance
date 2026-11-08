@@ -119,7 +119,8 @@ Write data and `linked_array_list_concat` take a slot, which is one of:
   `null`, and that is a script failure in `linked_array_list_concat`.
 
 A slot with the tag `index`, `kv_pair` or `sorted_kv_pair` is part of a collection's structure rather than a value.
-It can be read into a name, but writing it is an undefined use ([section 10](#10-valid-scripts-and-script-failures)).
+It can be read into a name, but writing it is an undefined use ([section 10](#10-valid-scripts-and-script-failures)), apart
+from `write` with `--port`, which the port refuses ([section 11](#what-the-port-does)).
 
 The tag names used elsewhere, in `expect`, are those of the `Tag` enum: `none`, `index`, `array_list`,
 `linked_array_list`, `hash_map`, `kv_pair`, `bytes`, `short_bytes`, `uint`, `int`, `float`, `hash_set`,
@@ -233,7 +234,8 @@ Writing through it fails with `ExpectedTxStart` between transactions, and works 
 overwrites committed bytes ([section 11](#11-behaviour-a-runner-must-not-fix)).
 
 Using a cursor or a slot from a transaction that was rolled back is an undefined use
-([section 10](#10-valid-scripts-and-script-failures)).
+([section 10](#10-valid-scripts-and-script-failures)). With `--port`, the reads and writes through one are refused
+([section 11](#what-the-port-does)).
 
 ## 5. Ops
 
@@ -544,7 +546,7 @@ Truncating is all a rollback does, so it doesn't undo a write that landed before
 | `PathPartMustBeAtEnd` | a `ctx` part that isn't last |
 | `ScriptAbort` | the `fail` op. It isn't an engine error, but it travels like one |
 | `WriteFailed` | a transaction on a read-only file |
-| `StaleCursor`, `PoisonedTransaction`, `UntrustedRootHeader`, `EmptyLastMoment` | only with `--port`, and in the port ([section 11](#what-the-port-does)) |
+| `StaleCursor`, `PoisonedTransaction`, `UntrustedRootHeader`, `EmptyLastMoment`, `StructuralSlot` | only with `--port`, and in the port ([section 11](#what-the-port-does)) |
 | `InvalidDatabase` | `reopen`: a bad magic number, a committed size below 62, or a last trailer whose checksum doesn't match. `apply_replicated`: bytes that don't end in a trailer, or in one for another file. `read_committed` from 0: an `end` that isn't the end of a trailer |
 | `InvalidVersion` | `reopen`: a version other than 1 |
 | `InvalidHashSize` | `reopen`: a hash size in the header other than the one stated |
@@ -730,8 +732,8 @@ needn't handle them. They are kept out like this:
 
 | Use | What Zig does | How it's kept out |
 |---|---|---|
-| Using a cursor or a slot from a transaction that was rolled back | reads whatever is at that offset by then, which can be anything | `run` fails |
-| Writing a slot whose tag is `index`, `kv_pair` or `sorted_kv_pair` | follows it as if it had been built there, which ends in errors like `KeyOffsetExceeded` | `run` fails |
+| Using a cursor or a slot from a transaction that was rolled back | reads whatever is at that offset by then, which can be anything | `run` fails. With `--port`, a read or a write through one raises an error instead (section 11), and the rest is still kept out |
+| Writing a slot whose tag is `index`, `kv_pair` or `sorted_kv_pair` | follows it as if it had been built there, which ends in errors like `KeyOffsetExceeded` | `run` fails. With `--port`, `write` raises `StructuralSlot` instead (section 11), and the rest is still kept out |
 | Reading, before the commit, a gap left by a `writer` that seeked past the end | zeros on `file` and `memory`. On `buffered_file`, `EndOfStream` until the gap has been flushed, and zeros after that. The committed bytes are the same on all three | `EndOfStream` can only be expected on `read_stream`, and `check.sh` runs every script on all three kinds. A read that gets zeros everywhere isn't caught |
 | On a read-only file, a transaction with a callback, or one that would fail anyway | `file` raises `WriteFailed` at the first write, without running the rest. `buffered_file` runs the rest and only fails at the commit, so it raises `KeyNotFound` for a path that fails by itself, runs the callback, and raises `ScriptAbort` for a callback that fails | `run` fails on the callback. `check.sh` runs every script on both kinds, which catches the rest |
 | A write into committed bytes (section 11) of something that points into the current transaction, if the transaction is then rolled back or the root header is later set back past it | committed data is left pointing past the end of the file. Reading it raises `EndOfStream`, or `OutOfMemory` for a wild length, and once more data has landed at that offset, the read succeeds and returns those bytes as if they were the value | `gen` doesn't let such a transaction fail. `run` can't see it, so a hand-written script has to take care: writing an inline value is fine, as `overwriting-committed-bytes` does |
@@ -832,10 +834,21 @@ A runner's calls don't change for any of this, only what the engine under them d
 are what Zig does, apart from this. `run --port` acts it out on the Zig engine, and that's what writes the expected files. It
 can, because **each guard refuses before writing anything**, so the file stays as if the op had never been there.
 `tests/zig-only.txt` lists the scripts that do what the port refuses, which aren't fixtures. `tests/port-variants/` has the
-port's versions of those written by hand, as `<name>--port`.
+port's versions of those written by hand, as `<name>--port`, and a few that are an undefined use in Zig, whose oracle is Zig on
+the same script without what the port refuses.
 
-These are checked in this order, for an op that goes through a cursor. The writes are `write_path`, `write`,
-`write_if_empty` and `writer`, and the reads are the ops that go to the file, so `slot` isn't one.
+These are checked in this order, for an op that goes through a cursor. **They cover every way to write and every way to
+read**, and a runner has to put them in front of each:
+
+- The writes are `write_path`, `write`, `write_if_empty` and `writer`, the byte writer, which is checked once, before its
+  first step.
+- The reads are every op that goes to the file through a cursor or an iterator: `read_path`, `read_path_slot`,
+  `read_key_value_pair`, `read_uint`, `read_int`, `read_float`, `read_bytes`, `read_bytes_into`, `read_stream`, `count`, `rank`,
+  `iterator` and `next`. `slot` isn't one, as it gives what the cursor holds, and nor is `read_only`, which reads nothing.
+
+In the port, there are more ways to get to each: a collection's own methods, a byte writer kept between calls, an iterator, a
+read-only view. Each of them carries the transaction and the freeze of the cursor it's from, and is refused in the same way.
+The port's own tests found that its first guards missed the byte writer for row 4, and iterators and read-only views for row 1.
 
 | | What | It raises |
 |---|---|---|
@@ -846,12 +859,16 @@ These are checked in this order, for an op that goes through a cursor. The write
 | 5 | A write during a transaction through a cursor from an earlier one (finding 1). **That includes an init**, which would rewrite a slot that's committed | `StaleCursor` |
 | 6 | A write through a cursor made before the last freeze in this transaction (D18), unless it's a `write_path` whose path **begins with an init part**. That's the way to go on after a freeze, and what follows it goes through what it made | `StaleCursor` |
 | 7 | A path with anything after `hash_map_remove` or `sorted_map_remove` (finding 12), on any cursor. It raises before removing anything | `PathPartMustBeAtEnd` |
+| 8 | A `write` of a slot whose tag is `index`, `kv_pair` or `sorted_kv_pair` (finding 3), which is part of a collection's structure. With no transaction going, a write below the root raises the engine's `ExpectedTxStart` first, as any write does. Such a slot anywhere else, in `write_if_empty` or in a path, is still an undefined use (section 10), as whether the port has written anything by the time it gets there depends on where it checks | `StructuralSlot` |
 
 What the words mean:
 
 - **A cursor is made** when the op that binds it runs, or for a callback's own cursor, when the callback starts. That's so for
   one made through a stale cursor too, which is fresh from then on. `write` and the others that update a cursor don't make it
-  fresh.
+  fresh. An iterator is made when `iterator` runs, so `next` on one made in a rolled-back transaction raises `StaleCursor`.
+- **A read-only view isn't made.** `read_only` gives the cursor it's on, read-only, so the view keeps that cursor's transaction
+  and freeze. A read through a view of a cursor from a rolled-back transaction raises `StaleCursor`, as one through the cursor
+  does, and `read_only` itself raises nothing.
 - **A freeze** is `db_freeze` or a concat. It isn't `freeze` on a cursor, which is finding 23, and nothing changes for that. What
   a concat gives back is made after its freeze, so it's fresh.
 - **A root cursor is never stale**, as it reads the last commit. An empty path is a write here, as it would give a stale cursor
@@ -861,8 +878,8 @@ What the words mean:
 - **Reads through a stale cursor stay valid**, apart from row 1. They're snapshot reads, and with stale writes refused,
   nothing changes those bytes under them.
 
-Anything but those reads and writes through a cursor from a rolled-back transaction, like `slot` or `next`, is still an
-undefined use, as in section 10.
+Anything else through a cursor or an iterator from a rolled-back transaction, like `slot` or `freeze`, is still an undefined
+use, as in section 10.
 
 **A transaction is poisoned** by an op in a callback that raises an error that's handled with `expect_error`, having written
 something (finding 16). An op has written something if it issued a write to storage, **other than an init writing back its slot
