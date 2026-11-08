@@ -236,9 +236,35 @@ begin_mutant sorted-key-writer-allowed
 patch_run "if (e.sorted_key) return error.CursorNotWriteable;" "if (e.sorted_key and kind_of_op != .writer) return error.CursorNotWriteable;"
 end_mutant
 
-# a structural slot (finding 3)
+# a structural slot (finding 3), by each way to write, and where the engine's ExpectedTxStart comes first
 begin_mutant structural-slot-written
-patch_run "if (would_write and isStructural(data)) return error.StructuralSlot;" "if (false and would_write and isStructural(data)) return error.StructuralSlot;"
+patch_run "if (!engine_first) return error.StructuralSlot;" "if (false and !engine_first) return error.StructuralSlot;"
+end_mutant
+
+begin_mutant structural-slot-in-a-path-written
+patch_run "if (isStructural(self.parseDataAllowing(part.object.get(\"write\").?, true))) return true;" \
+    "if (isStructural(self.parseDataAllowing(part.object.get(\"write\").?, true))) return false;"
+end_mutant
+
+begin_mutant structural-slot-written-if-empty
+patch_run ".write, .write_if_empty => return isStructural(self.parseDataAllowing(op.get(\"data\").?, true))," \
+    ".write => return isStructural(self.parseDataAllowing(op.get(\"data\").?, true)),
+                .write_if_empty => return false,"
+end_mutant
+
+begin_mutant structural-slot-through-root-left-to-engine
+patch_run "const at_root = entry == null or (cursor != null and cursor.?.slot_ptr.position == ROOT_HEADER_START);" \
+    "const at_root = false and (entry == null or (cursor != null and cursor.?.slot_ptr.position == ROOT_HEADER_START));"
+end_mutant
+
+begin_mutant structural-slot-before-expected-tx-start
+patch_run "const engine_first = kind_of_op != .write_if_empty and !at_root and !in_a_transaction;" \
+    "const engine_first = false and kind_of_op != .write_if_empty and !at_root and !in_a_transaction;"
+end_mutant
+
+begin_mutant structural-slot-if-empty-left-to-engine
+patch_run "const engine_first = kind_of_op != .write_if_empty and !at_root and !in_a_transaction;" \
+    "const engine_first = !at_root and !in_a_transaction;"
 end_mutant
 
 # a part after a remove (finding 12, row 7)

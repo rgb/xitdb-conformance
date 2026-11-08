@@ -957,6 +957,30 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     if ((isKey(part_name, "hash_map_remove") or isKey(part_name, "sorted_map_remove")) and i + 1 < parts.len) return error.PathPartMustBeAtEnd;
                 }
             }
+
+            // a structural slot, refused before any part runs. below the root with no transaction
+            // going, write and write_path raise the engine's ExpectedTxStart first, as they always
+            // do, and write_if_empty raises this, as it doesn't try to write
+            if (self.writesStructural(kind_of_op, op, path)) {
+                const at_root = entry == null or (cursor != null and cursor.?.slot_ptr.position == ROOT_HEADER_START);
+                const engine_first = kind_of_op != .write_if_empty and !at_root and !in_a_transaction;
+                if (!engine_first) return error.StructuralSlot;
+            }
+        }
+
+        /// whether an op would write a slot that's part of a collection's structure
+        fn writesStructural(self: *Self, kind_of_op: OpKind, op: ObjectMap, path: ?[]const Json) bool {
+            switch (kind_of_op) {
+                .write, .write_if_empty => return isStructural(self.parseDataAllowing(op.get("data").?, true)),
+                .write_path => {
+                    for (path.?) |part| {
+                        if (part != .object or !isKey(partName(part), "write")) continue;
+                        if (isStructural(self.parseDataAllowing(part.object.get("write").?, true))) return true;
+                    }
+                    return false;
+                },
+                else => return false,
+            }
         }
 
         /// the bytes of a file, as they are in storage. it has to be closed
@@ -1255,7 +1279,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             }
             if (isKey(key, "sorted_map_get_index")) return .{ .sorted_map_get_index = parseIndex(value, key) };
             if (isKey(key, "sorted_map_remove")) return .{ .sorted_map_remove = parseBytes(self.arena, value, key) };
-            if (isKey(key, "write")) return .{ .write = self.parseData(value) };
+            if (isKey(key, "write")) return .{ .write = self.parseDataAllowing(value, port_mode) };
             if (isKey(key, "ctx")) return .{ .ctx = self.parseCtx(value) };
             die("\"{s}\" is not a path part", .{key});
         }
@@ -1769,23 +1793,15 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 .write => {
                     self.writes += 1;
                     self.noteWrite(cursorName(op), null);
-                    const cursor = self.rwPointer(cursorName(op));
-                    // the port refuses a structural slot before writing it. with no transaction going,
-                    // a write below the root raises the engine's ExpectedTxStart first, as any write does
-                    if (port_mode) {
-                        const data = self.parseDataAllowing(op.get("data").?, true);
-                        const would_write = cursor.db.tx_start != null or cursor.slot_ptr.position == ROOT_HEADER_START;
-                        if (would_write and isStructural(data)) return error.StructuralSlot;
-                        try cursor.write(data);
-                    } else {
-                        try cursor.write(self.parseData(op.get("data").?));
-                    }
+                    // with --port, a structural slot that gets this far is below the root with no
+                    // transaction going, so the engine raises ExpectedTxStart before writing it
+                    try self.rwPointer(cursorName(op)).write(self.parseDataAllowing(op.get("data").?, port_mode));
                 },
                 .write_if_empty => {
                     self.writes += 1;
                     self.noteWrite(cursorName(op), null);
                     try self.noteWriteIfEmpty(cursorName(op));
-                    const data = self.parseData(op.get("data").?);
+                    const data = self.parseDataAllowing(op.get("data").?, port_mode);
                     try self.rwPointer(cursorName(op)).writeIfEmpty(data);
                 },
                 .writer => {

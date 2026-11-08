@@ -119,8 +119,8 @@ Write data and `linked_array_list_concat` take a slot, which is one of:
   `null`, and that is a script failure in `linked_array_list_concat`.
 
 A slot with the tag `index`, `kv_pair` or `sorted_kv_pair` is part of a collection's structure rather than a value.
-It can be read into a name, but writing it is an undefined use ([section 10](#10-valid-scripts-and-script-failures)), apart
-from `write` with `--port`, which the port refuses ([section 11](#what-the-port-does)).
+It can be read into a name, but writing it is an undefined use ([section 10](#10-valid-scripts-and-script-failures)). With
+`--port`, the port refuses it ([section 11](#what-the-port-does)).
 
 The tag names used elsewhere, in `expect`, are those of the `Tag` enum: `none`, `index`, `array_list`,
 `linked_array_list`, `hash_map`, `kv_pair`, `bytes`, `short_bytes`, `uint`, `int`, `float`, `hash_set`,
@@ -733,7 +733,7 @@ needn't handle them. They are kept out like this:
 | Use | What Zig does | How it's kept out |
 |---|---|---|
 | Using a cursor or a slot from a transaction that was rolled back | reads whatever is at that offset by then, which can be anything | `run` fails. With `--port`, a read or a write through one raises an error instead (section 11), and the rest is still kept out |
-| Writing a slot whose tag is `index`, `kv_pair` or `sorted_kv_pair` | follows it as if it had been built there, which ends in errors like `KeyOffsetExceeded` | `run` fails. With `--port`, `write` raises `StructuralSlot` instead (section 11), and the rest is still kept out |
+| Writing a slot whose tag is `index`, `kv_pair` or `sorted_kv_pair` | follows it as if it had been built there, which ends in errors like `KeyOffsetExceeded` | `run` fails. With `--port`, every way to write one raises `StructuralSlot` instead (section 11) |
 | Reading, before the commit, a gap left by a `writer` that seeked past the end | zeros on `file` and `memory`. On `buffered_file`, `EndOfStream` until the gap has been flushed, and zeros after that. The committed bytes are the same on all three | `EndOfStream` can only be expected on `read_stream`, and `check.sh` runs every script on all three kinds. A read that gets zeros everywhere isn't caught |
 | On a read-only file, a transaction with a callback, or one that would fail anyway | `file` raises `WriteFailed` at the first write, without running the rest. `buffered_file` runs the rest and only fails at the commit, so it raises `KeyNotFound` for a path that fails by itself, runs the callback, and raises `ScriptAbort` for a callback that fails | `run` fails on the callback. `check.sh` runs every script on both kinds, which catches the rest |
 | A write into committed bytes (section 11) of something that points into the current transaction, if the transaction is then rolled back or the root header is later set back past it | committed data is left pointing past the end of the file. Reading it raises `EndOfStream`, or `OutOfMemory` for a wild length, and once more data has landed at that offset, the read succeeds and returns those bytes as if they were the value | `gen` doesn't let such a transaction fail. `run` can't see it, so a hand-written script has to take care: writing an inline value is fine, as `overwriting-committed-bytes` does |
@@ -859,7 +859,7 @@ The port's own tests found that its first guards missed the byte writer for row 
 | 5 | A write during a transaction through a cursor from an earlier one (finding 1). **That includes an init**, which would rewrite a slot that's committed | `StaleCursor` |
 | 6 | A write through a cursor made before the last freeze in this transaction (D18), unless it's a `write_path` whose path **begins with an init part**. That's the way to go on after a freeze, and what follows it goes through what it made | `StaleCursor` |
 | 7 | A path with anything after `hash_map_remove` or `sorted_map_remove` (finding 12), on any cursor. It raises before removing anything | `PathPartMustBeAtEnd` |
-| 8 | A `write` of a slot whose tag is `index`, `kv_pair` or `sorted_kv_pair` (finding 3), which is part of a collection's structure. With no transaction going, a write below the root raises the engine's `ExpectedTxStart` first, as any write does. Such a slot anywhere else, in `write_if_empty` or in a path, is still an undefined use (section 10), as whether the port has written anything by the time it gets there depends on where it checks | `StructuralSlot` |
+| 8 | A slot whose tag is `index`, `kv_pair` or `sorted_kv_pair` (finding 3), which is part of a collection's structure: in `write`, in `write_if_empty` whatever the slot holds, or in a path's `write`, before any of the path's parts run. So nothing is written, and through the root no transaction begins. With no transaction going, `write` and `write_path` below the root raise the engine's `ExpectedTxStart` first, as they always do, and `write_if_empty` raises this, as it doesn't try to write | `StructuralSlot` |
 
 What the words mean:
 
