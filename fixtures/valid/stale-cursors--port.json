@@ -63,6 +63,8 @@
     { "op": "write", "on": "gone", "data": { "uint": 1 }, "expect_error": "ExpectedTxStart", "note": "from a rolled-back transaction, with no transaction going" },
     { "op": "count", "on": "gone_ro", "expect_error": "StaleCursor" },
     { "op": "count", "on": "gone_view", "expect_error": "StaleCursor" },
+    { "op": "read_only", "on": "gone", "as": "gone_view_after", "note": "a view made now is still of the rolled-back cursor" },
+    { "op": "count", "on": "gone_view_after", "expect_error": "StaleCursor" },
     { "op": "next", "on": "gone_it", "expect_error": "StaleCursor" },
     { "op": "iterator", "on": "gone_ro", "as": "gone_it_after", "expect_error": "StaleCursor" },
     { "op": "write_path", "on": "root", "path": [{ "hash_map_init": {} }, { "ctx": { "as": "s", "ops": [
