@@ -67,7 +67,7 @@ const ERROR_NAMES = [_][]const u8{
 };
 
 /// what only the port raises, so only --port lets a script name them
-const PORT_ERROR_NAMES = [_][]const u8{ "StaleCursor", "PoisonedTransaction", "UntrustedRootHeader" };
+const PORT_ERROR_NAMES = [_][]const u8{ "StaleCursor", "PoisonedTransaction", "UntrustedRootHeader", "EmptyLastMoment" };
 
 /// set by --port, which SCRIPT-FORMAT.md says all about
 var port_mode = false;
@@ -1413,6 +1413,14 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             return result;
         }
 
+        /// a list at the root whose last element Zig's compact can't find, as there are none, or
+        /// the last was appended and never written. Zig compacts it to an empty root (finding 28)
+        fn hasNoLastMoment(self: *Self) !bool {
+            const root = self.store.db.rootCursor();
+            if ((try root.slot()).tag != .array_list) return false;
+            return (try root.readPathSlot(void, &.{.{ .array_list_get = -1 }})) == null;
+        }
+
         fn compact(self: *Self, op: ObjectMap) !void {
             const into = op.get("into").?.string;
             const existing = self.findStore(into);
@@ -1420,6 +1428,12 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 if (store.closed) die("database \"{s}\" is closed", .{into});
                 if (op.get("file_id") != null) die("database \"{s}\" already has a file ID", .{into});
             } else if (op.get("file_id") == null) die("compacting into a new database needs a file_id", .{});
+
+            // the port refuses it before anything else, the target included, so a new one is never made
+            if (try self.hasNoLastMoment()) {
+                if (self.note_port_changes) self.noteChange("28");
+                if (port_mode) return error.EmptyLastMoment;
+            }
 
             const target = existing orelse try self.newStore(into);
             errdefer if (existing == null) {

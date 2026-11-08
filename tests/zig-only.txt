@@ -1,6 +1,7 @@
 # Scripts the port refuses, so they aren't fixtures. The gate goes on running them on Zig, and mutants.sh uses them, and
 # the gate fails if run --port lets one through. Each line is the script's name, and what it first stops at.
 04-rollback PoisonedTransaction
+compact-roots EmptyLastMoment
 every-construct-linked StaleCursor
 every-construct-sorted CursorNotWriteable
 overwriting-committed-bytes StaleCursor

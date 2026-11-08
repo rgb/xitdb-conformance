@@ -1,7 +1,7 @@
 # What the port's agreed differences touch
 
 After its parity gate, the Swift port adopts guards and fixes that the Zig original doesn't have
-(`director/zig-findings.md`, D17, D18 and D19). This says which scripts rely on what each one changes, and what would
+(`director/zig-findings.md`, D17, D18, D19 and D22). This says which scripts rely on what each one changes, and what would
 happen to each script. **All of it has been done**, apart from finding 23, which was deferred. The next section says what the
 fixtures are now, and each section after it says why.
 
@@ -41,8 +41,8 @@ refuse, unless the script says so with `expect_error`. So a fixture can't rely o
 and the gate runs them all that way.
 
 **A script that does what the port refuses isn't a fixture.** It goes on running on Zig, in the gate and `mutants.sh`, as
-what Zig does hasn't changed. `tests/zig-only.txt` lists all 43, with the gate holding it to what `run --port` refuses. That's
-34 of the 42 generated scripts, and these 9, each with a version of its own in `tests/port-variants`:
+what Zig does hasn't changed. `tests/zig-only.txt` lists all 44, with the gate holding it to what `run --port` refuses. That's
+34 of the 42 generated scripts, and these 10, each with a version of its own in `tests/port-variants`:
 
 | Script | Its variant `<name>--port` | Expected file from |
 |---|---|---|
@@ -54,6 +54,7 @@ what Zig does hasn't changed. `tests/zig-only.txt` lists all 43, with the gate h
 | `every-construct-sorted` | Writing a key through a pair raises `CursorNotWriteable` | `6b93af1` |
 | `recovery-open-errors` | `UntrustedRootHeader` where the root header can't be trusted, and then `recover`, down to losing the last commit and going on from there | `6b93af1` |
 | `replicate-bad-trailer`, `replicate-failed-first-sync` | The same, on a replica | `6b93af1` |
+| `compact-roots` | The two compactions of a history with no last moment raise `EmptyLastMoment`, and so does one into a target with something in it. Written, the last moment compacts. A new case has three moments written and a fourth appended | `6b93af1` |
 
 "From `6b93af1`" means the gate runs it, and that `185af01` gives the same bytes. Recovering leaves what Zig writes for the
 script without the damage: for `recovery-open-errors`, that was compared with a script of only what came after, and only the
@@ -64,7 +65,7 @@ same bytes, and valid on both. **`write-if-empty-emptied-slot`** and `write-if-e
 
 **`gen-fixed.sh` also writes the 42 seeds again with `--port-safe`**, as `safe-*`. They're fixtures, and valid on both.
 
-**What the port fails at the start of its brief**, before any of this is in it: the 9 variants, and
+**What the port fails at the start of its brief**, before any of this is in it: the 10 variants, and
 `write-if-empty-emptied-slot`. Those are what fail without `--port` on `6b93af1` too, and everything else passes both ways.
 
 ## Summary
@@ -79,6 +80,7 @@ same bytes, and valid on both. **`write-if-empty-emptied-slot`** and `write-if-e
 | [17](#finding-17-write_if_empty-and-the-snapshot) | `write_if_empty` goes by the slot as it is now | 2 | 4 | Done: regenerated from `185af01` |
 | [22](#finding-22-the-concat) | A concat freezes after its join | 1 changes | 1 changes | Variant, from `185af01` |
 | [23](#finding-23-a-cursors-freeze) | A freeze holds for every cursor | 2 of 6 change, in the prototype | 2 of 17 change | Deferred, so nothing happens |
+| [28](#finding-28-compacting-a-history-with-no-last-moment) | Compacting a history with no last moment is refused | 1 | 0 | Variant |
 | [D18](#d18-refusing-a-write-from-before-a-freeze) | A write from before a freeze is refused | 2, and 1 reproduction | 31 | Variant, `safe-*`. An init and a read through such a cursor go on working |
 | [D19](#d19-opening-a-file-whose-root-header-cant-be-trusted) | A file whose root header can't be trusted raises an error, until `recover` is called | 3, and none of the 3 failing ones | 0 | Variant, with `recover` |
 
@@ -92,7 +94,7 @@ runs 20. The notes that stay allowed are `18-init`, `18-reads`, `18-reads-earlie
 | Item | What it does instead |
 |---|---|
 | 1 | No write through a cursor from an earlier transaction |
-| 2, 3, 12, D19 | `gen` doesn't do these anyway |
+| 2, 3, 12, 28, D19 | `gen` doesn't do these anyway |
 | 16 | An error from an op that wrote something goes up, and rolls the transaction back |
 | 17 | `write_if_empty` only where the snapshot and the slot agree about being empty |
 | 22 | No concat |
@@ -291,6 +293,27 @@ The prototype made a cursor's freeze a freeze of the database, as the simplest v
 
 So under that design, most of these don't change. The three in `tests/undefined` weren't part of this. They go from a crash
 to an error on `d6f3fee` already, by the checks in option B.
+
+## Finding 28: compacting a history with no last moment
+
+Zig compacts a list at the root with no elements, or whose last element was appended and never written, to an empty root. So
+the list goes, and every moment written before that last one. The port refuses it with `EmptyLastMoment`, before writing
+anything (D22 item 7). Every `compact` of such a history:
+
+<!-- list 28 -->
+- `tests/valid`: compact-roots (2)
+<!-- end -->
+
+`compact-roots--port` expects the error on both of the compactions in `compact-roots`, and on one of them again into a target
+with something in it, as the source is refused before the target is looked at. Then each source gets a last moment written,
+and compacts into the name it was refused, which still needs a `file_id`. A new case is the one that finding 28 was widened by: three
+moments written and a fourth appended, into an empty target, which stays as it was. Its expected file is Zig's with those
+compactions left out, which was compared with a copy that has a `committed_size` in their place: every one of its 42 databases
+is the same bytes on each kind, apart from commit IDs.
+
+`gen` can't do it: every moment it commits has a hash map in it, and `undo` copies one, so a history it makes always has a
+last moment. `gen-live.sh` would reject a script that did, with `PORT_SAFE=yes`, as `28` isn't one of the notes it allows.
+Over 1200 fresh seeds with `--compact`, half of them with `--port-safe`, none did.
 
 ## D18: refusing a write from before a freeze
 

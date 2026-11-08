@@ -423,7 +423,7 @@ What it writes depends on the source's root. It commits once in the target, or n
 | Root | The target |
 |---|---|
 | empty, with `full` not set | no commit |
-| an array list, whose last moment is empty or which has no moments | no commit. So a list with no moments gives an empty root, and not an empty list ([section 11](#11-behaviour-a-runner-must-not-fix)) |
+| an array list, whose last moment is empty or which has no moments | no commit. So a list with no moments gives an empty root, and not an empty list ([section 11](#11-behaviour-a-runner-must-not-fix)). The port refuses it with `EmptyLastMoment` ([section 11](#what-the-port-does)) |
 | any other array list | a new array list with only its last moment |
 | anything else, including one set to nothing | written whole |
 
@@ -544,7 +544,7 @@ Truncating is all a rollback does, so it doesn't undo a write that landed before
 | `PathPartMustBeAtEnd` | a `ctx` part that isn't last |
 | `ScriptAbort` | the `fail` op. It isn't an engine error, but it travels like one |
 | `WriteFailed` | a transaction on a read-only file |
-| `StaleCursor`, `PoisonedTransaction`, `UntrustedRootHeader` | only with `--port`, and in the port ([section 11](#what-the-port-does)) |
+| `StaleCursor`, `PoisonedTransaction`, `UntrustedRootHeader`, `EmptyLastMoment` | only with `--port`, and in the port ([section 11](#what-the-port-does)) |
 | `InvalidDatabase` | `reopen`: a bad magic number, a committed size below 62, or a last trailer whose checksum doesn't match. `apply_replicated`: bytes that don't end in a trailer, or in one for another file. `read_committed` from 0: an `end` that isn't the end of a trailer |
 | `InvalidVersion` | `reopen`: a version other than 1 |
 | `InvalidHashSize` | `reopen`: a hash size in the header other than the one stated |
@@ -808,7 +808,9 @@ All of these look like mistakes and all of them are what Zig does. `overwriting-
    iterator skips it. In a linked array list it's marked as written with nothing (`lib.zig:2094`), so an iterator gives
    it.
 13. **Compacting a history with no last moment loses the history.** A list at the root with no moments, or whose last
-   moment was never written, compacts to an empty root, and not to a list.
+   moment was never written, compacts to an empty root, and not to a list. Every moment written before that last one is lost
+   with it. The port refuses it ([below](#what-the-port-does)), so `compact-roots` is only for Zig, and
+   `compact-roots--port` is its version.
 14. **A failed sync at 0 leaves no database.** It empties the file first, so it can't be opened until a sync at 0
    succeeds. Zig's README says so, and that a caller who minds should write the copy to a new file.
 
@@ -892,6 +894,17 @@ root header, at offset 20. Then it opens the database, which is left open. It ta
 in has no commit. A commit past that position is lost, and its commit ID stays in the sidecar, as it was used. With a bad magic
 number, or no trailer that verifies, it raises `InvalidDatabase`, and the database stays closed. So all it leaves is what the
 file held just after that commit, and nothing is dropped except by this call.
+
+**Compacting a history with no last moment.** A `compact` raises `EmptyLastMoment` if the current database's root is an
+array list with no elements, or whose last element is empty: its tag is `none` and `full` isn't set, as with one appended and
+never written (finding 28). One set to nothing is a moment, as before. This is checked before anything else the compaction
+does, the target included:
+
+- a target with something in its root raises `EmptyLastMoment` too, and not `TargetNotEmpty`;
+- a name that wasn't a database yet still isn't one, so a later `compact` into it needs a `file_id`, as any new one does;
+- a target that was empty is left as it was, as is the source.
+
+So it's what Zig writes with that `compact` left out.
 
 ## 12. Worked example
 
