@@ -14,11 +14,20 @@
 # fixtures need; the gate only checks that those files are there, as it does locally. To use
 # a checkout kept on the runner instead, replace the second checkout step with a step that
 # links it to xitdb: fixtures.sh needs it clean and at this commit.
+#
+# A self-hosted runner must never run a fork's code unasked, so a pull request runs the gate
+# only from a branch of this repository; requiring approval for outside contributors in the
+# repository's settings is the second line, not the first. actions/checkout@v4 runs on
+# Node 20, which GitHub has been retiring during 2026; @v5 is the same action on Node 24, to
+# move to if the runner complains.
 name: Gate
 
 on:
   push:
   pull_request:
+
+permissions:
+  contents: read
 
 # A new push to the same branch or pull request cancels the run before it.
 concurrency:
@@ -28,6 +37,7 @@ concurrency:
 jobs:
   macos:
     name: Gate on macOS
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, macOS]
     timeout-minutes: 90
     defaults:
