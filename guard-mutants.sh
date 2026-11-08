@@ -343,9 +343,21 @@ begin_mutant body-position-not-exempt
 patch_run "if (self.body_position) |body| if (i >= body and i < body + SLOT_SIZE) continue;" "_ = &self.body_position;"
 end_mutant
 
-begin_mutant position-refusal-never-poisons
-patch_run "if (refused_at > 1) _ = cursor.writePath(Ctx, parts[0 .. refused_at - 1]) catch {};" \
-    "if (false and refused_at > 1) _ = cursor.writePath(Ctx, parts[0 .. refused_at - 1]) catch {};"
+begin_mutant position-refusal-prefix-not-kept
+patch_run "if (refused_at > 1) at = cursor.writePath(Ctx, parts[0 .. refused_at - 1]) catch return error.ImmutableBytes;" \
+    "if (refused_at > 1) {
+                at = cursor.writePath(Ctx, parts[0 .. refused_at - 1]) catch return error.ImmutableBytes;
+                try self.restoreBytes(before);
+            }"
+end_mutant
+
+# every part taken to check first, so what a get that adds a key, or a writer, wrote before the
+# refused write isn't kept
+begin_mutant position-refused-part-checks-first
+patch_run "if (!checksFirst(parts_json[refused_at - 1], at)) {" "if (false and !checksFirst(parts_json[refused_at - 1], at)) {"
+patch_run "            if (!isKey(op.get(\"op\").?.string, \"write_path\")) {
+                try self.restoreBelow(before);" "            if (!isKey(op.get(\"op\").?.string, \"write_path\")) {
+                try self.restoreBytes(before);"
 end_mutant
 
 # opening and recovering (D19, D22 item 4)
