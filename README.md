@@ -15,7 +15,8 @@ independent of the Swift code.
 - `tests/from-other-zig/`: scripts that only pass on a later Zig commit, which `tests/zig-commits.txt` names. The gate
   doesn't run them, and `second-zig.sh` against that commit does.
 - `tests/port-variants/`: the port's versions of scripts that pin what it refuses, as `<name>--port`, which `run --port` runs.
-  `tests/zig-only.txt` lists what they replace. Those go on running on Zig, and aren't fixtures.
+  `tests/zig-only.txt` lists what they replace. Those go on running on Zig, and aren't fixtures. Some have no Zig script, or
+  one in `tests/invalid/`, as what they do is an undefined use in Zig, and their oracle is Zig without what the port refuses.
 - `tests/invalid/`: scripts that `run` must reject, before running them or, for an undefined use, when it gets there.
   A second runner never sees these.
 - `tests/port-differs/`: the reads that the port corrects from the start, with what Zig does and what the port does, so
@@ -35,6 +36,9 @@ independent of the Swift code.
   it with `zig build -Doptimize=ReleaseFast --prefix out/release` and run `out/release/bin/bench`.
 - `mutants.sh`: makes copies of the Zig original that get copying or rewriting in place wrong, and compaction and
   replication wrong, one place at a time, and shows which scripts notice. It isn't part of the gate, as it's slow.
+- `guard-mutants.sh [checkout of a later Zig]`: the same for the port's guards, as `run --port` acts them out. It makes
+  copies of `src/run.zig` that get one guard wrong at a time, and runs every fixture with each. It isn't part of the gate
+  either.
 - `PORT-IMPACT.md`: which scripts rely on what the port changes after its parity gate, and what would happen to each.
   `impact.sh` keeps its lists to what the scripts do, and `impact.sh --prototypes` tries three of the changes on copies of Zig.
 - `second-zig.sh <checkout>`: runs all of this against another commit of the Zig implementation, and says what differs.

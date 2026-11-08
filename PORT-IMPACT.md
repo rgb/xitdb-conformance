@@ -60,6 +60,21 @@ what Zig does hasn't changed. `tests/zig-only.txt` lists all 44, with the gate h
 script without the damage: for `recovery-open-errors`, that was compared with a script of only what came after, and only the
 last trailer's commit ID and checksum differ.
 
+**Five scripts only the port can run** are in `tests/port-variants` too. What they do is an undefined use in Zig, so there's no
+Zig script to make a variant of, and their oracle is Zig on the same script without what the port refuses. That was compared on
+each kind, and each is the same bytes at `185af01`. They're there so that `guard-mutants.sh` finds every guard it gets wrong
+noticed by two fixtures, at least:
+
+| Script | What it pins |
+|---|---|
+| `write-kv-pair-slot--port`, `write-sorted-kv-pair-slot--port` | A `write` of a structural slot raises `StructuralSlot` (finding 3). They're versions of the scripts with those names in `tests/invalid`. The sorted one also writes a key through a pair by each way to write, the byte writer included |
+| `rolled-back-reads--port` | Every way to read through what a rolled-back transaction made: a cursor, a read-only cursor, a view made before or after the rollback, an iterator through one, and `next` on one made in it |
+| `stale-cursors--port` | Every way to write through each kind of stale cursor: from an earlier transaction, from before a `db_freeze`, from before a concat, and from a rolled-back transaction. And the reads, the init and the concat's result that stay valid |
+| `compact-sliced-history--port` | A list root sliced to nothing, and one whose last element was appended in a callback that wrote nothing, as `gen` found (finding 28) |
+
+`every-construct-sorted--port` also tries the byte writer on a key through a pair, and `overwriting-committed-bytes--port` now
+ends with a write through a cursor from before a `db_freeze`.
+
 `several-databases` had one write after a `db_freeze` that didn't need to be there, so it comes before it now. It's the
 same bytes, and valid on both. **`write-if-empty-emptied-slot`** and `write-if-empty-unreachable` stay as they were.
 
