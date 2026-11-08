@@ -113,6 +113,8 @@ fn Gen(comptime HashInt: type) type {
             pub fn run(self: Ctx, cursor: *RW) anyerror!void {
                 const g = self.g;
                 const index = g.kept.items.len;
+                // a top-level op's callback gets the transaction's body
+                if (g.depth == 0) g.body_position = cursor.slot_ptr.position;
                 g.kept.append(g.arena, .{ .name = self.name, .cursor = cursor.*, .freezes = g.freezes }) catch oom();
                 g.enter();
                 defer g.leave();
@@ -184,6 +186,8 @@ fn Gen(comptime HashInt: type) type {
         port_safe: bool,
         freezes: u64 = 0,
         op_start: [MAX_DEPTH + 3]u64 = @splat(0),
+        // where the slot of the transaction's body is, the only one an init can go on through after a freeze
+        body_position: ?u64 = null,
 
         // names
 
@@ -647,11 +651,14 @@ fn Gen(comptime HashInt: type) type {
             try self.beginOp();
             try self.w.print("{{\"op\":\"write_path\",\"on\":\"{s}\",\"path\":[{s}", .{ on_name, p.text.items });
             try self.w.flush();
+            const freezes_before = self.freezes;
             const result = cursor.writePath(Ctx, p.parts.items);
             if (p.has_ctx) try self.w.writeAll("]}}");
             try self.w.writeAll("]");
             if (result) |next| {
-                if (bind) {
+                // what an op gives back counts as made before a freeze during it (D24), so with
+                // --port-safe nothing could be written through it, and it isn't kept
+                if (bind and !(self.port_safe and self.freezes != freezes_before)) {
                     const name = self.fresh("c");
                     self.kept.append(self.arena, .{ .name = name, .cursor = next, .freezes = self.freezes }) catch oom();
                     try self.w.print(",\"as\":\"{s}\"", .{name});
@@ -881,10 +888,12 @@ fn Gen(comptime HashInt: type) type {
         }
 
         /// with --port-safe, what a write through this cursor needs if it's from before a freeze,
-        /// which is an init through it, as that's still allowed. it says whether there's a way
-        /// to write through it now, and there isn't if it's not at a collection.
+        /// which is an init through it, as that's still allowed if its slot is the transaction's
+        /// body's (D24). it says whether there's a way to write through it now, and there isn't
+        /// for any other cursor, or if it's not at a collection.
         fn refresh(self: *Self, index: usize) anyerror!bool {
             if (self.kept.items[index].freezes == self.freezes) return true;
+            if (self.at(index).cursor.slot_ptr.position != self.body_position) return false;
             const tag = peekTag(self.at(index).cursor, &.{});
             switch (tag) {
                 .hash_map, .counted_hash_map, .hash_set, .counted_hash_set, .array_list, .linked_array_list, .sorted_map, .sorted_set => {},
@@ -1012,9 +1021,16 @@ fn Gen(comptime HashInt: type) type {
             // nodes it shares: two headers for one tree, without any way to see it coming.
             // the frozen cursors here are in clone, where nothing can reach that.
             try self.freezeEverything();
-            // the map has been frozen too, so it starts again from here
+            // the map has been frozen too, so it starts again from here. with --port-safe, that's
+            // only for the transaction's body
             const tag = peekTag(self.at(base).cursor, &.{});
-            if (tag == .hash_map or tag == .counted_hash_map) try self.reinit(base, tag);
+            if (tag == .hash_map or tag == .counted_hash_map) {
+                if (self.port_safe) {
+                    _ = try self.refresh(base);
+                } else {
+                    try self.reinit(base, tag);
+                }
+            }
         }
 
         /// copies a slot from this transaction or an earlier moment under a new key,
