@@ -887,7 +887,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         }
 
         /// what the port's guards will have to say about a write through this name
-        fn noteWrite(self: *Self, name: []const u8, path: ?[]const Json) void {
+        fn noteWrite(self: *Self, kind_of_op: OpKind, name: []const u8, path: ?[]const Json) void {
             if (!self.note_port_changes) return;
             if (isKey(name, "root")) return;
             const entry = self.env.getPtr(name) orelse return;
@@ -905,12 +905,12 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             }
             const store = self.storeOf(cursor.db) orelse return;
             if (entry.freezes < store.freezes) {
-                if (!beginsWithInit(path)) {
-                    self.noteChange("18-other");
-                } else if (self.atBody(cursor)) {
-                    self.noteChange("18-init");
+                if (beginsWithInit(path)) {
+                    if (self.atBody(cursor)) self.noteChange("18-init") else self.noteChange("18-init-held");
+                } else if (self.atBody(cursor) and goesOnAfterFreeze(kind_of_op, path)) {
+                    self.noteChange("18-write");
                 } else {
-                    self.noteChange("18-init-held");
+                    self.noteChange("18-other");
                 }
             }
         }
@@ -941,6 +941,23 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         fn beginsWithInit(path: ?[]const Json) bool {
             const parts = path orelse return false;
             return parts.len > 0 and isInitPart(parts[0]);
+        }
+
+        fn beginsWithWrite(path: ?[]const Json) bool {
+            const parts = path orelse return false;
+            return parts.len > 0 and isKey(partName(parts[0]), "write");
+        }
+
+        /// what goes on after a freeze through a cursor at the body's slot: a path that begins with
+        /// an init part (D24 item 1) or a write part (item 3), and so `write`, which is a one-part
+        /// write path, and `write_if_empty`, which calls it. what follows the first part goes through
+        /// what it made or wrote. a byte writer and an empty path stay refused
+        fn goesOnAfterFreeze(kind_of_op: OpKind, path: ?[]const Json) bool {
+            return switch (kind_of_op) {
+                .write, .write_if_empty => true,
+                .write_path => beginsWithInit(path) or beginsWithWrite(path),
+                else => false,
+            };
         }
 
         /// with --port, what the port refuses before it writes anything, which is why it's
@@ -981,8 +998,8 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     // an init through one of these would rewrite a slot that's committed
                     if (e.born != self.top_index) return error.StaleCursor;
                     const store = self.storeOf(c.db) orelse return;
-                    // after a freeze, only a path that begins with an init, through a cursor at the body's slot (D24)
-                    if (e.freezes < store.freezes and !(self.atBody(c) and beginsWithInit(path))) return error.StaleCursor;
+                    // after a freeze, only what begins with an init or a write, through a cursor at the body's slot (D24)
+                    if (e.freezes < store.freezes and !(self.atBody(c) and goesOnAfterFreeze(kind_of_op, path))) return error.StaleCursor;
                 }
             }
 
@@ -1966,7 +1983,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     const path = self.parsePath(op.get("path").?);
                     const path_json = op.get("path").?.array.items;
                     if (path_json.len > 0) {
-                        self.noteWrite(cursorName(op), path_json);
+                        self.noteWrite(.write_path, cursorName(op), path_json);
                         self.notePath(path_json);
                     }
                     const concat = for (path_json) |part| {
@@ -1986,21 +2003,21 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 },
                 .write => {
                     self.writes += 1;
-                    self.noteWrite(cursorName(op), null);
+                    self.noteWrite(.write, cursorName(op), null);
                     // with --port, a structural slot that gets this far is below the root with no
                     // transaction going, so the engine raises ExpectedTxStart before writing it
                     try self.rwPointer(cursorName(op)).write(self.parseDataAllowing(op.get("data").?, port_mode));
                 },
                 .write_if_empty => {
                     self.writes += 1;
-                    self.noteWrite(cursorName(op), null);
+                    self.noteWrite(.write_if_empty, cursorName(op), null);
                     try self.noteWriteIfEmpty(cursorName(op));
                     const data = self.parseDataAllowing(op.get("data").?, port_mode);
                     try self.rwPointer(cursorName(op)).writeIfEmpty(data);
                 },
                 .writer => {
                     self.writes += 1;
-                    self.noteWrite(cursorName(op), null);
+                    self.noteWrite(.writer, cursorName(op), null);
                     const format_tag: ?[2]u8 = if (op.get("format_tag")) |tag| parseFixedBytes(2, self.arena, tag, "format_tag") else null;
                     var writer = try self.rwPointer(cursorName(op)).writer(&.{});
                     writer.format_tag = format_tag;

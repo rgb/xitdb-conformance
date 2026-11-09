@@ -66,7 +66,7 @@ while [ "$seed" -lt "$last" ]; do
         # the memory kind is the one that can tell what a failed op left behind
         kind=memory
         if grep -q '"read_only":true' "$script"; then kind=buffered_file; fi
-        changes=$("$RUN" "$script" "$db.notes" --kind "$kind" --note-port-changes 2>&1 | grep '^change ' | grep -Ev '^change (18-init|18-reads|18-reads-earlier|1-raises) ' || true)
+        changes=$("$RUN" "$script" "$db.notes" --kind "$kind" --note-port-changes 2>&1 | grep '^change ' | grep -Ev '^change (18-init|18-write|18-reads|18-reads-earlier|1-raises) ' || true)
         if [ -n "$changes" ]; then
             echo "it does what the port changes: $(echo "$changes" | head -n 1)" >> "$err"
             ok=no

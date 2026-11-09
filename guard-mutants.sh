@@ -157,26 +157,47 @@ end_mutant() {
 
 # a write through a cursor from before the last freeze in this transaction (D24, row 6)
 begin_mutant pre-freeze-write-allowed
-patch_run "if (e.freezes < store.freezes and !(self.atBody(c) and beginsWithInit(path))) return error.StaleCursor;" \
-    "if (false and e.freezes < store.freezes and !(self.atBody(c) and beginsWithInit(path))) return error.StaleCursor;"
+patch_run "if (e.freezes < store.freezes and !(self.atBody(c) and goesOnAfterFreeze(kind_of_op, path))) return error.StaleCursor;" \
+    "if (false and e.freezes < store.freezes and !(self.atBody(c) and goesOnAfterFreeze(kind_of_op, path))) return error.StaleCursor;"
 end_mutant
 
-# an init through the transaction's body, which is the way to go on after a freeze, refused, and one
-# through any other cursor from before it let through, as D22 item 1 had it before D24
+# an init or a write through the transaction's body, which is the way to go on after a freeze, refused,
+# and an init through any other cursor from before it let through, as D22 item 1 had it before D24
 begin_mutant pre-freeze-init-through-body-refused
-patch_run "if (e.freezes < store.freezes and !(self.atBody(c) and beginsWithInit(path))) return error.StaleCursor;" \
+patch_run "if (e.freezes < store.freezes and !(self.atBody(c) and goesOnAfterFreeze(kind_of_op, path))) return error.StaleCursor;" \
     "if (e.freezes < store.freezes) return error.StaleCursor;"
 end_mutant
 
 begin_mutant pre-freeze-init-through-held-allowed
-patch_run "if (e.freezes < store.freezes and !(self.atBody(c) and beginsWithInit(path))) return error.StaleCursor;" \
-    "if (e.freezes < store.freezes and !beginsWithInit(path)) return error.StaleCursor;"
+patch_run "if (e.freezes < store.freezes and !(self.atBody(c) and goesOnAfterFreeze(kind_of_op, path))) return error.StaleCursor;" \
+    "if (e.freezes < store.freezes and !beginsWithInit(path) and !(self.atBody(c) and goesOnAfterFreeze(kind_of_op, path))) return error.StaleCursor;"
 end_mutant
 
 # no cursor is at the body's slot, so there's no way on after a freeze
 begin_mutant body-cursor-not-exempt
 patch_run "return cursor.db == self.body_db.? and cursor.slot_ptr.position == position;" \
     "return false and cursor.db == self.body_db.? and cursor.slot_ptr.position == position;"
+end_mutant
+
+# going on at the body's slot by writing first (D24 item 3) refused, all of it and each way of doing it:
+# a path whose first part is a write, `write`, and `write_if_empty`
+begin_mutant body-write-first-refused
+patch_run "                .write, .write_if_empty => true,
+                .write_path => beginsWithInit(path) or beginsWithWrite(path)," \
+    "                .write, .write_if_empty => false,
+                .write_path => beginsWithInit(path),"
+end_mutant
+
+begin_mutant body-write-path-refused
+patch_run ".write_path => beginsWithInit(path) or beginsWithWrite(path)," ".write_path => beginsWithInit(path),"
+end_mutant
+
+begin_mutant body-plain-write-refused
+patch_run ".write, .write_if_empty => true," ".write => false, .write_if_empty => true,"
+end_mutant
+
+begin_mutant body-write-if-empty-refused
+patch_run ".write, .write_if_empty => true," ".write => true, .write_if_empty => false,"
 end_mutant
 
 # a write through a cursor from an earlier transaction (finding 1, row 5), and an init through one

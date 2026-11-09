@@ -24,7 +24,6 @@ gen-1 StaleCursor
 gen-10 StaleCursor
 gen-12 StaleCursor
 gen-13 StaleCursor
-gen-14 StaleCursor
 gen-16 StaleCursor
 gen-17 StaleCursor
 gen-18 StaleCursor

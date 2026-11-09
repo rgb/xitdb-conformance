@@ -41,8 +41,8 @@ refuse, unless the script says so with `expect_error`. So a fixture can't rely o
 and the gate runs them all that way.
 
 **A script that does what the port refuses isn't a fixture.** It goes on running on Zig, in the gate and `mutants.sh`, as
-what Zig does hasn't changed. `tests/zig-only.txt` lists all 48, with the gate holding it to what `run --port` refuses. That's
-34 of the 42 generated scripts, and these 14, each with a version of its own in `tests/port-variants`:
+what Zig does hasn't changed. `tests/zig-only.txt` lists all 47, with the gate holding it to what `run --port` refuses. That's
+33 of the 42 generated scripts, and these 14, each with a version of its own in `tests/port-variants`:
 
 | Script | Its variant `<name>--port` | Expected file from |
 |---|---|---|
@@ -75,7 +75,9 @@ noticed by two fixtures, at least:
 | `compact-sliced-history--port` | A list root sliced to nothing, and one whose last element was appended in a callback that wrote nothing, as `gen` found (finding 28) |
 
 `every-construct-sorted--port` also tries the byte writer on a key through a pair, and `overwriting-committed-bytes--port` now
-ends with a write through a cursor from before a `db_freeze`.
+ends with a write through a cursor from before a `db_freeze`. `body-write-after-freeze--port` is a variant of a script that's
+valid on both, `body-write-after-freeze`, with what stays refused through the transaction's body after a freeze put in (D24
+item 3).
 
 `several-databases` had one write after a `db_freeze` that didn't need to be there, so it comes before it now. It's the
 same bytes, and valid on both. **`write-if-empty-emptied-slot`** and `write-if-empty-unreachable` stay as they were.
@@ -99,7 +101,7 @@ same bytes, and valid on both. **`write-if-empty-emptied-slot`** and `write-if-e
 | [23](#finding-23-a-cursors-freeze) | A freeze holds for every cursor | 2 of 6 change, in the prototype | 2 of 17 change | Deferred, so nothing happens |
 | [28](#finding-28-compacting-a-history-with-no-last-moment) | Compacting a history with no last moment is refused | 1 | 0 | Variant |
 | [29](#finding-29-an-init-on-a-held-cursor-after-a-freeze) | Nothing: an init on a held cursor after a freeze changes a clone that shares its record, on both | 1 | 0 | Nothing, and a fixture pins it |
-| [D18, D24](#d18-and-d24-refusing-a-write-from-before-a-freeze) | A write from before a freeze is refused, an init too unless it's at the transaction's body's slot, and so is a write into committed or frozen bytes | 8, and 1 reproduction | 31, and 2 `safe-*` since D24 | Variant, `safe-*`, only for Zig. A read through such a cursor goes on working |
+| [D18, D24](#d18-and-d24-refusing-a-write-from-before-a-freeze) | A write from before a freeze is refused unless it's at the transaction's body's slot and begins with an init or a write, and so is a write into committed or frozen bytes | 8, and 1 reproduction | 28, and 2 `safe-*` since D24 | Variant, `safe-*`, only for Zig. A read through such a cursor goes on working |
 | [D19](#d19-opening-a-file-whose-root-header-cant-be-trusted) | A file whose root header can't be trusted raises an error, until `recover` is called | 3, and none of the 3 failing ones | 0 | Variant, with `recover` |
 
 ## A generator that keeps off all of this
@@ -107,7 +109,7 @@ same bytes, and valid on both. **`write-if-empty-emptied-slot`** and `write-if-e
 `gen --port-safe` writes scripts that do none of what's listed here, so Zig's result for one is what the port has to give, on
 any seed, before or after these changes go in. The scripts already committed don't change, and neither does what `gen` writes
 without it. `PORT_SAFE=yes ./gen-live.sh <how many>` holds each script to that with `run --note-port-changes`, and the gate
-runs 20. The notes that stay allowed are `18-init`, `18-reads`, `18-reads-earlier` and `1-raises`, which stay valid on the port.
+runs 20. The notes that stay allowed are `18-init`, `18-write`, `18-reads`, `18-reads-earlier` and `1-raises`, which stay valid on the port.
 
 | Item | What it does instead |
 |---|---|
@@ -266,7 +268,7 @@ The port freezes after the join, as the fix branch does. Every script with a con
 <!-- list 22 -->
 - `tests/generated`: compact-202 (1), compact-203 (1), compact-205 (4), compact-206 (3), gen-1 (2), gen-10 (2), gen-11 (3), gen-13 (4), gen-16 (1), gen-17 (4), gen-4 (2), gen-7 (2), gen-8 (2), reads-101 (1), reads-103 (4), reads-106 (1), reads-112 (1), replica-302 (2), replica-304 (1), replica-305 (2)
 - `tests/undefined`: concat-stale-slot (2)
-- `tests/valid`: deep-linked (1), every-construct-linked (2)
+- `tests/valid`: body-write-after-freeze (1), deep-linked (1), every-construct-linked (2)
 <!-- end -->
 
 Only two have different bytes on `d6f3fee`, and on `185af01`, which has the same fix. They're only for Zig now, because of
@@ -366,16 +368,18 @@ reject a script that did it, as `28` isn't one of the notes it allows.
 ## D18 and D24: refusing a write from before a freeze
 
 The port refuses a write through a cursor made before the last freeze, whether that's `db_freeze` or a concat, **an init
-included, unless the cursor's slot is the transaction's body's** (D24, which narrows D18 and D22). A cursor counts as made when the op
+included, unless the cursor's slot is the transaction's body's and the write begins with an init or a write** (D24, which
+narrows D18 and D22, and its item 3 as refined on 2026-11-09). A cursor counts as made when the op
 that made it began, so what a concat gives back is stale too, and so is what a path gives back after a `db_freeze` in its
 callback. And it refuses a write that would change committed or frozen bytes, by position, with `ImmutableBytes`, which is
 finding 13's shape too. It also gets option B, which is errors in place of traps, and Swift handles that resolve themselves.
 B and the handles don't touch any script.
 
-These write through a cursor made before a freeze in the same transaction, other than with a path that begins with an init part:
+These write through a cursor made before a freeze in the same transaction, other than with a path that begins with an init part,
+or at the body's slot with one that begins with a write:
 
 <!-- list 18-other -->
-- `tests/generated`: compact-201 (1), compact-202 (4), compact-203 (2), compact-205 (1), compact-206 (1), gen-1 (1), gen-10 (3), gen-12 (5), gen-13 (2), gen-14 (8), gen-17 (4), gen-18 (8), gen-2 (3), gen-3 (3), gen-4 (1), gen-6 (1), gen-7 (4), gen-8 (1), reads-101 (2), reads-102 (3), reads-103 (2), reads-104 (1), reads-105 (2), reads-107 (2), reads-109 (4), reads-110 (5), replica-302 (2), replica-303 (2), replica-305 (3)
+- `tests/generated`: compact-201 (1), compact-202 (4), compact-203 (2), compact-205 (1), compact-206 (1), gen-1 (1), gen-10 (3), gen-12 (5), gen-13 (2), gen-17 (4), gen-18 (1), gen-2 (3), gen-3 (3), gen-4 (1), gen-6 (1), gen-7 (4), gen-8 (1), reads-101 (2), reads-102 (3), reads-103 (2), reads-104 (1), reads-105 (2), reads-107 (2), reads-110 (5), replica-302 (2), replica-303 (2), replica-305 (3)
 - `tests/valid`: every-construct-linked (11)
 <!-- end -->
 
@@ -396,7 +400,23 @@ These go on with a path that begins with an init part **through a cursor at the 
 - `tests/valid`: deep-linked (1), deep-sorted (1), deep-sorted-existing (1), deep-tries (1), held-init-after-freeze (1), held-init-after-root-copy (1)
 <!-- end -->
 
-And these do it through a cursor at any other slot, which **the port refuses since D24**:
+These go on at the body's slot by **writing first** (D24 item 3): a path whose first part is a write, `write`, which is a
+one-part write path, or `write_if_empty`, which calls it. What follows the first part goes through what it wrote, as after an
+init. It's safe for the same reason, and the original allows it:
+
+<!-- list 18-write -->
+- `tests/generated`: gen-14 (8), gen-18 (7), reads-109 (4)
+- `tests/valid`: body-write-after-freeze (10)
+<!-- end -->
+
+Three generated scripts do it through `run_context`'s cursor, which is a transaction's body too. **`gen-14` is a fixture now**:
+its 8 writes after a freeze were all of this kind, and it does nothing else the port refuses. Its bytes are Zig's, at
+`185af01` too. `gen-18` has 7 of them and one write through a cursor from before a freeze that stays refused, and `reads-109`
+has 4 and a write through a cursor from an earlier transaction (finding 1), so those two stay only for Zig. That was found by
+running every script under `--port` with the runner before the refinement and after it: nothing else changed. `body-write-after-freeze--port` is the hand-written script with what stays refused through the body put in: a
+`writer`, an empty path, and a path whose first part is neither an init nor a write.
+
+And these do an init through a cursor at any other slot, which **the port refuses since D24**:
 
 <!-- list 18-init-held -->
 - `tests/generated`: compact-201 (1), compact-202 (1), compact-203 (2), compact-205 (2), gen-10 (1), gen-13 (1), gen-17 (1), gen-7 (1), reads-101 (2), reads-102 (1), reads-105 (2), reads-108 (1), replica-302 (3), replica-305 (2)
@@ -433,7 +453,7 @@ transaction, so they're what hold the port to it:
 <!-- list 18-reads -->
 - `tests/generated`: compact-201 (1), compact-203 (2), compact-205 (1), gen-10 (4), gen-12 (1), gen-13 (2), gen-14 (2), gen-17 (7), gen-18 (2), gen-2 (2), gen-3 (5), gen-8 (2), reads-101 (4), reads-103 (3), reads-104 (6), reads-105 (2), reads-108 (1), reads-109 (2), reads-110 (4), replica-302 (2), replica-303 (1), replica-305 (3), replica-306 (1), safe-14 (1), safe-3 (1), safe-compact-201 (1), safe-reads-103 (3), safe-reads-104 (3), safe-reads-106 (4), safe-reads-110 (2), safe-replica-306 (1)
 - `tests/undefined`: concat-stale-slot (1)
-- `tests/valid`: every-construct-linked (2)
+- `tests/valid`: body-write-after-freeze (4), every-construct-linked (2)
 <!-- end -->
 
 And these do it through a cursor from an earlier transaction that committed, with a freeze since:
