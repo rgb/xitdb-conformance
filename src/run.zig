@@ -354,7 +354,7 @@ fn opFields(kind: OpKind) []const []const u8 {
         .replication_start => &.{ "op", "note", "expect_error", "state", "as", "expect" },
         .committed_size => &.{ "op", "note", "expect_error", "as", "expect" },
         .read_committed => &.{ "op", "note", "expect_error", "start", "end", "as", "expect_same" },
-        .apply_replicated => &.{ "op", "note", "expect_error", "start", "bytes", "short_by" },
+        .apply_replicated => &.{ "op", "note", "expect_error", "start", "bytes", "short_by", "stream_short_by" },
     };
 }
 
@@ -1781,6 +1781,9 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             const short_by: usize = if (op.get("short_by")) |v| asInt(usize, v, "short_by") else 0;
             if (short_by > bytes.data.len) die("short_by can't be more than the {d} bytes there are", .{bytes.data.len});
             const data = bytes.data[0 .. bytes.data.len - short_by];
+            // a stream that stops before the length it was given, which is a copy cut off on its way
+            const stream_short_by: usize = if (op.get("stream_short_by")) |v| asInt(usize, v, "stream_short_by") else 0;
+            if (stream_short_by > data.len) die("stream_short_by can't be more than the {d} bytes short_by leaves", .{data.len});
 
             // whether it gets as far as writing
             const committed: ?u64 = store.db.committedSize() catch null;
@@ -1791,7 +1794,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             // header after it, raises InvalidRange before it writes anything, so that's
             // told from whether the file changed
             const hash_before = if (start == 0) try self.fileHash() else 0;
-            var reader = Io.Reader.fixed(data);
+            var reader = Io.Reader.fixed(data[0 .. data.len - stream_short_by]);
             const result = store.db.applyReplicated(start, &reader, data.len);
             const wrote = if (start == 0) (try self.fileHash()) != hash_before else writes;
 

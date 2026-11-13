@@ -13,5 +13,13 @@
     { "op": "iterator", "on": "root", "from_index": 0, "as": "it" },
     { "op": "next", "on": "it", "as": "e", "expect_null": false },
     { "op": "read_uint", "on": "e", "expect": 1 },
+    { "op": "next", "on": "it", "expect_null": true, "note": "that was the end of the list" },
+    { "op": "write_path", "on": "root", "path": ["array_list_init", "array_list_append", { "write": { "uint": 9 } }], "note": "an append writes index 2, and doesn't repair the empty slot or take away the 3 at index 3" },
+    { "op": "count", "on": "root", "expect": 3 },
+    { "op": "iterator", "on": "root", "as": "it" },
+    { "op": "next", "on": "it", "as": "e", "expect_null": false },
+    { "op": "read_uint", "on": "e", "expect": 1 },
+    { "op": "next", "on": "it", "as": "e", "expect_null": false },
+    { "op": "read_uint", "on": "e", "expect": 9 },
     { "op": "next", "on": "it", "expect_null": true, "note": "that was the end of the list" }
   ] }

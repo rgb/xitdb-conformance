@@ -167,6 +167,7 @@ const WANT = [_][]const u8{
     "number:var",
     "read_committed:expect_same",
     "apply_replicated:short_by",
+    "apply_replicated:stream_short_by",
     // the top of a script
     "hash_id:text",
     "hash_id:hex",
@@ -411,6 +412,7 @@ const Walker = struct {
             if (std.mem.eql(u8, name, "apply_replicated")) {
                 self.number(op.get("start").?);
                 if (op.get("short_by") != null) self.note("apply_replicated:", "short_by");
+                if (op.get("stream_short_by") != null) self.note("apply_replicated:", "stream_short_by");
             }
             if (std.mem.eql(u8, name, "iterator")) {
                 if (op.get("from_index")) |v| {

@@ -156,6 +156,16 @@ if [ "$MODE" = check ]; then
     [ -f "$FIXTURES/manifest.json" ] || fail "there's no manifest. Run ./fixtures.sh"
     elsewhere=0
 
+    # the inputs first, as the scripts that load them would only drift
+    for input in "$INPUTS"/*.db; do
+        [ -e "$input" ] || continue
+        cmp -s "$input" "$FIXTURES/inputs/$(basename "$input")" || fail "the input $(basename "$input") differs from the one in $INPUTS, or is missing"
+    done
+    for file in "$FIXTURES"/inputs/*; do
+        [ -e "$file" ] || continue
+        [ -f "$INPUTS/$(basename "$file")" ] || fail "$file has no source in $INPUTS"
+    done
+
     # every source script is here unchanged, and passes from its copy here
     for dir in $SOURCES; do
         for script in "$dir"/*.json; do
@@ -174,14 +184,6 @@ if [ "$MODE" = check ]; then
             "$DET" "$TMP/$name.db" "$FIXTURES/valid/$name.db" > /dev/null || fail "$name has drifted"
             same_sidecar_layout "$TMP/$name.db.sidecar.json" "$FIXTURES/valid/$name.db.sidecar.json" || fail "$name's sidecar has drifted"
         done
-    done
-    for input in "$INPUTS"/*.db; do
-        [ -e "$input" ] || continue
-        cmp -s "$input" "$FIXTURES/inputs/$(basename "$input")" || fail "the input $(basename "$input") differs from the one in $INPUTS, or is missing"
-    done
-    for file in "$FIXTURES"/inputs/*; do
-        [ -e "$file" ] || continue
-        [ -f "$INPUTS/$(basename "$file")" ] || fail "$file has no source in $INPUTS"
     done
     for script in $FAILING_SOURCES/*.json; do
         name=$(basename "$script" .json)

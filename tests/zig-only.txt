@@ -12,6 +12,7 @@ overwriting-committed-bytes ImmutableBytes
 path-api-edges-sorted PathPartMustBeAtEnd
 path-api-edges PathPartMustBeAtEnd
 recovery-open-errors UntrustedRootHeader
+recovery-open-errors-version-1 UntrustedRootHeader
 replicate-bad-trailer UntrustedRootHeader
 compact-201 ImmutableBytes
 compact-202 StaleCursor

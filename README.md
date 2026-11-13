@@ -17,6 +17,8 @@ independent of the Swift code.
 - `tests/port-variants/`: the port's versions of scripts that pin what it refuses, as `<name>--port`, which `run --port` runs.
   `tests/zig-only.txt` lists what they replace. Those go on running on Zig, and aren't fixtures. Some have no Zig script, or
   one in `tests/invalid/`, as what they do is an undefined use in Zig, and their oracle is Zig without what the port refuses.
+- `tests/inputs/`: version 1 databases the original wrote at `6b93af1`, which scripts start from with `raw_load`, as nothing
+  creates version 1 any more. `fixtures.sh` copies them to `fixtures/inputs/`, and their `README.md` says where each came from.
 - `tests/invalid/`: scripts that `run` must reject, before running them or, for an undefined use, when it gets there.
   A second runner never sees these.
 - `tests/port-differs/`: the reads that the port corrects from the start, with what Zig does and what the port does, so
@@ -48,7 +50,7 @@ independent of the Swift code.
 It uses the Zig original by path, as `../../xitdb`, without modifying it. It needs Zig 0.17.1.
 
 `.github/workflows/gate.yml` runs `check.sh` on a self-hosted macOS runner at every push and pull request. It checks
-this repository out, with its history, at `xitdb-swift/conformance` and clones `xit-vcs/xitdb` at `6b93af1`, the commit
+this repository out, with its history, at `xitdb-swift/conformance` and clones `xit-vcs/xitdb` at `89da8e7`, the commit
 the fixtures come from, into `xitdb` beside it, which is where `build.zig.zon` looks; when the fixtures follow another
 commit, the ref in the workflow moves with them. The runner needs Zig 0.17.1 and git (the Xcode Command Line Tools) on
 its PATH, and nothing else.
@@ -112,7 +114,7 @@ Zig, `gen` can write something else for the same seed, and that isn't a reason t
    runs fresh seeds on it. The rules in `gen` that keep it from undefined uses stay until the port has what fixes them, as
    keeping away from something that's now safe does no harm.
 
-`tests/zig-commits.txt` says which fixtures need a later commit, which is what's left for `185af01` now that most
+`tests/zig-commits.txt` says which fixtures need a later commit, which is what's left for the fixes branch now that most
 variants have the same bytes on both. `PORT-IMPACT.md` has why.
 
 **What the port refuses** doesn't need another Zig, as a guard writes nothing. A script that does it goes in

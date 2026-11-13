@@ -40,7 +40,15 @@ described in `../director/research/file-format.md`.
 | `ops` | yes | the [ops](#5-ops), run in order |
 
 The runner starts with an empty file, creates a new database with these parameters, and runs the ops. Creating
-the database commits an empty root with commit ID 0, which gives the 62-byte file described in `file-format.md`.
+the database commits an empty root with commit ID 0, which gives a new database of 57 bytes in format version 2.
+
+**The file format is version 2** since the original's `bdaa55e`. After the 20-byte database header come four bytes of
+padding, which nothing reads or writes, and then the root header, which is the committed size alone, 8 bytes at
+offset 24. Committed data starts at 32, and a new database's trailer is at 32 to 56. `file-format.md` describes
+version 1, which the original still opens and keeps as version 1, and which nothing creates any more: there the
+root header is a copy of the root slot at 20 to 28, which the original no longer reads or updates, and the committed
+size at 29, and data starts at 37, so a new database is 62 bytes. A script can start from a version 1 file with
+`raw_load` ([section 5](#5-ops)).
 
 Fields may be in any order, and a field never appears twice. Every op may have a `note` field, a string that is
 ignored.
@@ -239,8 +247,8 @@ Using a cursor or a slot from a transaction that was rolled back is an undefined
 
 ## 5. Ops
 
-Every op is an object with an `op` field. An op can have `note`, and all of them except `fail`, `create_database`, `use`
-and three of the four below for closing and reopening can have `expect_error` ([section 7](#7-errors)). A name in `on` must hold a cursor, and optional fields marked `?` can be
+Every op is an object with an `op` field. An op can have `note`, and all of them except `fail`, `create_database`, `use`,
+`close` and the raw ops below for closing and reopening can have `expect_error` ([section 7](#7-errors)). A name in `on` must hold a cursor, and optional fields marked `?` can be
 left out. `expect` and its relatives are checked after the call and are described below the table.
 
 | `op` | Other fields | Call | Result |
@@ -334,18 +342,40 @@ changed. One made during a transaction mustn't be used after a write in that sam
 use ([section 10](#an-undefined-use)).
 
 **Closing and reopening** model a process stopping and another one starting, with whatever a crash did to the file in
-between. These four ops only appear at the top level, and only `reopen` can have `expect_error`.
+between. These ops only appear at the top level, and only `reopen` can have `expect_error`.
 
 | `op` | Other fields | What it does |
 |---|---|---|
 | `close` | | Ends the use of the database. Commits are already in the file, so nothing happens to it. **Every name becomes unbound** |
-| `reopen` | `read_only?`, `hash_size?` | `Database.init` on the file as it is |
+| `reopen` | `read_only?`, `hash_size?`, `file_id?`, `hash_id?` | `Database.init` on the file as it is, given `file_id` and `hash_id` as the options of the same names, or `null` for what's left out |
 | `raw_append` | `bytes` | Writes the bytes at the end of the file |
 | `raw_write` | `offset`, `bytes` | Writes the bytes at `offset`, which goes up to 2²⁴, leaving zeros if that's past the end |
+| `raw_load` | `input` | Replaces the whole file with the bytes of an input, below |
+| `raw_truncate` | `length` | Cuts the file off at `length`, which can't be past its end |
 
-While the database is closed, only `raw_append`, `raw_write` and `reopen` can run, and they can't run while it's open.
-So can `recover`, which is only in what the port does ([section 11](#what-the-port-does)).
-Anything else is a script failure. The raw ops write straight to storage, past the engine.
+While the database is closed, only the raw ops and `reopen` can run, and the raw ops can't run while it's open. So can
+`recover`, which is only in what the port does ([section 11](#what-the-port-does)). Anything else is a script failure. The
+raw ops write straight to storage, past the engine.
+
+**An input** is a file a script starts from, named by lowercase letters, digits and hyphens. The fixtures have it as
+`inputs/<input>.db`, and `run` looks for it in `tests/inputs/`, or the folder given with `--inputs`. `raw_load` puts it in
+place of the current database's file, which then has to be opened with `reopen`, and it can only replace a database that
+hasn't committed in the script yet, which a `reopen` that creates the database again doesn't count as. It's how a script
+gets a version 1 file: the inputs called `v1-*` were written by the original at `6b93af1`, and `tests/inputs/README.md`
+says what's in each. The manifest lists each script's inputs as `inputs`.
+
+**`file_id` and `hash_id` on `reopen`** only matter when `Database.init` creates the database, which since `92a926e` it
+does for a file without a first commit that's no bigger than a new database: one cut off during its creation. It
+creates it as a new database of version 2, with the file ID given, or a random one when there's none, and the hash ID
+given, or 4 zero bytes, never the cut file's own. As a random file ID would be a draw that no sidecar records, a
+script that opens such a file gives `file_id`. A file shorter than the 20 bytes of its database header raises
+`EndOfStream`.
+
+**A database without a first commit** is one whose root header's committed size is 0, which is how a copy from 0
+leaves it until all its bytes have arrived. If it's bigger than a new database, `reopen` opens it as it is, as a full
+copy that didn't finish, for the next sync at 0 to replace. Then `committed_size` raises `InvalidDatabase`, and so does
+every read and write through the root, a root cursor's `slot` included. `replica_state` gives zero and zero, so
+`replication_start` gives 0 for it.
 
 `reopen` states a hash size: the script's, or `hash_size` if given, which is 8, 20, 32 or 64. It never takes the size
 from the file, so a header that says otherwise is `InvalidHashSize`. If `reopen` fails, the database stays closed.
@@ -362,7 +392,9 @@ What happens to **bytes past the committed size**:
 | any transaction, whether it commits or fails | are truncated |
 
 On a **read-only file**, reads work. A transaction fails with `WriteFailed` and leaves the file as it was. A free init
-still works, and truncating silently does nothing, so bytes past the committed size stay.
+still works, and truncating silently does nothing, so bytes past the committed size stay. For the same reason a file
+cut off during its creation, opened read-only, isn't created again: it opens as a database without a first commit and
+stays as it was, and its `committed_size` raises `EndOfStream` if the file is too short to hold one.
 
 ### Several databases
 
@@ -379,7 +411,7 @@ and `main` already is one. A name that isn't a database can't be used. Either of
 databases have nothing to do with the names in [section 4](#4-names).
 
 **The current database** is what `root` means, and what every op with no `on` acts on: `run_context`, `db_freeze`,
-`close`, `reopen`, `raw_append`, `raw_write`, `compact`, and the replication ops. A callback's `db_freeze` is the
+`close`, `reopen`, the raw ops, `compact`, and the replication ops. A callback's `db_freeze` is the
 current database's too.
 
 **A cursor stays with the database it came from**, and so does an iterator. Using one while another database is current
@@ -440,23 +472,35 @@ that holds one.
 | `replication_start` | `state`, `as?`, `expect?` | `current.replicationStart(state)`, `state` being a name holding a replica's state, which can come from any database | `as`: a number |
 | `committed_size` | `as?`, `expect?` | `current.committedSize()` | `as`: a number |
 | `read_committed` | `start`, `end`, `as`, `expect_same?` | `current.readCommitted(start, end, writer)`, with both being numbers, and writing to memory | `as`: committed bytes |
-| `apply_replicated` | `start`, `bytes`, `short_by?` | `current.applyReplicated(start, reader, len)`, with `start` a number, `bytes` a name holding committed bytes, a reader over them as `short_by` leaves them, and `len` their length as it leaves them | |
+| `apply_replicated` | `start`, `bytes`, `short_by?`, `stream_short_by?` | `current.applyReplicated(start, reader, len)`, with `start` a number, `bytes` a name holding committed bytes, a reader over them as `short_by` leaves them, and `len` their length as it leaves them. `stream_short_by` then leaves that many more off the reader only | |
 
 `expect` on `replication_start` and `committed_size` is a number. `expect_same` is a name holding committed bytes, and
 what was read must be the same bytes. An expected file only says how a database ended up, so this is what scripts use to
 say how each sync left a replica: its committed bytes are the source's, and the source's are in its expected file.
 `short_by` leaves that many bytes off the end of `bytes`, which is the sync that was interrupted, and is how an append
-comes to fail.
+comes to fail. `stream_short_by` leaves that many off what the reader gives, while `len` stays what `short_by` left, which is a
+sync whose stream stopped part way, so the call reads past the end of what it's given and raises `EndOfStream`. A copy at 0
+reads the database header first, and since `92a926e` then writes the data in blocks of 4096 bytes, each once it has all of it,
+so one whose stream stops leaves the database header, a root header of zeros, and the blocks that arrived whole
+(`replicate-copy-cut-short`).
 
 What's applied must be applied where it was read from: `run` fails on a `start` other than the one it was read with, if
 the start is one that gets as far as writing. Those are 0, and the database's committed size. Any other raises
 `InvalidRange`, and changes nothing.
 
 A sync is several ops, and `replicate-history` shows them. A failed append leaves the database as it was, with what it
-wrote past the committed bytes, and the next one writes over that. A failed sync at 0 is another thing, and leaves no
-database: its first step empties the file, so `committed_size` and `replica_state` raise the error from then on, and only
-a sync at 0 that succeeds puts it right ([section 11](#11-behaviour-a-runner-must-not-fix)). `replicate-failed-first-sync`
-has this.
+wrote past the committed bytes, and the next one writes over that. A sync at 0 is another thing. Since `92a926e` it
+reads and checks the database header that comes first in the bytes, raising `InvalidRange` and changing nothing if there
+are fewer bytes than that header and the root header after it. Then it empties the file and writes that database header
+with a root header of zeros, skips the root header that came with the bytes, and copies the rest, and only once all of
+it has arrived does it write the committed size. So one that fails leaves a database without a first commit
+([closing and reopening](#5-ops)), until a sync at 0 succeeds. `replicate-failed-first-sync` has this.
+
+**What's before the committed size isn't copied.** A `read_committed` from 0 gives the source's own bytes up to its
+committed size, the padding in version 2 and the copy of the root slot in version 1, as they are, and then the
+committed size for `end`. A copy at 0 writes zeros there instead. So if the source has anything but zeros there, a read
+from 0 on the replica differs from what was sent in exactly those bytes. `replicate-padding` has this for version 2,
+and `replicate-version-1` for version 1.
 
 **Expectations** are assertions on the result, for reads the file can't show:
 
@@ -547,14 +591,14 @@ Truncating is all a rollback does, so it doesn't undo a write that landed before
 | `ScriptAbort` | the `fail` op. It isn't an engine error, but it travels like one |
 | `WriteFailed` | a transaction on a read-only file |
 | `StaleCursor`, `PoisonedTransaction`, `UntrustedRootHeader`, `EmptyLastMoment`, `StructuralSlot`, `ImmutableBytes` | only with `--port`, and in the port ([section 11](#what-the-port-does)) |
-| `InvalidDatabase` | `reopen`: a bad magic number, a committed size below 62, or a last trailer whose checksum doesn't match. `apply_replicated`: bytes that don't end in a trailer, or in one for another file. `read_committed` from 0: an `end` that isn't the end of a trailer |
-| `InvalidVersion` | `reopen`: a version other than 1 |
+| `InvalidDatabase` | `reopen`: a bad magic number, a committed size above 0 and below a new database's size, or a last trailer whose checksum doesn't match. `apply_replicated`: bytes that don't end in a trailer, or in one for another file. `read_committed` from 0: an `end` that isn't the end of a trailer. On a database without a first commit: `committed_size`, `apply_replicated` at any `start` but 0, and every read and write through the root |
+| `InvalidVersion` | `reopen`: a version other than 1 and 2 |
 | `InvalidHashSize` | `reopen`: a hash size in the header other than the one stated |
-| `TruncatedDatabase` | `reopen`: a committed size past the end of the file. `apply_replicated` at 0: bytes that stop short of what their root header says, and `committed_size` and `replica_state` after that |
-| `EndOfStream` | `read_stream`: a `read_all` that wants more than there is. `apply_replicated` at 0: too few bytes for a root header, and `committed_size` and `replica_state` after that. It can't be named on any other op |
+| `TruncatedDatabase` | `reopen`: a committed size past the end of the file |
+| `EndOfStream` | `read_stream`: a `read_all` that wants more than there is. `apply_replicated`: a stream that stops before `len`, with `stream_short_by`. `reopen`: a file shorter than its database header. `committed_size`: a database without a first commit whose file is too short to hold a committed size, which is one cut off during its creation and opened read-only. It can't be named on any other op |
 | `StreamTooLong` | `read_bytes`, `read_bytes_into`: a value longer than `max_size` or `size` |
 | `TargetNotEmpty` | `compact`: a target with something in its root |
-| `InvalidRange` | `read_committed`: a `start` after `end`, an `end` past the committed size, or a `start` above 0 that's inside the root header. `apply_replicated`: a `start` that isn't 0 or the committed size |
+| `InvalidRange` | `read_committed`: a `start` after `end`, an `end` past the committed size, or a `start` above 0 that's before the committed data. `apply_replicated`: a `start` that isn't 0 or the committed size, and at 0, fewer bytes than the database header and the root header after it |
 
 The engine has more errors than these, like `KeyOffsetExceeded`. Reaching them takes an undefined use, a corrupt file,
 or a call scripts can't make.
@@ -598,10 +642,10 @@ it commits.
 {
   "format": "xitdb-sidecar/1",
   "file_id": "0011223344556677",
-  "initial_size": 62,
-  "file_size": 438,
+  "initial_size": 57,
+  "file_size": 433,
   "ops": [
-    {"committed_size": 438, "commit_id": "303585f7ed65083c"}
+    {"committed_size": 433, "commit_id": "303585f7ed65083c"}
   ]
 }
 ```
@@ -610,7 +654,7 @@ it commits.
 |---|---|
 | `format` | exactly `"xitdb-sidecar/1"` |
 | `file_id` | the script's file ID |
-| `initial_size` | the committed size right after creating the database, always 62 |
+| `initial_size` | the committed size right after creating the database, which is a new database's size, 57 |
 | `file_size` | the size of the file after the last op. Bytes past the last committed size are only left there by raw ops |
 | `ops` | one entry per **top-level** op in the script, in the same order, including ops that are only reads |
 | `ops[i].committed_size` | `db.committedSize()` after op `i`, or `null` if the database is closed by then, or in no state to say |
@@ -630,22 +674,22 @@ writes over it. Its commit ID was still used, so it stays in the list.
 {
   "format": "xitdb-sidecar/1",
   "file_id": "0000000000000001",
-  "initial_size": 62,
-  "file_size": 96,
+  "initial_size": 57,
+  "file_size": 91,
   "databases": {
-    "main": {"file_id": "0000000000000001", "file_size": 96, "trailers": [
-      {"position": 71, "commit_id": "01f1709c4e555677", "file_id": "0000000000000001"}
+    "main": {"file_id": "0000000000000001", "file_size": 91, "trailers": [
+      {"position": 66, "commit_id": "01f1709c4e555677", "file_id": "0000000000000001"}
     ]},
-    "replica": {"file_id": "0000000000000001", "file_size": 96, "trailers": [
-      {"position": 71, "commit_id": "01f1709c4e555677", "file_id": "0000000000000001"}
+    "replica": {"file_id": "0000000000000001", "file_size": 91, "trailers": [
+      {"position": 66, "commit_id": "01f1709c4e555677", "file_id": "0000000000000001"}
     ]}
   },
   "ops": [
-    {"committed_size": 62, "commit_id": null},
-    {"committed_size": 96, "commit_id": "01f1709c4e555677"},
-    {"committed_size": 96, "commit_id": null},
-    {"db": "replica", "committed_size": 62, "commit_id": null},
-    {"db": "replica", "committed_size": 96, "commit_id": null}
+    {"committed_size": 57, "commit_id": null},
+    {"committed_size": 91, "commit_id": "01f1709c4e555677"},
+    {"committed_size": 91, "commit_id": null},
+    {"db": "replica", "committed_size": 57, "commit_id": null},
+    {"db": "replica", "committed_size": 91, "commit_id": null}
   ]
 }
 ```
@@ -663,9 +707,10 @@ are one list, in the order of the script, whichever database each is about.
 
 **`apply_replicated` isn't a commit**, so its entry has a `commit_id` of `null`, and a `committed_size` that's whatever
 the database says after it. For a `start` of 0, the database is replaced, so that can be **higher or lower** than
-before: a replica that was ahead of what replaces it goes down, as `replicate-interrupted` does from 164 to 96. A sync
-that failed at 0 leaves a database that can't say, and its entry has a `committed_size` of `null`, as does each one
-about it until a sync succeeds.
+before: a replica that was ahead of what replaces it goes down, as `replicate-interrupted` does from 159 to 91. A sync
+that failed at 0 leaves a database without a first commit, which can't say, and its entry has a `committed_size` of
+`null`, as does each one about it until a sync succeeds. So does a database opened without a first commit, and
+`reopen`'s entry after one that creates the database again has the new database's size, without being a commit.
 
 **To reproduce a file**, give the second implementation a random source that returns the non-null commit IDs in
 order, one per call. At the end, none should be left. Then after each top-level op, check the committed size
@@ -678,7 +723,7 @@ The checksum is computed by the engine and isn't in the sidecar. It should come 
 ## 10. Valid scripts and script failures
 
 ```
-run <script> <out.db> [--kind buffered_file|file|memory] [--allow-port-differences]
+run <script> <out.db> [--kind buffered_file|file|memory] [--allow-port-differences] [--port] [--inputs <dir>]
 ```
 
 The Zig runner truncates `<out.db>`, runs the script, and writes the file and the sidecar. The default kind is
@@ -762,9 +807,9 @@ scripts for each, one with what Zig does and one with what the port does.
 |---|---|---|
 | `read_bytes_into` with a `size` above 0, on a slot with nothing in it | `EndOfStream` | it's empty |
 | `read_stream` on a slot with nothing in it | `UnexpectedTag` | an empty stream |
-| `read_stream` on a `short_bytes` slot from a cursor with no position, which is a key from `{"sorted_map_get": {"key": ...}}` or from `read_key_value_pair` on a set's entry | `ExpectedSlotPosition` | it gives the value |
+| `read_stream` on a `short_bytes` slot from a cursor with no position, which is a key from `{"sorted_map_get": {"key": ...}}`. Since `71ee0cf`, the key `read_key_value_pair` gives for a set's entry has the entry's position, and streams in both | `ExpectedSlotPosition` | it gives the value |
 | `read_stream` on a `short_bytes` slot that has since been overwritten | the length from the cursor and the bytes from the file, so neither value | it gives what the cursor holds |
-| `next` on an array list's iterator, when what it would give is past the end of the list. It stops after giving as many elements as the list has, it skips one that was never written, and a slice leaves what's past the new end in its blocks. So `[unwritten, 1, 2, 3]` sliced to a size of 2 gives 1 and 2 | it gives what `{"array_list_get": 2}` says isn't there | it goes through the positions up to the list's size and no further, so here it gives 1 |
+| `next` on an array list's iterator, when what it would give is past the end of the list. It stops after giving as many elements as the list has, it skips a slot that's truly empty, and a slice leaves what's past the new end in its blocks. Since `89da8e7` an append writes a `none` slot marked full, which isn't skipped, so only a version 1 file written before it can have this: `[unwritten, 1, 2, 3]` sliced to a size of 2 at `6b93af1` gives 1 and 2 | it gives what `{"array_list_get": 2}` says isn't there | it goes through the positions up to the list's size and no further, so here it gives 1 |
 
 **Storage kinds don't otherwise change the bytes.** `check.sh` holds every script in this repository to that, across
 all three kinds, in debug and release builds.
@@ -807,20 +852,27 @@ All of these look like mistakes and all of them are what Zig does. `overwriting-
    of the cursor it was called on, whatever its callback did to the cursor it was given.
 11. **Opening a file doesn't clean it up.** Bytes past the committed size stay until a write, and a free init on a
    read-only file doesn't report that it couldn't truncate them. Only the committed size in the root header is ever
-   read: the root slot next to it can be garbage, and the root comes from the trailer anyway.
-12. **An element appended and never written isn't the same in the two lists.** In an array list it's empty, so an
-   iterator skips it. In a linked array list it's marked as written with nothing (`lib.zig:2094`), so an iterator gives
-   it.
-13. **Compacting a history with no last moment loses the history.** A list at the root with no moments, or whose last
-   moment was never written, compacts to an empty root, and not to a list. Every moment written before that last one is lost
-   with it. The port refuses it ([below](#what-the-port-does)), so `compact-roots` is only for Zig, and
-   `compact-roots--port` is its version.
-14. **A failed sync at 0 leaves no database.** It empties the file first, so it can't be opened until a sync at 0
-   succeeds. Zig's README says so, and that a caller who minds should write the copy to a new file.
+   read: what's before it can be garbage, the padding in version 2 or the copy of the root slot in version 1, and the
+   root comes from the trailer anyway. A commit writes only the committed size, so garbage there stays
+   (`recovery-garbage-padding`, `recovery-torn-root-slot`).
+12. **An element appended and never written is a `none` slot marked full**, in both lists, since `89da8e7` for an array
+   list. It's the same as one set to nothing: it counts, a lookup gives that slot, an iterator gives it, and a typed read
+   of it raises `UnexpectedTag` (`unwritten-elements`). In a version 1 file written before it, an array list's is a slot
+   that's truly empty, which a lookup gives as null and an iterator skips (`tests/port-differs/iterator-past-slice`).
+13. **Compacting a history with no last moment loses the history.** A list at the root with no moments compacts to an
+   empty root, and not to a list, and so does one whose last slot is truly empty, which only a version 1 file written
+   before `89da8e7` can have: every moment written before that last one is lost with it. One whose last element was
+   appended and never written since then is a moment set to nothing, and compacts. The port refuses the first two
+   ([below](#what-the-port-does)), so `compact-roots` is only for Zig, and `compact-roots--port` is its version.
+14. **A failed sync at 0 leaves a database without a first commit.** Since `92a926e` the copy writes the source's
+   database header and a root header of zeros first, and the committed size last, so what's there can't say its committed
+   size, can't be read or written, and gives zero and zero as its replica state, until a sync at 0 succeeds. It still
+   opens, as a full copy that didn't finish, and a file without a first commit that's no bigger than a new database is
+   created again when it's opened (section 5). Zig's README says a caller who minds should write the copy to a new file.
 
 ### What a later Zig changes
 
-Apart from what this says, all of this document is what Zig does at `6b93af1`. The manifest gives each fixture's
+Apart from what this says, all of this document is what Zig does at `89da8e7`. The manifest gives each fixture's
 `zig_commit`, and its expected file is what that commit does. These fixtures are from `185af01`, as they need its bytes:
 
 | Fixture | What it needs from there |
@@ -931,24 +983,29 @@ the file as it was, but only if Zig's op failed too or had a callback: one that 
 --port` can't undo it, and that's a script failure.
 
 **Opening.** A `reopen` raises `UntrustedRootHeader` if the committed size in the root header is past the end of the file,
-smaller than a new database, or doesn't end at a trailer whose checksum verifies. Those are where Zig raises `TruncatedDatabase`
-or `InvalidDatabase`. A bad magic number is still `InvalidDatabase`, and a bad version or hash size is what it was. It leaves
-the database closed, as any failed `reopen` does.
+above 0 and smaller than a new database, or doesn't end at a trailer whose checksum verifies. Those are where Zig raises
+`TruncatedDatabase` or `InvalidDatabase`. A bad magic number is still `InvalidDatabase`, and a bad version or hash size is what
+it was. It leaves the database closed, as any failed `reopen` does. **A committed size of 0 is a database without a first
+commit**, which the original now defines, and the port does there what the original does (D31 item 4): it creates a file
+that's no bigger than a new database again, opens a bigger one as it is, and raises the original's errors on it
+(section 5). So does a file too short for its database header, which raises `EndOfStream`.
 
 | `op` | Other fields | What it does |
 |---|---|---|
 | `recover` | | The port's recovery call, at the top level, while the database is closed |
 
 It looks from the end of the file back, a byte at a time, for the last position that ends a trailer whose checksum verifies,
-using the file ID in the file's header. It cuts the file off there, and writes that trailer's root slot and that position in the
-root header, at offset 20. Then it opens the database, which is left open. It takes no commit ID, and a top-level op with it
+using the file ID in the file's header. It cuts the file off there, and writes that position as the root header's committed
+size, at offset 24 in version 2 and 29 in version 1, and leaves what's before it as it is, so a version 1 file's copy of the root
+slot isn't updated, as the original no longer updates it (D31 item 1). Then it opens the database, which is left open. It takes no commit ID, and a top-level op with it
 in has no commit. A commit past that position is lost, and its commit ID stays in the sidecar, as it was used. With a bad magic
 number, or no trailer that verifies, it raises `InvalidDatabase`, and the database stays closed. So all it leaves is what the
 file held just after that commit, and nothing is dropped except by this call.
 
 **Compacting a history with no last moment.** A `compact` raises `EmptyLastMoment` if the current database's root is an
-array list with no elements, or whose last element is empty: its tag is `none` and `full` isn't set, as with one appended and
-never written (finding 28). One set to nothing is a moment, as before. This is checked before anything else the compaction
+array list with no elements, or whose last element is empty: its tag is `none` and `full` isn't set (finding 28). Since
+`89da8e7` that's only so in a version 1 file, where an element appended and never written is that, as an append now writes a
+`none` slot marked full, which is a moment set to nothing, and compacts as one, as before. This is checked before anything else the compaction
 does, the target included:
 
 - a target with something in its root raises `EmptyLastMoment` too, and not `TargetNotEmpty`;
@@ -971,26 +1028,29 @@ So it's what Zig writes with that `compact` left out.
 ] }
 ```
 
-With file ID `0011223344556677`, hash ID `sha1`, hash size 20 and the commit ID `303585f7ed65083c` it makes 438
-bytes, 376 of them after the new database's 62. A commit ID is random, so the fixture of this script, which came from
+With file ID `0011223344556677`, hash ID `sha1`, hash size 20 and the commit ID `303585f7ed65083c` it makes 433
+bytes, 376 of them after the new database's 57. A commit ID is random, so the fixture of this script, which came from
 another run, has a different one, and a different checksum after it. Its other bytes are these:
 
 | Offset | Bytes | What |
 |---|---|---|
-| 0 | `78 69 74` `00` `00 01` `00 14` `73 68 61 31` `00 11 22 33 44 55 66 77` | database header |
-| 20 | `02 00 00 00 00 00 00 00 47` `00 00 00 00 00 00 01 b6` | root header: root slot (`array_list` at 71), committed size 438 |
-| 37 | 9 zero bytes, 8 zero bytes, `fd fb 75 cf 6f f9 eb 93` | trailer of the new database: empty root, commit ID 0, checksum |
-| 62 | `02 00 00 00 00 00 00 00 47` | the transaction's scratch slot, holding the new root |
-| 71 | `00 00 00 00 00 00 00 01` `00 00 00 00 00 00 00 57` | array list header: 1 element, index block at 87 |
-| 87 | `04 00 00 00 00 00 00 00 e7`, then 135 zero bytes | index block. Slot 0 is the element: a `hash_map` at 231 |
-| 231 | 27 zero bytes, `05 00 00 00 00 00 00 01 77`, 108 zero bytes | the map's index block. Slot 3 (the hash ends in `33`) is a `kv_pair` at 375 |
-| 375 | `0b ee c7 b5 ea 3f 0f db c9 5d 0d d4 7f 3c 5b c2 75 da 8a 33` | the pair's hash |
-| 395 | 9 zero bytes | the pair's key slot, empty |
-| 404 | `08 00 00 00 00 00 00 00 2a` | the pair's value slot: `uint` 42 |
-| 413 | `02 00 00 00 00 00 00 00 47` `30 35 85 f7 ed 65 08 3c` `3e dd da 5b f0 86 86 bc` | trailer: root slot, commit ID, checksum |
+| 0 | `78 69 74` `00` `00 02` `00 14` `73 68 61 31` `00 11 22 33 44 55 66 77` | database header: magic number, a zero byte, version 2, hash size 20, hash ID, file ID |
+| 20 | `00 00 00 00` | padding |
+| 24 | `00 00 00 00 00 00 01 b1` | root header: committed size 433 |
+| 32 | 9 zero bytes, 8 zero bytes, `be 37 af 4a 96 7c c5 50` | trailer of the new database: empty root, commit ID 0, checksum |
+| 57 | `02 00 00 00 00 00 00 00 42` | the transaction's scratch slot, holding the new root |
+| 66 | `00 00 00 00 00 00 00 01` `00 00 00 00 00 00 00 52` | array list header: 1 element, index block at 82 |
+| 82 | `04 00 00 00 00 00 00 00 e2`, then 135 zero bytes | index block. Slot 0 is the element: a `hash_map` at 226 |
+| 226 | 27 zero bytes, `05 00 00 00 00 00 00 01 72`, 108 zero bytes | the map's index block. Slot 3 (the hash ends in `33`) is a `kv_pair` at 370 |
+| 370 | `0b ee c7 b5 ea 3f 0f db c9 5d 0d d4 7f 3c 5b c2 75 da 8a 33` | the pair's hash |
+| 390 | 9 zero bytes | the pair's key slot, empty |
+| 399 | `08 00 00 00 00 00 00 00 2a` | the pair's value slot: `uint` 42 |
+| 408 | `02 00 00 00 00 00 00 00 42` `30 35 85 f7 ed 65 08 3c` `1a 17 6f d7 f2 19 b5 fc` | trailer: root slot, commit ID, checksum |
 
 The checksums are CRC-64/XZ of file ID, trailer position, root slot and commit ID, as in `file-format.md`. Both of
-these were recomputed with a separate implementation of the CRC.
+these were recomputed with a separate implementation of the CRC. In version 1 the committed data starts five bytes later,
+at 37, and so does every offset in it, and the root header at 20 is the root slot and then the committed size:
+`02 00 00 00 00 00 00 00 47` `00 00 00 00 00 00 01 b6`, for 438 bytes in all.
 
 The sidecar for this run is the one in section 9.
 
@@ -1039,3 +1099,15 @@ unchanged, and a script with only one database has the same sidecar as before. T
 - to read `db` in a sidecar's entries, and to expect a `committed_size` that goes down or is `null` after `apply_replicated`
   (section 9);
 - to compare `<name>.<database>.db` as well, for each of `other_databases` in the manifest.
+
+**The original moved to `89da8e7`, with format version 2** (conformance-09, 2026-11-13). Every script that creates a
+database now gets a version 2 file, five bytes shorter before its data, and the expected files and sidecars moved with
+it. Nothing else a script says changes meaning. To run the scripts at the new pin, a runner needs:
+
+- format version 2, and version 1 files opened as version 1 (section 1);
+- the ops `raw_load` and `raw_truncate`, `file_id` and `hash_id` on `reopen`, and the fixtures' `inputs/` folder, which
+  the manifest lists for each script as `inputs`, with the feature `inputs` (section 5);
+- `EndOfStream` on `reopen` (section 7);
+- what `52c7283` to `89da8e7` changed: a database without a first commit, which a failed sync at 0 leaves and a file cut off
+  during its creation is created again from (sections 5 and 11), an element appended and never written that counts, and
+  a set's key from `read_key_value_pair` that streams.

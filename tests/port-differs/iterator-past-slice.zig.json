@@ -1,4 +1,4 @@
-{ "format": "xitdb-script/1", "description": "Finding 26, as Zig does it, on a version 1 file (inputs/v1-sliced-holes). There an element appended and never written is a truly empty slot, which an iterator skips, and it stops after giving as many elements as the list has, while a slice leaves what is past the new end in its blocks. So it gives an element that a read by index says is not there. Since 89da8e7 an append writes a none slot marked full, which counts and which the iterator gives, so a file written now doesn't have this, and the two agree on it (unwritten-elements).", "hash_size": 20, "hash_id": "sha1", "file_id": "0011223344556677",
+{ "format": "xitdb-script/1", "description": "Finding 26, as Zig does it, on a version 1 file (inputs/v1-sliced-holes). There an element appended and never written is a truly empty slot, which an iterator skips, and it stops after giving as many elements as the list has, while a slice leaves what is past the new end in its blocks. So it gives an element that a read by index says is not there, and an append after it doesn't change that. Since 89da8e7 an append writes a none slot marked full, which counts and which the iterator gives, so a file written now doesn't have this, and the two agree on it (unwritten-elements).", "hash_size": 20, "hash_id": "sha1", "file_id": "0011223344556677",
   "ops": [
     { "op": "close" },
     { "op": "raw_load", "input": "v1-sliced-holes", "note": "[never written, 1, 2, 3] sliced to a size of 2, written at 6b93af1, where an element never written is a truly empty slot" },
@@ -17,5 +17,15 @@
     { "op": "read_uint", "on": "e", "expect": 1 },
     { "op": "next", "on": "it", "as": "e", "expect_null": false, "note": "and here it is" },
     { "op": "read_uint", "on": "e", "expect": 2 },
+    { "op": "next", "on": "it", "expect_null": true },
+    { "op": "write_path", "on": "root", "path": ["array_list_init", "array_list_append", { "write": { "uint": 9 } }], "note": "an append writes index 2, and doesn't repair the empty slot or take away the 3 at index 3" },
+    { "op": "count", "on": "root", "expect": 3 },
+    { "op": "iterator", "on": "root", "as": "it" },
+    { "op": "next", "on": "it", "as": "e", "expect_null": false },
+    { "op": "read_uint", "on": "e", "expect": 1 },
+    { "op": "next", "on": "it", "as": "e", "expect_null": false },
+    { "op": "read_uint", "on": "e", "expect": 9 },
+    { "op": "next", "on": "it", "as": "e", "expect_null": false, "note": "and the 3 past the end, at index 3" },
+    { "op": "read_uint", "on": "e", "expect": 3 },
     { "op": "next", "on": "it", "expect_null": true }
   ] }

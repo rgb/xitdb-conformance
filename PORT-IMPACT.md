@@ -346,7 +346,7 @@ the list goes, and every moment written before that last one. The port refuses i
 anything (D22 item 7). Every `compact` of such a history:
 
 <!-- list 28 -->
-- `tests/valid`: compact-roots (1)
+- `tests/valid`: compact-roots (2)
 <!-- end -->
 
 `compact-roots--port` expects the error on both of the compactions in `compact-roots`, and on one of them again into a target
@@ -474,7 +474,7 @@ whose checksum verifies (D22). So nothing is dropped except by that call. Every 
 
 <!-- list 19 -->
 - `tests/failing`: op-after-failed-reopen (1), reopen-error-not-handled (1), reopen-wrong-error (1)
-- `tests/valid`: recovery-open-errors (5), replicate-bad-trailer (1)
+- `tests/valid`: recovery-open-errors (5), recovery-open-errors-version-1 (5), replicate-bad-trailer (1)
 <!-- end -->
 
 | Script, and what its `reopen` meets | Zig | The port |
