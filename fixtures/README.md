@@ -6,7 +6,7 @@ What the Swift port of xitdb has to do, byte for byte, as Zig shows it. This is 
 
 It was produced from:
 
-- conformance repository: commit `f3af9b74da096ec8549b467a8f5f4afad42e2f53`
+- conformance repository: commit `5d939a3e68a3e0d20d92f2d9d47b754f9f157572`
 - xitdb, the Zig original: commit `89da8e76f0dd82baefeadb656f0f734bf920be05`, or the one the manifest gives for that fixture as its `zig_commit`
 - Zig 0.17.1, with the runner `run` built in debug mode and using the `buffered_file` storage kind
 
