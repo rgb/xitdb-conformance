@@ -71,6 +71,17 @@ const PORT_ERROR_NAMES = [_][]const u8{ "StaleCursor", "PoisonedTransaction", "U
 
 /// set by --port, which SCRIPT-FORMAT.md says all about
 var port_mode = false;
+/// where raw_load finds an input, as <inputs_dir>/<name>.db. tests/inputs is where they're kept
+/// here, and fixtures/inputs where fixtures.sh copies them
+var inputs_dir: []const u8 = "tests/inputs";
+
+/// an input's name, which is also its file's name without .db
+fn checkInputName(name: []const u8) void {
+    if (name.len == 0) die("an input's name can't be empty", .{});
+    for (name) |c| {
+        if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and c != '-') die("an input's name is lowercase letters, digits and hyphens, and \"{s}\" isn't", .{name});
+    }
+}
 
 /// only a read the port corrects can raise this, so only --allow-port-differences lets a script name it
 const PORT_DIFFERENCE_ERROR_NAMES = [_][]const u8{"ExpectedSlotPosition"};
@@ -244,8 +255,9 @@ fn checkErrorName(name: []const u8, op_name: []const u8, allow_port_differences:
     // and reading a slot set to nothing into a buffer raises it where the port doesn't.
     // only a stream can reach it in a way that means the same everywhere.
     // and applying bytes at 0 that are too short to be a database raises it everywhere,
-    // there and from then on when asking that database where its committed bytes end
-    const end_of_stream_means_the_same = isKey(op_name, "read_stream") or isKey(op_name, "apply_replicated") or isKey(op_name, "committed_size") or isKey(op_name, "replica_state");
+    // there and from then on when asking that database where its committed bytes end.
+    // so does opening a file too short for its database header, since 92a926e
+    const end_of_stream_means_the_same = isKey(op_name, "read_stream") or isKey(op_name, "apply_replicated") or isKey(op_name, "committed_size") or isKey(op_name, "replica_state") or isKey(op_name, "reopen");
     if (port_mode) {
         for (PORT_ERROR_NAMES) |known| {
             if (isKey(name, known)) return;
@@ -295,6 +307,8 @@ const OpKind = enum {
     reopen,
     raw_append,
     raw_write,
+    raw_load,
+    raw_truncate,
     create_database,
     use,
     compact,
@@ -327,10 +341,12 @@ fn opFields(kind: OpKind) []const []const u8 {
         .next => &.{ "op", "note", "expect_error", "on", "as", "expect_null" },
         .rank => &.{ "op", "note", "expect_error", "on", "key", "expect" },
         .close => &.{ "op", "note" },
-        .reopen => &.{ "op", "note", "expect_error", "read_only", "hash_size" },
+        .reopen => &.{ "op", "note", "expect_error", "read_only", "hash_size", "file_id", "hash_id" },
         .recover => &.{ "op", "note", "expect_error" },
         .raw_append => &.{ "op", "note", "bytes" },
         .raw_write => &.{ "op", "note", "offset", "bytes" },
+        .raw_load => &.{ "op", "note", "input" },
+        .raw_truncate => &.{ "op", "note", "length" },
         .create_database => &.{ "op", "note", "name", "file_id", "hash_id" },
         .use => &.{ "op", "note", "name" },
         .compact => &.{ "op", "note", "expect_error", "into", "file_id", "hash_id", "offset_map" },
@@ -413,11 +429,28 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         // the trailer's size, and where the commit ID is inside it
         const TRAILER_SIZE = 25;
         const TRAILER_COMMIT_ID_OFFSET = 9;
-        const ROOT_HEADER_SIZE = 17;
-        // where a root cursor says it is, though it reads the root again each time
+        // where a root cursor says it is, though it reads the root again each time. the root
+        // header starts here, and what's in it depends on the version in the database header
         const ROOT_HEADER_START = 20;
-        const INITIAL_SIZE = 62;
+        const VERSION_OFFSET = 4;
+        const FILE_ID_OFFSET = 12;
         const SLOT_SIZE = 9;
+
+        /// where the root header's committed size is. version 1 has a copy of the root slot
+        /// before it, which the original no longer reads or writes, and version 2 has padding
+        fn fileSizeStart(version: u16) u64 {
+            return if (version == 1) ROOT_HEADER_START + SLOT_SIZE else 24;
+        }
+
+        /// where the committed data starts, after the root header
+        fn dataStart(version: u16) u64 {
+            return fileSizeStart(version) + 8;
+        }
+
+        /// the size of a new database, which is its headers and the trailer of its empty root
+        fn newDatabaseSize(version: u16) u64 {
+            return dataStart(version) + TRAILER_SIZE;
+        }
 
         const Binding = union(enum) {
             rw: RW,
@@ -456,6 +489,8 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             broken: bool = false,
             // its committed size before the top-level op being run
             size_before: ?u64 = null,
+            // how many top-level ops have committed in it
+            commits: usize = 0,
             // the trailers of commits that are in its file
             trailers: std.ArrayList(Trailer) = .empty,
             // how many freezes it has had, including a concat's
@@ -579,7 +614,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             if (op.get("expect_error")) |err| checkErrorName(asString(err, "expect_error"), name, self.allow_port_differences);
             switch (kind_of_op) {
                 .run_context, .db_freeze, .fail => {},
-                .close, .reopen, .recover, .raw_append, .raw_write, .create_database, .use, .compact, .replica_state, .replication_start, .committed_size, .read_committed, .apply_replicated => {
+                .close, .reopen, .recover, .raw_append, .raw_write, .raw_load, .raw_truncate, .create_database, .use, .compact, .replica_state, .replication_start, .committed_size, .read_committed, .apply_replicated => {
                     if (self.enclosing.items.len > 0) die("{s} can only be used at the top level", .{name});
                 },
                 else => checkName(asString(required(op, "on", name), "on"), "on"),
@@ -672,8 +707,15 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                         if (asBool(v, "read_only") and kind == .memory) die("the memory storage kind can't be opened read-only", .{});
                     }
                     if (op.get("hash_size")) |v| checkHashSize(asInt(u16, v, "hash_size"));
+                    if (op.get("file_id")) |v| _ = parseHex64(self.arena, v, "file_id");
+                    if (op.get("hash_id")) |v| _ = parseHashId(self.arena, v);
                 },
                 .raw_append => _ = parseBytes(self.arena, required(op, "bytes", name), "bytes"),
+                .raw_load => checkInputName(asString(required(op, "input", name), "input")),
+                .raw_truncate => {
+                    const length = asInt(u64, required(op, "length", name), "length");
+                    if (length > MAX_SEEK) die("length can't go past {d}, got {d}", .{ @as(u64, MAX_SEEK), length });
+                },
                 .raw_write => {
                     _ = parseBytes(self.arena, required(op, "bytes", name), "bytes");
                     const offset = asInt(u64, required(op, "offset", name), "offset");
@@ -1066,7 +1108,9 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         }
 
         fn takeBefore(self: *Self) !Before {
-            const frozen: u64 = self.store.db.tx_start orelse try self.store.db.committedSize();
+            // a database without a first commit has nothing committed to protect, and a write
+            // to it fails in the engine before it begins
+            const frozen: u64 = self.store.db.tx_start orelse (try sizeOf(self.store) orelse 0);
             return .{ .bytes = try self.fileBytes(), .frozen = @intCast(frozen) };
         }
 
@@ -1076,9 +1120,10 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             const now = try self.fileBytes();
             defer self.gpa.free(now);
             const end = @min(before.frozen, @min(before.bytes.len, now.len));
+            const data_start = dataStart(self.store.db.header.version);
             for (0..end) |i| {
                 if (before.bytes[i] == now[i]) continue;
-                if (i >= ROOT_HEADER_START and i < ROOT_HEADER_START + ROOT_HEADER_SIZE) continue;
+                if (i >= ROOT_HEADER_START and i < data_start) continue;
                 if (self.body_position) |body| if (i >= body and i < body + SLOT_SIZE) continue;
                 return true;
             }
@@ -1117,8 +1162,9 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             const now = try self.fileBytes();
             defer self.gpa.free(now);
             const end = @min(before.frozen, @min(before.bytes.len, now.len));
+            const data_start = dataStart(self.store.db.header.version);
             for (0..end) |i| {
-                if (i >= ROOT_HEADER_START and i < ROOT_HEADER_START + ROOT_HEADER_SIZE) continue;
+                if (i >= ROOT_HEADER_START and i < data_start) continue;
                 if (self.body_position) |body| if (i >= body and i < body + SLOT_SIZE) continue;
                 now[i] = before.bytes[i];
             }
@@ -1209,27 +1255,28 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
         }
 
         /// what the port's recovery has to do, as Zig has none: the file ends at the last
-        /// trailer that verifies, and its root header says so
+        /// trailer that verifies, and its root header says so. that's only the committed size,
+        /// at the version's place, and in version 1 the copy of the root slot before it is
+        /// left as it is, as the original leaves it (D31 item 1)
         fn recover(self: *Self) !void {
             const bytes = try self.rawBytes();
-            const header_size = ROOT_HEADER_START;
-            if (bytes.len < header_size or !std.mem.eql(u8, bytes[0..3], "xit")) return error.InvalidDatabase;
-            const file_id = std.mem.readInt(u64, bytes[header_size - 8..][0..8], .big);
-            const smallest = ROOT_HEADER_START + ROOT_HEADER_SIZE + TRAILER_SIZE;
+            if (bytes.len < ROOT_HEADER_START or !std.mem.eql(u8, bytes[0..3], "xit")) return error.InvalidDatabase;
+            const file_id = std.mem.readInt(u64, bytes[FILE_ID_OFFSET..][0..8], .big);
+            const version = std.mem.readInt(u16, bytes[VERSION_OFFSET..][0..2], .big);
+            const smallest = newDatabaseSize(version);
             var end: usize = bytes.len;
             const found: usize = while (end >= smallest) : (end -= 1) {
                 if (trailerVerifies(bytes, file_id, end)) break end;
             } else return error.InvalidDatabase;
 
-            var root_header: [ROOT_HEADER_SIZE]u8 = undefined;
-            @memcpy(root_header[0..9], bytes[found - TRAILER_SIZE..][0..9]);
-            std.mem.writeInt(u64, root_header[9..17], found, .big);
+            var file_size: [8]u8 = undefined;
+            std.mem.writeInt(u64, &file_size, found, .big);
             if (kind == .memory) {
                 self.store.buffer.shrinkRetainingCapacity(found);
             } else {
                 try self.store.out.setLength(self.io, found);
             }
-            try self.writeRaw(ROOT_HEADER_START, &root_header);
+            try self.writeRaw(fileSizeStart(version), &file_size);
             removeTrailersFrom(self.store, found);
             self.store.may_have_leftovers = false;
             self.store.db = try DB.init(self.io, initOpts(self.store, self.store.out, null, null));
@@ -1263,7 +1310,9 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             }
         }
 
-        /// write_if_empty goes by the snapshot, and the port will go by the slot as it is now
+        /// write_if_empty goes by the snapshot. the port writes when the slot as it is now is empty,
+        /// or when the snapshot is empty and the slot now is a none, as an append leaves it, and
+        /// otherwise it holds back (finding 17's rule as refined on 2026-11-14)
         fn noteWriteIfEmpty(self: *Self, name: []const u8) !void {
             if (!self.note_port_changes or isKey(name, "root")) return;
             const entry = self.env.getPtr(name) orelse return;
@@ -1278,7 +1327,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             var bytes: [9]u8 = undefined;
             try reader.interface.readSliceAll(&bytes);
             const current: Slot = @bitCast(std.mem.readInt(u72, &bytes, .big));
-            if (cursor.slot_ptr.slot.empty() and !current.empty()) self.noteChange("17-overwrites");
+            if (cursor.slot_ptr.slot.empty() and !current.empty() and current.tag != .none) self.noteChange("17-overwrites");
             if (!cursor.slot_ptr.slot.empty() and current.empty()) self.noteChange("17-holds-back");
         }
 
@@ -1704,7 +1753,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             }
 
             if (existing == null) {
-                target.size_before = INITIAL_SIZE;
+                target.size_before = newDatabaseSize(xitdb.VERSION);
                 self.stores.append(self.arena, target) catch die("out of memory", .{});
             }
             self.compacted_into = target;
@@ -1738,10 +1787,15 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             const writes = start == 0 or (committed != null and committed.? == start);
             if (writes and start != bytes.start) die("these bytes were read from {d}, and applying them at {d} isn't something a script can say what it means", .{ bytes.start, start });
 
+            // since 92a926e, a sync at 0 with too few bytes for the header, or for the root
+            // header after it, raises InvalidRange before it writes anything, so that's
+            // told from whether the file changed
+            const hash_before = if (start == 0) try self.fileHash() else 0;
             var reader = Io.Reader.fixed(data);
             const result = store.db.applyReplicated(start, &reader, data.len);
+            const wrote = if (start == 0) (try self.fileHash()) != hash_before else writes;
 
-            if (writes) {
+            if (wrote) {
                 removeTrailersFrom(store, start);
                 for (bytes.source.trailers.items) |trailer| {
                     if (trailer.position >= start and trailer.position < start + data.len) {
@@ -1840,6 +1894,15 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             }
         }
 
+        /// cuts the file off, as it is in storage. it has to be closed
+        fn setRawLength(self: *Self, length: u64) !void {
+            if (kind == .memory) {
+                self.store.buffer.shrinkRetainingCapacity(@intCast(length));
+            } else {
+                try self.store.out.setLength(self.io, length);
+            }
+        }
+
         fn writeRaw(self: *Self, offset: u64, bytes: []const u8) !void {
             if (kind == .memory) {
                 var writer = self.store.db.core.writer();
@@ -1862,7 +1925,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             const kind_of_op = std.meta.stringToEnum(OpKind, op.get("op").?.string).?;
 
             switch (kind_of_op) {
-                .close, .reopen, .recover, .raw_append, .raw_write, .create_database, .use => {},
+                .close, .reopen, .recover, .raw_append, .raw_write, .raw_load, .raw_truncate, .create_database, .use => {},
                 else => if (self.store.closed) die("the database is closed", .{}),
             }
 
@@ -1880,7 +1943,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     const hash_id = if (op.get("hash_id")) |v| parseHashId(self.arena, v) else self.script_hash_id;
                     const store = try self.newStore(name);
                     store.db = try DB.init(self.io, initOpts(store, store.out, parseHex64(self.arena, op.get("file_id").?, "file_id"), hash_id));
-                    store.size_before = INITIAL_SIZE;
+                    store.size_before = try store.db.committedSize();
                     self.stores.append(self.arena, store) catch die("out of memory", .{});
                 },
                 .use => {
@@ -1948,7 +2011,11 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     const read_only = if (op.get("read_only")) |v| v.bool else false;
                     const file: Io.File = if (read_only) try Io.Dir.cwd().openFile(self.io, self.store.out_path, .{ .mode = .read_only }) else self.store.out;
                     errdefer if (read_only) file.close(self.io);
-                    self.store.db = DB.init(self.io, initOpts(self.store, file, null, null)) catch |err| {
+                    // what's given is only used if the file is created again, as one cut off
+                    // during its creation is since 92a926e
+                    const reopen_file_id: ?u64 = if (op.get("file_id")) |v| parseHex64(self.arena, v, "file_id") else null;
+                    const reopen_hash_id: ?xitdb.HashId = if (op.get("hash_id")) |v| parseHashId(self.arena, v) else null;
+                    self.store.db = DB.init(self.io, initOpts(self.store, file, reopen_file_id, reopen_hash_id)) catch |err| {
                         if (self.note_port_changes and (err == error.InvalidDatabase or err == error.TruncatedDatabase)) self.noteChange("19");
                         // a bad magic number isn't a database at all, so it stays what it is
                         if (port_mode and err == error.TruncatedDatabase) return error.UntrustedRootHeader;
@@ -1975,6 +2042,26 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 .raw_write => {
                     if (!self.store.closed) die("the file can only be written to directly while the database is closed", .{});
                     try self.writeRaw(asInt(u64, op.get("offset").?, "offset"), parseBytes(self.arena, op.get("bytes").?, "bytes"));
+                    self.store.may_have_leftovers = true;
+                },
+                .raw_load => {
+                    if (!self.store.closed) die("the file can only be written to directly while the database is closed", .{});
+                    // the trailers a run tells apart by their commit IDs have to be its own
+                    if (self.store.commits > 0) die("raw_load replaces a database that hasn't committed in this script yet, and \"{s}\" has", .{self.store.name});
+                    const input = op.get("input").?.string;
+                    const path = std.mem.concat(self.arena, u8, &.{ inputs_dir, "/", input, ".db" }) catch die("out of memory", .{});
+                    const bytes = Io.Dir.cwd().readFileAlloc(self.io, path, self.arena, .unlimited) catch |err| die("can't read the input {s}: {s}", .{ path, @errorName(err) });
+                    try self.setRawLength(0);
+                    try self.writeRaw(0, bytes);
+                    self.store.trailers.clearRetainingCapacity();
+                    self.store.may_have_leftovers = true;
+                },
+                .raw_truncate => {
+                    if (!self.store.closed) die("the file can only be written to directly while the database is closed", .{});
+                    const length = asInt(u64, op.get("length").?, "length");
+                    const now = if (kind == .memory) self.store.buffer.written().len else try self.store.out.length(self.io);
+                    if (length > now) die("raw_truncate can only make the file shorter, and it's {d} bytes, not {d}", .{ now, length });
+                    try self.setRawLength(length);
                     self.store.may_have_leftovers = true;
                 },
                 .write_path => {
@@ -2231,11 +2318,25 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             return std.mem.readInt(u64, &bytes, .big);
         }
 
-        /// its committed size, or null if it can't say
+        /// its committed size, or null if it can't say. a database without a first commit
+        /// can't, which is what a sync at 0 that failed leaves, and since 92a926e a file
+        /// that was cut off during its creation or a full copy, which opens
         fn sizeOf(store: *Store) !?u64 {
             if (store.closed) return null;
-            if (store.broken) return store.db.committedSize() catch null;
+            if (store.broken or try fileSizeInHeader(store) == 0) return store.db.committedSize() catch null;
             return try store.db.committedSize();
+        }
+
+        /// the committed size the root header holds, which is 0 before the first commit,
+        /// and when the file is too short to have one
+        fn fileSizeInHeader(store: *Store) !u64 {
+            const start = fileSizeStart(store.db.header.version);
+            if (try store.db.core.length() < start + 8) return 0;
+            var reader = store.db.core.reader();
+            try reader.seekTo(start);
+            var bytes: [8]u8 = undefined;
+            try reader.interface.readSliceAll(&bytes);
+            return std.mem.readInt(u64, &bytes, .big);
         }
 
         fn execTopLevel(self: *Self, ops: []const Json, entries: []SidecarEntry) !void {
@@ -2272,6 +2373,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                     if (can_commit and before != null and after != null and before.? != after.?) {
                         if (committed != null) die("one top-level op committed in both \"{s}\" and \"{s}\", which a sidecar has no way to say", .{ committed.?.name, store.name });
                         committed = store;
+                        store.commits += 1;
                         commit_id = try readCommitId(store, after.?);
                         removeTrailersFrom(store, before.?);
                         store.trailers.append(self.arena, .{
@@ -2434,7 +2536,7 @@ fn parseHashId(arena: Allocator, v: Json) ?xitdb.HashId {
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: run <script> <out.db> [--kind buffered_file|file|memory] [--allow-port-differences] [--note-port-changes] [--port]\n", .{});
+    std.debug.print("usage: run <script> <out.db> [--kind buffered_file|file|memory] [--allow-port-differences] [--note-port-changes] [--port] [--inputs <dir>]\n", .{});
     std.process.exit(2);
 }
 
@@ -2455,6 +2557,9 @@ pub fn main(init: std.process.Init) !void {
             port_mode = true;
         } else if (std.mem.eql(u8, args[arg_index], "--note-port-changes")) {
             note_port_changes = true;
+        } else if (std.mem.eql(u8, args[arg_index], "--inputs") and arg_index + 1 < args.len) {
+            arg_index += 1;
+            inputs_dir = args[arg_index];
         } else if (std.mem.eql(u8, args[arg_index], "--kind") and arg_index + 1 < args.len) {
             arg_index += 1;
             kind = std.meta.stringToEnum(xitdb.DatabaseKind, args[arg_index]) orelse usage();

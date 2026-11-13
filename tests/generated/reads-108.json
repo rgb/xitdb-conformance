@@ -295,7 +295,7 @@
     {"op":"iterator","on":"r1000000075","as":"i1000000076","from_index":-8},
     {"op":"next","on":"i1000000076","expect_null":true},
     {"op":"close"},
-    {"op":"raw_write","offset":20,"bytes":{"hex":"ffffffffffffffffff"}},
+    {"op":"raw_write","offset":20,"bytes":{"hex":"ffffffff"}},
     {"op":"reopen"},
     {"op":"read_path_slot","on":"root","path":[{"array_list_get":-1}],"as":"s25"},
     {"op":"write_path","on":"root","path":["array_list_init","array_list_append",{"write":{"slot":{"var":"s25"}}},{"hash_map_init":{}},{"ctx":{"as":"c26","ops":[

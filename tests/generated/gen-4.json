@@ -135,7 +135,7 @@
     {"op":"slot","on":"r22","expect":{"tag":"bytes","full":false}},
     {"op":"read_bytes","on":"r22","expect":{"hex":"6100f6"},"expect_format_tag":null},
     {"op":"close"},
-    {"op":"raw_write","offset":20,"bytes":{"hex":"ffffffffffffffffff"}},
+    {"op":"raw_write","offset":20,"bytes":{"hex":"ffffffff"}},
     {"op":"reopen"},
     {"op":"read_path","on":"root","path":[{"array_list_get":3},{"hash_map_get":{"value":{"sha1":"k5"}}}],"expect_null":true},
     {"op":"read_path_slot","on":"root","path":[{"array_list_get":-1}],"as":"s23"},

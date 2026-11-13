@@ -43,6 +43,8 @@ const WANT = [_][]const u8{
     "op:reopen",
     "op:raw_append",
     "op:raw_write",
+    "op:raw_load",
+    "op:raw_truncate",
     "op:create_database",
     "op:use",
     "op:compact",
@@ -204,6 +206,8 @@ const WANT = [_][]const u8{
     // reopening
     "reopen:read_only",
     "reopen:hash_size",
+    "reopen:file_id",
+    "reopen:hash_id",
     // error names
     "error:KeyNotFound",
     "error:UnexpectedTag",
@@ -383,6 +387,8 @@ const Walker = struct {
                     if (v.bool) self.note("reopen:", "read_only");
                 }
                 if (op.get("hash_size") != null) self.note("reopen:", "hash_size");
+                if (op.get("file_id") != null) self.note("reopen:", "file_id");
+                if (op.get("hash_id") != null) self.note("reopen:", "hash_id");
             }
             if (std.mem.eql(u8, name, "raw_append") or std.mem.eql(u8, name, "raw_write")) {
                 self.bytes("raw", op.get("bytes").?);

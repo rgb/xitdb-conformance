@@ -1,2 +1,4 @@
 replicate-bad-trailer replica
-replicate-failed-first-sync left_broken
+replicate-failed-first-sync left_behind
+recovery-cut-during-creation main
+recovery-cut-during-creation-read-only main

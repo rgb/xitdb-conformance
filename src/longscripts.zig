@@ -535,12 +535,12 @@ fn walkUints(s: *S, from: u64, steps: u64) !void {
     if (value == COUNT) try s.op("{{\"op\":\"next\",\"on\":\"it\",\"expect_null\":true}}", .{});
 }
 
-/// an element appended and never written is empty in an array list, and an iterator skips
-/// it. a linked array list marks it as written with nothing, and an iterator gives it.
-fn walkHoles(s: *S, from: u64, comptime skipped: bool) !void {
+/// an element appended and never written is a none slot marked full, as if it had been set to
+/// nothing, and an iterator gives it. a linked array list has always done this, and an array
+/// list does since 89da8e7, where before it was empty and an iterator skipped it.
+fn walkHoles(s: *S, from: u64) !void {
     for (from..40) |i| {
         if (i % 3 == 0) {
-            if (skipped) continue;
             try s.op("{{\"op\":\"next\",\"on\":\"it\",\"as\":\"e\",\"expect_null\":false}}", .{});
             try s.op("{{\"op\":\"slot\",\"on\":\"e\",\"expect\":{{\"tag\":\"none\",\"full\":true}}}}", .{});
         } else {
@@ -551,7 +551,7 @@ fn walkHoles(s: *S, from: u64, comptime skipped: bool) !void {
     try s.op("{{\"op\":\"next\",\"on\":\"it\",\"expect_null\":true}}", .{});
 }
 
-fn tiersOfList(s: *S, comptime list_init: []const u8, comptime list_append: []const u8, comptime holes_skipped: bool) !void {
+fn tiersOfList(s: *S, comptime list_init: []const u8, comptime list_append: []const u8) !void {
     try s.beginMoment();
     for (0..COUNT) |i| {
         try s.write("{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"list\"}}}}}}," ++ list_init ++ "," ++ list_append ++ ",{{\"write\":{{\"uint\":{d}}}}}", .{i});
@@ -582,14 +582,14 @@ fn tiersOfList(s: *S, comptime list_init: []const u8, comptime list_append: []co
     try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"holes\"}}}}}}],\"as\":\"holes\"}}", .{});
     try s.op("{{\"op\":\"count\",\"on\":\"holes\",\"expect\":40}}", .{});
     try s.op("{{\"op\":\"iterator\",\"on\":\"holes\",\"as\":\"it\"}}", .{});
-    try walkHoles(s, 0, holes_skipped);
+    try walkHoles(s, 0);
     try s.op("{{\"op\":\"iterator\",\"on\":\"holes\",\"from_index\":15,\"as\":\"it\",\"note\":\"15 was never written\"}}", .{});
-    try walkHoles(s, 15, holes_skipped);
+    try walkHoles(s, 15);
 }
 
 fn iteratorTiers(w: *Io.Writer) !void {
     var s = try begin(w, "Iterators on an array list three levels deep, from either side of where each block ends, counting from either end, and past either end, and on a hash map 14 levels deep.");
-    try tiersOfList(&s, "\"array_list_init\"", "\"array_list_append\"", true);
+    try tiersOfList(&s, "\"array_list_init\"", "\"array_list_append\"");
 
     // and a trie 14 levels deep. a slot's lowest nibble comes first, so at each level the
     // key that has a 0 there, and goes on down, comes before the one that has a 1
@@ -613,7 +613,7 @@ fn iteratorTiers(w: *Io.Writer) !void {
 
 fn iteratorTiersLinked(w: *Io.Writer) !void {
     var s = try begin(w, "Iterators on a linked array list several levels deep, from either side of where a node might end, counting from either end, and past either end.");
-    try tiersOfList(&s, "\"linked_array_list_init\"", "\"linked_array_list_append\"", false);
+    try tiersOfList(&s, "\"linked_array_list_init\"", "\"linked_array_list_append\"");
     try end(w);
 }
 
@@ -731,12 +731,17 @@ fn compactPartialBlocks(w: *Io.Writer) !void {
         }
     }
 
-    // the slots past the end are gone, so an iterator stops at the end here, in Zig too
+    // the slots past the end are gone, so an iterator stops at the end here. the elements that
+    // were never written are none slots marked full, which it gives
     try s.op("{{\"op\":\"read_path\",\"on\":\"moment\",\"path\":[{{\"hash_map_get\":{{\"value\":{{\"sha1\":\"holes-sliced\"}}}}}}],\"as\":\"list\"}}", .{});
     try s.op("{{\"op\":\"count\",\"on\":\"list\",\"expect\":20}}", .{});
     try s.op("{{\"op\":\"iterator\",\"on\":\"list\",\"as\":\"it\"}}", .{});
     for (0..20) |i| {
-        if (i % 3 == 0) continue;
+        if (i % 3 == 0) {
+            try s.op("{{\"op\":\"next\",\"on\":\"it\",\"as\":\"e\",\"expect_null\":false}}", .{});
+            try s.op("{{\"op\":\"slot\",\"on\":\"e\",\"expect\":{{\"tag\":\"none\",\"full\":true}}}}", .{});
+            continue;
+        }
         try s.op("{{\"op\":\"next\",\"on\":\"it\",\"as\":\"e\",\"expect_null\":false}}", .{});
         try s.op("{{\"op\":\"read_uint\",\"on\":\"e\",\"expect\":{d}}}", .{i});
     }
@@ -1124,7 +1129,7 @@ fn sync(s: *S, comptime source: []const u8, comptime replica: []const u8, first:
 fn replicateHistory(w: *Io.Writer) !void {
     var s = try begin(w, "Replicating a history long enough for its array list to grow to three levels, with a failed transaction every so often and a slice that rolls the history back. The first sync replaces the replica, and the others only send what's new. Then a compacted copy of the source, which is a new file, gets a replica of its own.");
     try s.op("{{\"op\":\"create_database\",\"name\":\"replica\",\"file_id\":\"00000000000000cc\"}}", .{});
-    try s.op("{{\"op\":\"read_committed\",\"start\":0,\"end\":62,\"as\":\"new_database\",\"note\":\"even a new database can be sent\"}}", .{});
+    try s.op("{{\"op\":\"read_committed\",\"start\":0,\"end\":57,\"as\":\"new_database\",\"note\":\"even a new database can be sent\"}}", .{});
     try sync(&s, "main", "replica", true);
 
     for (0..300) |i| {
@@ -1288,6 +1293,121 @@ fn replicateRoots(w: *Io.Writer) !void {
 
 const Script = struct { name: []const u8, write: *const fn (*Io.Writer) anyerror!void };
 
+// a file cut off while it was being created (92a926e)
+
+/// the lengths at which a database created again is given no hash ID, so that it has zeros
+fn withoutHashId(length: u64, comptime version: u16) bool {
+    return if (version == 2) length == 20 or length == 32 or length == 57 else length == 20 or length == 37 or length == 62;
+}
+
+/// the database just created again is exactly a new one with that file ID and hash ID
+fn sameAsNew(s: *S, length: u64, comptime version: u16) !void {
+    try s.op("{{\"op\":\"committed_size\",\"expect\":57}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"{s}\"}}", .{if (withoutHashId(length, version)) "new_without_hash_id" else "new_with_hash_id"});
+    try s.op("{{\"op\":\"read_committed\",\"start\":0,\"end\":57,\"as\":\"new\"}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"main\"}}", .{});
+    try s.op("{{\"op\":\"read_committed\",\"start\":0,\"end\":57,\"as\":\"got\",\"expect_same\":\"new\"}}", .{});
+}
+
+fn reopenCut(s: *S, length: u64, comptime version: u16) !void {
+    if (length < 20) {
+        try s.op("{{\"op\":\"reopen\",\"file_id\":\"00000000000000c2\",\"hash_id\":\"sha1\",\"expect_error\":\"EndOfStream\",\"note\":\"{d} bytes: not even the database header\"}}", .{length});
+    } else if (withoutHashId(length, version)) {
+        try s.op("{{\"op\":\"reopen\",\"file_id\":\"00000000000000c2\",\"note\":\"{d} bytes, created again, and with no hash ID given, it has zeros\"}}", .{length});
+    } else {
+        try s.op("{{\"op\":\"reopen\",\"file_id\":\"00000000000000c2\",\"hash_id\":\"sha1\",\"note\":\"{d} bytes, created again\"}}", .{length});
+    }
+    if (length >= 20) try sameAsNew(s, length, version);
+}
+
+/// what a file without a first commit that's bigger than a new database does once it's open
+fn withoutFirstCommit(s: *S) !void {
+    try s.op("{{\"op\":\"committed_size\",\"expect_error\":\"InvalidDatabase\"}}", .{});
+    try s.op("{{\"op\":\"replica_state\",\"as\":\"state\",\"note\":\"zero and zero\"}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"new_with_hash_id\"}}", .{});
+    try s.op("{{\"op\":\"replication_start\",\"state\":\"state\",\"expect\":0}}", .{});
+    try s.op("{{\"op\":\"use\",\"name\":\"main\"}}", .{});
+    try s.op("{{\"op\":\"read_path\",\"on\":\"root\",\"path\":[],\"expect_error\":\"InvalidDatabase\"}}", .{});
+    try s.op("{{\"op\":\"write\",\"on\":\"root\",\"data\":{{\"uint\":1}},\"expect_error\":\"InvalidDatabase\"}}", .{});
+}
+
+fn recoveryCutDuringCreation(w: *Io.Writer) !void {
+    var s = try begin(w, "A file cut off while it was being created, at every length up to a new database's size, in both versions. Creating writes the database header, then a root header of zeros, then the trailer of the empty root, and only then the committed size, so what a crash leaves is a prefix of that with no committed size. Since 92a926e such a file, if it's no bigger than a new database, is created again when it's opened: as version 2, even when the cut file was version 1, with the file ID and hash ID given to Database.init, which reopen passes here, and with a hash ID of zeros when it's given none. The cut file's own are lost. Shorter than the database header, it raises EndOfStream. Bigger than a new database, it's a full copy that didn't finish, which opens as a database without a first commit and is left as it is. new_with_hash_id and new_without_hash_id are what a database created again has to be, byte for byte. The port does what the original does here (D31 item 4).");
+    try s.op("{{\"op\":\"create_database\",\"name\":\"new_with_hash_id\",\"file_id\":\"00000000000000c2\"}}", .{});
+    try s.op("{{\"op\":\"create_database\",\"name\":\"new_without_hash_id\",\"file_id\":\"00000000000000c2\",\"hash_id\":null}}", .{});
+
+    // one byte bigger than a new database, which isn't created again
+    try s.op("{{\"op\":\"close\"}}", .{});
+    try s.op("{{\"op\":\"raw_write\",\"offset\":24,\"bytes\":{{\"hex\":\"0000000000000000\"}},\"note\":\"the committed size, which creating writes last\"}}", .{});
+    try s.op("{{\"op\":\"raw_append\",\"bytes\":\"x\"}}", .{});
+    try s.op("{{\"op\":\"reopen\",\"file_id\":\"00000000000000c2\",\"hash_id\":\"sha1\",\"note\":\"58 bytes: bigger than a new database, so it's left for the next sync\"}}", .{});
+    try withoutFirstCommit(&s);
+    try s.op("{{\"op\":\"close\"}}", .{});
+
+    // version 2, from the whole of it back. each cut is of the database the last reopen
+    // created, with its committed size not written yet
+    var length: u64 = 57;
+    while (length >= 1) : (length -= 1) {
+        if (length >= 19 and length != 57) try s.op("{{\"op\":\"close\"}}", .{});
+        if (length >= 20) try s.op("{{\"op\":\"raw_write\",\"offset\":24,\"bytes\":{{\"hex\":\"0000000000000000\"}}}}", .{});
+        try s.op("{{\"op\":\"raw_truncate\",\"length\":{d}}}", .{length});
+        try reopenCut(&s, length, 2);
+    }
+
+    // version 1, each cut from inputs/v1-new
+    length = 62;
+    while (length >= 1) : (length -= 1) {
+        try s.op("{{\"op\":\"raw_load\",\"input\":\"v1-new\"}}", .{});
+        try s.op("{{\"op\":\"raw_write\",\"offset\":29,\"bytes\":{{\"hex\":\"0000000000000000\"}}}}", .{});
+        try s.op("{{\"op\":\"raw_truncate\",\"length\":{d}}}", .{length});
+        try reopenCut(&s, length, 1);
+        if (length >= 20) try s.op("{{\"op\":\"close\"}}", .{});
+    }
+
+    // and version 1 files without a first commit that are bigger than a new one
+    try s.op("{{\"op\":\"raw_load\",\"input\":\"v1-history\"}}", .{});
+    try s.op("{{\"op\":\"raw_write\",\"offset\":29,\"bytes\":{{\"hex\":\"0000000000000000\"}}}}", .{});
+    try s.op("{{\"op\":\"reopen\",\"note\":\"a version 1 history whose committed size is gone, which is left as it is\"}}", .{});
+    try withoutFirstCommit(&s);
+    try s.op("{{\"op\":\"close\"}}", .{});
+    try s.op("{{\"op\":\"raw_load\",\"input\":\"v1-new\"}}", .{});
+    try s.op("{{\"op\":\"raw_write\",\"offset\":29,\"bytes\":{{\"hex\":\"0000000000000000\"}}}}", .{});
+    try s.op("{{\"op\":\"raw_append\",\"bytes\":\"x\"}}", .{});
+    try s.op("{{\"op\":\"reopen\",\"file_id\":\"00000000000000c2\",\"hash_id\":\"sha1\",\"note\":\"63 bytes: one bigger than a new version 1 database, so it's left too\"}}", .{});
+    try withoutFirstCommit(&s);
+    try end(w);
+}
+
+fn recoveryCutDuringCreationReadOnly(w: *Io.Writer) !void {
+    var s = try begin(w, "The cuts of recovery-cut-during-creation, opened read-only. Truncating a read-only file does nothing, so Database.init can't create it again: it opens as a database without a first commit, and the file stays as it was. Its committed size raises EndOfStream if the file is too short to hold one, and InvalidDatabase otherwise, and its replica state is zero and zero. Shorter than the database header, it raises EndOfStream. Each cut is of the last, as nothing changes the file in between.");
+    try s.op("{{\"op\":\"close\"}}", .{});
+    try s.op("{{\"op\":\"raw_write\",\"offset\":24,\"bytes\":{{\"hex\":\"0000000000000000\"}},\"note\":\"the committed size, which creating writes last\"}}", .{});
+    var length: u64 = 57;
+    while (length >= 1) : (length -= 1) {
+        try cutReadOnly(&s, length, 32);
+    }
+    try s.op("{{\"op\":\"raw_load\",\"input\":\"v1-new\"}}", .{});
+    try s.op("{{\"op\":\"raw_write\",\"offset\":29,\"bytes\":{{\"hex\":\"0000000000000000\"}}}}", .{});
+    length = 62;
+    while (length >= 1) : (length -= 1) {
+        try cutReadOnly(&s, length, 37);
+    }
+    try end(w);
+}
+
+/// `data_start` is where the committed size ends, so a shorter file can't hold one
+fn cutReadOnly(s: *S, length: u64, data_start: u64) !void {
+    try s.op("{{\"op\":\"raw_truncate\",\"length\":{d}}}", .{length});
+    if (length < 20) {
+        try s.op("{{\"op\":\"reopen\",\"read_only\":true,\"expect_error\":\"EndOfStream\",\"note\":\"{d} bytes\"}}", .{length});
+        return;
+    }
+    try s.op("{{\"op\":\"reopen\",\"read_only\":true,\"note\":\"{d} bytes\"}}", .{length});
+    try s.op("{{\"op\":\"committed_size\",\"expect_error\":\"{s}\"}}", .{if (length < data_start) "EndOfStream" else "InvalidDatabase"});
+    try s.op("{{\"op\":\"replica_state\",\"as\":\"state\"}}", .{});
+    try s.op("{{\"op\":\"close\"}}", .{});
+}
+
 const SCRIPTS = [_]Script{
     .{ .name = "deep-tries", .write = deepTries },
     .{ .name = "deep-linked", .write = deepLinked },
@@ -1303,6 +1423,8 @@ const SCRIPTS = [_]Script{
     .{ .name = "compact-sorted-removed-separators", .write = compactSortedRemovedSeparators },
     .{ .name = "replicate-history", .write = replicateHistory },
     .{ .name = "replicate-roots", .write = replicateRoots },
+    .{ .name = "recovery-cut-during-creation", .write = recoveryCutDuringCreation },
+    .{ .name = "recovery-cut-during-creation-read-only", .write = recoveryCutDuringCreationReadOnly },
 };
 
 pub fn main(init: std.process.Init) !void {

@@ -27,7 +27,7 @@
       {"op":"write","on":"c6","data":{"bytes_object":{"value":"fjydwpkcujqgrak","format_tag":"yr"}}},
       {"op":"write_path","on":"c5","path":[{"array_list_get":99}],"expect_error":"UnexpectedTag"}]}}]},
     {"op":"close"},
-    {"op":"raw_write","offset":20,"bytes":{"hex":"ffffffffffffffffff"}},
+    {"op":"raw_write","offset":20,"bytes":{"hex":"ffffffff"}},
     {"op":"reopen"},
     {"op":"read_path","on":"root","path":[{"array_list_get":1}],"expect_null":true},
     {"op":"read_path","on":"root","path":[{"array_list_get":0},{"hash_map_get":{"value":{"hex":"5ef8766de935324424b563aa3eb0c7466b293c94"}}}],"expect_null":true},

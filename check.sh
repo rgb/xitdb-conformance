@@ -83,8 +83,8 @@ for script in "$OUT"/long/*.json; do
     }
     count=$((count + 1))
 done
-if [ "$count" -ne 14 ]; then
-    echo "longscripts should write 14 scripts, and it wrote $count"
+if [ "$count" -ne 16 ]; then
+    echo "longscripts should write 16 scripts, and it wrote $count"
     exit 1
 fi
 echo "longscripts still writes the $count scripts that are committed"
@@ -301,7 +301,7 @@ cmp -s "$OUT/same-a.txt" "$OUT/same-b.txt" || {
 echo "the same content in different bytes dumps the same"
 # the value slot of the worked example, whose last byte is the 42
 cp "$OUT/worked-example.a.db" "$OUT/changed.db"
-flip_byte "$OUT/changed.db" 412
+flip_byte "$OUT/changed.db" 407
 "$DUMP" "$OUT/changed.db" > "$OUT/changed.txt"
 if cmp -s "$OUT/worked-example.a.txt" "$OUT/changed.txt"; then
     echo "dump didn't notice a changed value"
@@ -491,17 +491,23 @@ expect_drift() { # what was changed in the copy, expected message
     echo "$1 is rejected"
 }
 fresh_copy
-flip_byte "$COPY/valid/worked-example.db" 400
+flip_byte "$COPY/valid/worked-example.db" 395
 expect_drift "a changed byte in an expected file" "worked-example has drifted"
 fresh_copy
-flip_byte "$COPY/valid/worked-example.db" 422
+flip_byte "$COPY/valid/worked-example.db" 417
 expect_drift "a commit ID that doesn't match its checksum" "worked-example has drifted"
 fresh_copy
-edit_file "$COPY/valid/worked-example.db.sidecar.json" 's/"committed_size": 438/"committed_size": 439/'
+edit_file "$COPY/valid/worked-example.db.sidecar.json" 's/"committed_size": 433/"committed_size": 434/'
 expect_drift "a wrong size in a sidecar" "worked-example has drifted"
 fresh_copy
-edit_file "$COPY/valid/worked-example.db.sidecar.json" 's/"initial_size": 62,/"initial_size":  62,/'
+edit_file "$COPY/valid/worked-example.db.sidecar.json" 's/"initial_size": 57,/"initial_size":  57,/'
 expect_drift "a change to a sidecar's layout" "worked-example's sidecar has drifted"
+fresh_copy
+flip_byte "$COPY/inputs/v1-history.db" 100
+expect_drift "a changed input" "the input v1-history.db differs"
+fresh_copy
+touch "$COPY/inputs/not-an-input.db"
+expect_drift "an extra input" "has no source in tests/inputs"
 fresh_copy
 printf ' ' >> "$COPY/valid/worked-example.json"
 expect_drift "a changed script" "worked-example differs from the script"
@@ -578,7 +584,7 @@ expect_report "$generated scripts the same, and 0 different"
 COPY="$OUT/fixtures-second"
 rm -rf "$COPY"
 cp -R fixtures "$COPY"
-flip_byte "$COPY/valid/worked-example.db" 400
+flip_byte "$COPY/valid/worked-example.db" 395
 FIXTURES="$COPY" SECOND_ZIG_OUT=$OUT/second-zig ./second-zig.sh "$(cd ../../xitdb && pwd)" > "$OUT/second-zig.txt"
 expect_report "different: worked-example"
 rm -rf "$COPY" "$OUT/second-zig"
@@ -608,7 +614,8 @@ expect_detcheck_failure() { # byte offset, what's there, expected message
 first_end=$(sed -n 's/.*"committed_size": \([0-9]*\), "commit_id": "[0-9a-f]*".*/\1/p' "$B.sidecar.json" | head -n 1)
 trailer=$((first_end - 25))
 expect_detcheck_failure 70 "the data" "isn't part of a trailer's commit ID or checksum"
-expect_detcheck_failure 21 "the root header" "isn't part of a trailer's commit ID or checksum"
+expect_detcheck_failure 21 "the padding before the root header" "isn't part of a trailer's commit ID or checksum"
+expect_detcheck_failure 31 "the root header" "the root header's size is not the last committed size"
 expect_detcheck_failure "$((trailer + 1))" "a trailer's root slot" "checksum"
 expect_detcheck_failure "$((trailer + 9))" "a trailer's commit ID" "commit ID"
 expect_detcheck_failure "$((trailer + 17))" "a trailer's checksum" "checksum"

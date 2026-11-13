@@ -215,7 +215,7 @@
     {"op":"write_path","on":"root","path":["array_list_init","array_list_append",{"write":{"slot":{"var":"s31"}}},{"hash_map_init":{}},{"ctx":{"as":"c32","ops":[
       {"op":"write_path","on":"c32","path":[{"hash_map_init":{}},{"hash_map_get":{"value":{"sha1":"k3"}}},{"write":{"float":"d25616dd4802c420"}}]}]}}]},
     {"op":"close"},
-    {"op":"raw_write","offset":20,"bytes":{"hex":"ffffffffffffffffff"}},
+    {"op":"raw_write","offset":20,"bytes":{"hex":"ffffffff"}},
     {"op":"reopen"},
     {"op":"read_path_slot","on":"root","path":[{"array_list_get":-1}],"as":"s33"},
     {"op":"write_path","on":"root","path":["array_list_init","array_list_append",{"write":{"slot":{"var":"s33"}}},{"hash_map_init":{}},{"ctx":{"as":"c34","ops":[

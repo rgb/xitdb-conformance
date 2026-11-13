@@ -13,7 +13,6 @@ path-api-edges-sorted PathPartMustBeAtEnd
 path-api-edges PathPartMustBeAtEnd
 recovery-open-errors UntrustedRootHeader
 replicate-bad-trailer UntrustedRootHeader
-replicate-failed-first-sync UntrustedRootHeader
 compact-201 ImmutableBytes
 compact-202 StaleCursor
 compact-203 PoisonedTransaction

@@ -369,7 +369,7 @@
       {"op":"write_path","on":"c38","path":[{"hash_map_init":{}},{"hash_map_get":{"key":{"sha1":"k3"}}},{"write":{"bytes":"s"}}],"as":"c39"},
       {"op":"read_path","on":"c38","path":[{"hash_map_get":{"kv_pair":{"sha1":"k10"}}}],"expect_null":true}]}}]},
     {"op":"close"},
-    {"op":"raw_write","offset":20,"bytes":{"hex":"0200000000000028f00000000000003145"}},
+    {"op":"raw_write","offset":24,"bytes":{"hex":"0000000000003140"}},
     {"op":"reopen"},
     {"op":"read_path_slot","on":"root","path":[{"array_list_get":-1}],"as":"s40"},
     {"op":"write_path","on":"root","path":["array_list_init","array_list_append",{"write":{"slot":{"var":"s40"}}},{"hash_map_init":{}},{"ctx":{"as":"c41","ops":[
@@ -442,7 +442,7 @@
       {"op":"write_path","on":"c49","path":[{"hash_map_init":{}},{"hash_map_get":{"value":{"sha1":"k7"}}},{"write":{"bytes":"iafrkodlcpkvrgfdvprebuzhabqayu"}}],"as":"c50"},
       {"op":"writer","on":"c50","steps":[{"write":"yutgzmrjedmaoclxgxfzvpthhfxvr"},{"seek":14},{"write":"ywuyvwntd"}]}]}}]},
     {"op":"close"},
-    {"op":"raw_write","offset":20,"bytes":{"hex":"02000000000000314e0000000000003c14"}},
+    {"op":"raw_write","offset":24,"bytes":{"hex":"0000000000003c0f"}},
     {"op":"reopen"},
     {"op":"read_path_slot","on":"root","path":[{"array_list_get":-1}],"as":"s51"},
     {"op":"write_path","on":"root","path":["array_list_init","array_list_append",{"write":{"slot":{"var":"s51"}}},{"hash_map_init":{}},{"ctx":{"as":"c52","ops":[

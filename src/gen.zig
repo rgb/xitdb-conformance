@@ -1574,10 +1574,21 @@ fn Gen(comptime HashInt: type) type {
             try self.buffer.writer.writeAll(bytes);
         }
 
-        fn rawWriteHeader(self: *Self, bytes: []const u8) anyerror!void {
+        fn rawWriteHeader(self: *Self, offset: u64, bytes: []const u8) anyerror!void {
             try self.beginOp();
-            try self.w.print("{{\"op\":\"raw_write\",\"offset\":20,\"bytes\":{s}}}", .{self.bytesJson(bytes)});
-            @memcpy(self.buffer.written()[20..][0..bytes.len], bytes);
+            try self.w.print("{{\"op\":\"raw_write\",\"offset\":{d},\"bytes\":{s}}}", .{ offset, self.bytesJson(bytes) });
+            @memcpy(self.buffer.written()[@intCast(offset)..][0..bytes.len], bytes);
+        }
+
+        /// where the root header's committed size is: after a copy of the root slot in
+        /// version 1, which the original doesn't read, and after padding in version 2
+        fn fileSizeStart(self: *const Self) u64 {
+            return if (self.db.header.version == 1) ROOT_HEADER_START + 9 else 24;
+        }
+
+        /// the size of a new database: its headers, and the trailer of its empty root
+        fn newDatabaseSize(self: *const Self) u64 {
+            return self.fileSizeStart() + 8 + TRAILER_SIZE;
         }
 
         fn topLevelOp(self: *Self) anyerror!void {
@@ -1621,21 +1632,28 @@ fn Gen(comptime HashInt: type) type {
                         try self.writePath("root", self.db.rootCursor(), &p, false);
                     }
                 } else if (r < 96 and self.commits.items.len >= self.first_lost_commit + 2) {
-                    // a commit lost before the root header pointed at it
+                    // a commit lost before the root header pointed at it. in version 1, the
+                    // root header was written whole, with a copy of the root slot before the size
                     const keep = self.first_lost_commit + self.rng.below(self.commits.items.len - 1 - self.first_lost_commit);
                     const commit = self.commits.items[@intCast(keep)];
                     var header: [17]u8 = undefined;
                     @memcpy(header[0..9], &commit.root);
                     std.mem.writeInt(u64, header[9..17], commit.size, .big);
                     try self.closeDatabase();
-                    try self.rawWriteHeader(&header);
+                    if (self.db.header.version == 1) {
+                        try self.rawWriteHeader(ROOT_HEADER_START, &header);
+                    } else {
+                        try self.rawWriteHeader(self.fileSizeStart(), header[9..17]);
+                    }
                     try self.reopen(false);
                     self.commits.shrinkRetainingCapacity(@intCast(keep + 1));
                 } else if (r < 98) {
-                    // a torn cached root slot, which is never read
+                    // garbage before the committed size, which is never read: the copy of
+                    // the root slot in version 1, the padding in version 2
                     const garbage: [9]u8 = @splat(0xff);
+                    const start = self.fileSizeStart();
                     try self.closeDatabase();
-                    try self.rawWriteHeader(&garbage);
+                    try self.rawWriteHeader(ROOT_HEADER_START, garbage[0..@intCast(start - ROOT_HEADER_START)]);
                     try self.reopen(false);
                 } else {
                     try self.moment();
@@ -1664,16 +1682,41 @@ fn Gen(comptime HashInt: type) type {
             try self.w.print(text, args);
         }
 
+        /// whether what a full copy up to `end` reads back is what was sent. since 52c7283 a
+        /// copy writes a root header of its own, so what the source has before its committed
+        /// size, which nothing reads, isn't copied, and the garbage in its padding stays behind
+        fn copiesTheSame(self: *Self, end: u64) anyerror!bool {
+            var sent = Io.Writer.Allocating.init(self.arena);
+            try self.db.readCommitted(0, end, &sent.writer);
+            var replica_buffer = Io.Writer.Allocating.init(self.arena);
+            var replica = try DB.init(self.io, .{ .buffer = &replica_buffer, .file_id = 0xdd });
+            var reader = Io.Reader.fixed(sent.written());
+            try replica.applyReplicated(0, &reader, sent.written().len);
+            var got = Io.Writer.Allocating.init(self.arena);
+            try replica.readCommitted(0, end, &got.writer);
+            return std.mem.eql(u8, sent.written(), got.written());
+        }
+
+        /// a read from 0 on the replica, which is what was sent unless the source has something
+        /// before its committed size that a copy doesn't take
+        fn readBackFromReplica(self: *Self, end: u64, comptime end_json: []const u8, args: anytype) anyerror!void {
+            if (try self.copiesTheSame(end)) {
+                try self.op("{{\"op\":\"read_committed\",\"start\":0,\"end\":" ++ end_json ++ ",\"as\":\"from_replica\",\"expect_same\":\"from_source\"}}", args);
+            } else {
+                try self.op("{{\"op\":\"read_committed\",\"start\":0,\"end\":" ++ end_json ++ ",\"as\":\"from_replica\",\"note\":\"not what was sent, as the source has garbage before its committed size, which a copy doesn't take\"}}", args);
+            }
+        }
+
         /// none of this needs doing here, as nothing else that's written depends on it.
         /// the commit it stops at is one this knows the size of, whose trailer is still there.
         fn replicate(self: *Self) anyerror!void {
-            const first: u64 = if (self.commits.items.len == 0) 62 else self.commits.items[@intCast(self.rng.below(self.commits.items.len))].size;
+            const first: u64 = if (self.commits.items.len == 0) self.newDatabaseSize() else self.commits.items[@intCast(self.rng.below(self.commits.items.len))].size;
             try self.op("{{\"op\":\"create_database\",\"name\":\"replica\",\"file_id\":\"00000000000000dd\"}}", .{});
             try self.op("{{\"op\":\"read_committed\",\"start\":0,\"end\":{d},\"as\":\"from_source\"}}", .{first});
             try self.op("{{\"op\":\"use\",\"name\":\"replica\"}}", .{});
             try self.op("{{\"op\":\"apply_replicated\",\"start\":0,\"bytes\":\"from_source\"}}", .{});
             try self.op("{{\"op\":\"committed_size\",\"expect\":{d}}}", .{first});
-            try self.op("{{\"op\":\"read_committed\",\"start\":0,\"end\":{d},\"as\":\"from_replica\",\"expect_same\":\"from_source\"}}", .{first});
+            try self.readBackFromReplica(first, "{d}", .{first});
             try self.op("{{\"op\":\"replica_state\",\"as\":\"state\"}}", .{});
             try self.op("{{\"op\":\"use\",\"name\":\"main\"}}", .{});
             try self.op("{{\"op\":\"replication_start\",\"state\":\"state\",\"as\":\"start\",\"expect\":{d}}}", .{first});
@@ -1683,7 +1726,7 @@ fn Gen(comptime HashInt: type) type {
             try self.op("{{\"op\":\"use\",\"name\":\"replica\"}}", .{});
             try self.op("{{\"op\":\"apply_replicated\",\"start\":{{\"var\":\"start\"}},\"bytes\":\"rest\"}}", .{});
             try self.op("{{\"op\":\"committed_size\",\"expect\":{{\"var\":\"end\"}}}}", .{});
-            try self.op("{{\"op\":\"read_committed\",\"start\":0,\"end\":{{\"var\":\"end\"}},\"as\":\"from_replica\",\"expect_same\":\"from_source\"}}", .{});
+            try self.readBackFromReplica(try self.db.committedSize(), "{{\"var\":\"end\"}}", .{});
             try self.op("{{\"op\":\"use\",\"name\":\"main\"}}", .{});
         }
 

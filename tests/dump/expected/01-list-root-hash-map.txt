@@ -1,4 +1,4 @@
-version: 1
+version: 2
 hash size: 20
 hash id: sha1
 file id: c0f0000000000001

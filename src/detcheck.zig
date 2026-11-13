@@ -34,10 +34,22 @@ const SIDECAR_SUFFIX = ".sidecar.json";
 
 // offsets from file-format.md: the file ID is in the database header, the committed
 // size is in the root header, and the trailer is root slot, commit ID, checksum.
+// where the committed size is depends on the version in the header: in version 1 it
+// comes after a copy of the root slot, and in version 2 after four bytes of padding.
 const FILE_ID_OFFSET = 12;
-const ROOT_HEADER_FILE_SIZE_OFFSET = 29;
-const INITIAL_TRAILER_END = 62;
+const VERSION_OFFSET = 4;
+const DATABASE_HEADER_SIZE = 20;
 const TRAILER_SIZE = 25;
+
+/// where the root header's committed size is, by the version in the file's header
+fn fileSizeOffset(db: []const u8) u64 {
+    return if (std.mem.readInt(u16, db[VERSION_OFFSET..][0..2], .big) == 1) 29 else 24;
+}
+
+/// where a new database's trailer ends, which is where its committed bytes start plus a trailer
+fn initialTrailerEnd(db: []const u8) u64 {
+    return fileSizeOffset(db) + 8 + TRAILER_SIZE;
+}
 const TRAILER_COMMIT_ID_OFFSET = 9;
 const TRAILER_CHECKSUM_OFFSET = 17;
 
@@ -235,6 +247,12 @@ fn checkSeveral(io: Io, arena: Allocator, path_a: []const u8, path_b: []const u8
     try stdout.interface.flush();
 }
 
+/// the committed size after the last op, which is null if the database was left closed
+fn lastCommittedSize(sidecar: Sidecar) ?u64 {
+    if (sidecar.ops.len == 0) return sidecar.initial_size;
+    return sidecar.ops[sidecar.ops.len - 1].committed_size;
+}
+
 /// the ops that did something to the file, for comparing scripts that only differ in reads
 fn withoutReads(arena: Allocator, sidecar: Sidecar) !Sidecar {
     var kept: std.ArrayList(Sidecar.Op) = .empty;
@@ -303,11 +321,24 @@ pub fn main(init: std.process.Init) !void {
     if (side_a.ops.len != side_b.ops.len) fail("op counts differ", .{});
     if (a.len != side_a.file_size) fail("{s} is {d} bytes, but its sidecar says {d}", .{ path_a, a.len, side_a.file_size });
     if (b.len != side_b.file_size) fail("{s} is {d} bytes, but its sidecar says {d}", .{ path_b, b.len, side_b.file_size });
-    if (a.len < INITIAL_TRAILER_END) fail("{s} is too short to be a database", .{path_a});
-    if (readBe64(a, FILE_ID_OFFSET) != side_a.file_id) fail("{s}: the file ID is not the sidecar's", .{path_a});
-    if (readBe64(b, FILE_ID_OFFSET) != side_b.file_id) fail("{s}: the file ID is not the sidecar's", .{path_b});
-    checkTrailer(path_a, a, side_a.file_id, INITIAL_TRAILER_END);
-    checkTrailer(path_b, b, side_b.file_id, INITIAL_TRAILER_END);
+    // a file cut off during its creation, which is how a script can leave it, has nothing in it
+    // that differs from run to run
+    if (a.len < DATABASE_HEADER_SIZE or a.len < initialTrailerEnd(a)) {
+        if (!std.mem.eql(u8, a, b)) fail("{s} and {s} are too short to be databases, and they differ", .{ path_a, path_b });
+        if (lastCommittedSize(side_a) != null) fail("{s} is too short to be a database, but its sidecar says it's open", .{path_a});
+        var short_buffer: [256]u8 = undefined;
+        var short_out = Io.File.stdout().writerStreaming(io, &short_buffer);
+        try short_out.interface.print("ok: {d} bytes, too short to be a database, and the same in both\n", .{a.len});
+        try short_out.interface.flush();
+        return;
+    }
+    if (fileSizeOffset(a) != fileSizeOffset(b)) fail("the two files have different versions", .{});
+    // the file's own file ID, which is the script's unless the file was replaced by an input
+    // or created again with another, and it's what every trailer still in the file covers
+    const file_id = readBe64(a, FILE_ID_OFFSET);
+    if (readBe64(b, FILE_ID_OFFSET) != file_id) fail("the two files have different file IDs", .{});
+    checkTrailer(path_a, a, file_id, initialTrailerEnd(a));
+    checkTrailer(path_b, b, file_id, initialTrailerEnd(b));
 
     // the commits whose trailers are still in the file. a transaction starts at the
     // committed size, so the trailers past that point are gone by the time it commits.
@@ -357,8 +388,8 @@ pub fn main(init: std.process.Init) !void {
 
     // the root header agrees with the last op, unless that op left the database closed
     if (previous) |size| {
-        if (readBe64(a, ROOT_HEADER_FILE_SIZE_OFFSET) != size) fail("{s}: the root header's size is not the last committed size", .{path_a});
-        if (readBe64(b, ROOT_HEADER_FILE_SIZE_OFFSET) != size) fail("{s}: the root header's size is not the last committed size", .{path_b});
+        if (readBe64(a, fileSizeOffset(a)) != size) fail("{s}: the root header's size is not the last committed size", .{path_a});
+        if (readBe64(b, fileSizeOffset(b)) != size) fail("{s}: the root header's size is not the last committed size", .{path_b});
         if (a.len < size) fail("{s}: the committed size is past the end of the file", .{path_a});
     }
 
@@ -371,15 +402,15 @@ pub fn main(init: std.process.Init) !void {
         // 2. and 3.
         if (readBe64(a, commit.position + TRAILER_COMMIT_ID_OFFSET) != commit.id_a) fail("op {d}: {s} doesn't have the sidecar's commit ID", .{ commit.op, path_a });
         if (readBe64(b, commit.position + TRAILER_COMMIT_ID_OFFSET) != commit.id_b) fail("op {d}: {s} doesn't have the sidecar's commit ID", .{ commit.op, path_b });
-        checkTrailer(path_a, a, side_a.file_id, commit.position + TRAILER_SIZE);
-        checkTrailer(path_b, b, side_b.file_id, commit.position + TRAILER_SIZE);
+        checkTrailer(path_a, a, file_id, commit.position + TRAILER_SIZE);
+        checkTrailer(path_b, b, file_id, commit.position + TRAILER_SIZE);
 
         @memset(may_differ[@intCast(commit.position + TRAILER_COMMIT_ID_OFFSET)..@intCast(commit.position + TRAILER_SIZE)], true);
 
         // what the sidecar alone should turn this trailer into
         const offset: usize = @intCast(commit.position);
         std.mem.writeInt(u64, patched[offset + TRAILER_COMMIT_ID_OFFSET..][0..8], commit.id_b, .big);
-        std.mem.writeInt(u64, patched[offset + TRAILER_CHECKSUM_OFFSET..][0..8], computeChecksum(side_a.file_id, commit.position, patched[offset..][0..9], commit.id_b), .big);
+        std.mem.writeInt(u64, patched[offset + TRAILER_CHECKSUM_OFFSET..][0..8], computeChecksum(file_id, commit.position, patched[offset..][0..9], commit.id_b), .big);
     }
 
     // 4.

@@ -212,7 +212,7 @@
       {"op":"write_path","on":"c33","path":[{"hash_map_init":{}}],"as":"c33"},
       {"op":"fail"}]}}],"expect_error":"ScriptAbort"},
     {"op":"close"},
-    {"op":"raw_write","offset":20,"bytes":{"hex":"020000000000000f8600000000000014a7"}},
+    {"op":"raw_write","offset":24,"bytes":{"hex":"00000000000014a2"}},
     {"op":"reopen"},
     {"op":"read_path_slot","on":"root","path":[{"array_list_get":-1}],"as":"s41"},
     {"op":"write_path","on":"root","path":["array_list_init","array_list_append",{"write":{"slot":{"var":"s41"}}},{"hash_map_init":{}},{"ctx":{"as":"c42","ops":[

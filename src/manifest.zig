@@ -35,6 +35,7 @@ const Features = struct {
     compaction: bool = false,
     disk_offsets: bool = false,
     replication: bool = false,
+    inputs: bool = false,
 
     fn addOps(self: *Features, ops: Json) void {
         for (ops.array.items) |item| {
@@ -42,7 +43,10 @@ const Features = struct {
             const name = op.get("op").?.string;
             if (std.mem.eql(u8, name, "close") or std.mem.eql(u8, name, "reopen")) self.reopen = true;
             if (std.mem.eql(u8, name, "recover")) self.recover = true;
-            if (std.mem.eql(u8, name, "raw_append") or std.mem.eql(u8, name, "raw_write")) self.raw_file = true;
+            for ([_][]const u8{ "raw_append", "raw_write", "raw_load", "raw_truncate" }) |raw_op| {
+                if (std.mem.eql(u8, name, raw_op)) self.raw_file = true;
+            }
+            if (std.mem.eql(u8, name, "raw_load")) self.inputs = true;
             if (op.get("read_only")) |v| {
                 if (v == .bool and v.bool) self.read_only = true;
             }
@@ -73,7 +77,7 @@ const Features = struct {
     fn print(self: Features, w: *Io.Writer) !void {
         var first = true;
         try w.writeAll("[");
-        inline for (.{ "reopen", "recover", "raw_file", "read_only", "iterators", "rank", "byte_stream", "byte_buffers", "several_databases", "compaction", "disk_offsets", "replication" }) |name| {
+        inline for (.{ "reopen", "recover", "raw_file", "read_only", "iterators", "rank", "byte_stream", "byte_buffers", "several_databases", "compaction", "disk_offsets", "replication", "inputs" }) |name| {
             if (@field(self, name)) {
                 try w.writeAll(if (first) "\"" else ", \"");
                 try w.writeAll(name);
@@ -84,6 +88,22 @@ const Features = struct {
         try w.writeAll("]");
     }
 };
+
+/// the inputs a script loads with raw_load, each once, in the order it first loads them
+fn inputsOf(arena: std.mem.Allocator, ops: Json) ![]const []const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    for (ops.array.items) |item| {
+        const op = item.object;
+        if (!std.mem.eql(u8, op.get("op").?.string, "raw_load")) continue;
+        const input = op.get("input").?.string;
+        var seen = false;
+        for (names.items) |existing| {
+            if (std.mem.eql(u8, existing, input)) seen = true;
+        }
+        if (!seen) try names.append(arena, input);
+    }
+    return names.items;
+}
 
 /// the names of the other databases a script makes, which only the top level can do.
 /// a compaction into main or into one made earlier doesn't make one.
@@ -231,6 +251,14 @@ pub fn main(init: std.process.Init) !void {
                 }
                 try w.writeAll("}");
             }
+        }
+        const inputs = try inputsOf(arena, script.get("ops").?);
+        if (inputs.len > 0) {
+            try w.writeAll(", \"inputs\": [");
+            for (inputs, 0..) |input, input_index| {
+                try w.print("{s}\"inputs/{s}.db\"", .{ if (input_index == 0) "" else ", ", input });
+            }
+            try w.writeAll("]");
         }
         try w.writeAll(", \"collections\": ");
         try collections.print(w);

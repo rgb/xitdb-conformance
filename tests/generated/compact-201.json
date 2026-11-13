@@ -19,7 +19,7 @@
       {"op":"write_path","on":"c2","path":[{"hash_map_init":{}},{"hash_map_get":{"value":{"hex":"0000000000000000000000000000000000000071"}}},{"write":{"bytes":{"hex":"6100f5"}}}]},
       {"op":"read_path","on":"root","path":[],"expect_null":true}]}}]},
     {"op":"close"},
-    {"op":"raw_write","offset":20,"bytes":{"hex":"ffffffffffffffffff"}},
+    {"op":"raw_write","offset":20,"bytes":{"hex":"ffffffff"}},
     {"op":"reopen"},
     {"op":"read_path_slot","on":"root","path":[{"array_list_get":-1}],"as":"s4"},
     {"op":"write_path","on":"root","path":["array_list_init","array_list_append",{"write":{"slot":{"var":"s4"}}},{"hash_map_init":{}},{"ctx":{"as":"c5","ops":[
@@ -369,7 +369,7 @@
       {"op":"read_bytes","on":"r53","expect":"ac","expect_format_tag":{"hex":"6a61"}},
       {"op":"write","on":"c49","data":{"bytes_object":{"value":"amb","format_tag":"pl"}}}]}}]},
     {"op":"close"},
-    {"op":"raw_write","offset":20,"bytes":{"hex":"ffffffffffffffffff"}},
+    {"op":"raw_write","offset":20,"bytes":{"hex":"ffffffff"}},
     {"op":"reopen"},
     {"op":"read_path","on":"root","path":[{"array_list_get":1},{"hash_map_get":{"value":{"hex":"0000000000000000000000000000000000000001"}}}],"expect_null":true},
     {"op":"read_path_slot","on":"root","path":[{"array_list_get":-1}],"as":"s54"},
