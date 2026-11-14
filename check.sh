@@ -509,6 +509,12 @@ fresh_copy
 touch "$COPY/inputs/not-an-input.db"
 expect_drift "an extra input" "has no source in tests/inputs"
 fresh_copy
+flip_byte "$COPY/samples/haxy/users-index.db" 100
+expect_drift "a changed sample" "the sample haxy/users-index.db differs"
+fresh_copy
+printf ' ' >> "$COPY/samples/haxy/users-index.txt"
+expect_drift "a changed listing of a sample" "dump's listing of the sample haxy/users-index has drifted"
+fresh_copy
 printf ' ' >> "$COPY/valid/worked-example.json"
 expect_drift "a changed script" "worked-example differs from the script"
 fresh_copy
@@ -577,6 +583,7 @@ failing_fixtures=$(find fixtures/failing -name '*.json' | wc -l | tr -d ' ')
 generated=$(find tests/generated -name '*.json' | wc -l | tr -d ' ')
 expect_report "$valid_fixtures with the same bytes, 0 with different bytes, 0 that fail"
 expect_report "$failing_fixtures still fail, and 0 don't"
+expect_report "$(grep -c '^[^#]' tests/zig-only.txt) run on Zig, and 0 fail"
 expect_report "5 as the original does, and 0 as the port does"
 expect_report "19 as they were, and 0 changed"
 expect_report "$generated scripts the same, and 0 different"

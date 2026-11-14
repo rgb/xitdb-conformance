@@ -214,7 +214,7 @@ The snapshot:
 - `write_path` does not change the cursor it is called on. Its result is a new cursor, bound by `as`.
 - `slot`, `count`, `write_if_empty` and the `read_*` ops go by the snapshot, however stale it is, as do
   `read_path` and `read_path_slot`. So `write_if_empty` on a cursor whose snapshot is empty overwrites a value it
-  can't see. From Zig commit `185af01` on, it goes by the slot as it is now instead
+  can't see. On the fixes branch, `fix-findings-v2` at `bd6abc3`, it goes by the slot as it is now instead
   ([section 11](#what-a-later-zig-changes)).
 - `write_path` starts by reading the slot at the cursor's position again, if it has one, so its result sees the
   present.
@@ -873,11 +873,12 @@ All of these look like mistakes and all of them are what Zig does. `overwriting-
 ### What a later Zig changes
 
 Apart from what this says, all of this document is what Zig does at `89da8e7`. The manifest gives each fixture's
-`zig_commit`, and its expected file is what that commit does. These fixtures are from `185af01`, as they need its bytes:
+`zig_commit`, and its expected file is what that commit does. These fixtures are from the fixes branch, `fix-findings-v2`
+at `bd6abc3`, on `89da8e7`, as they need its bytes:
 
 | Fixture | What it needs from there |
 |---|---|
-| `write-if-empty-emptied-slot`, `path-api-edges--port` | Finding 17: `write_if_empty` goes by the slot as it is now, not the snapshot. If the cursor has a position, it reads the slot there when it's called, and it writes if that slot is empty. Empty means the tag is `none` and `full` isn't set, so a slot written with `{"slot": null}` isn't empty. A root cursor is as it was. So section 4 and item 9 above don't hold for them |
+| `write-if-empty-emptied-slot`, `path-api-edges--port` | Finding 17: `write_if_empty` goes by the slot as it is now, not the snapshot. If the cursor has a position, it reads the slot there when it's called, and it writes if that slot is empty, or if the cursor's own slot is empty and the slot now is a `none`, as an append leaves it. Empty means the tag is `none` and `full` isn't set, so a slot written with `{"slot": null}` isn't empty. A root cursor is as it was. So section 4 and item 9 above don't hold for them |
 | `every-construct-linked--port` | Finding 22: a concat freezes after its join, so what comes after it in that transaction copies the joined nodes |
 
 A runner's calls don't change for any of this, only what the engine under them does.

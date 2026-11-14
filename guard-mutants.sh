@@ -392,7 +392,7 @@ end_mutant
 begin_mutant recover-opens-damaged-commit
 patch_run "            var end: usize = bytes.len;
 " "            var end: usize = bytes.len;
-            const claimed: u64 = std.mem.readInt(u64, bytes[ROOT_HEADER_START + 9 ..][0..8], .big);
+            const claimed: u64 = std.mem.readInt(u64, bytes[@intCast(fileSizeStart(version))..][0..8], .big);
 "
 patch_run "if (trailerVerifies(bytes, file_id, end)) break end;" "if (end == claimed or trailerVerifies(bytes, file_id, end)) break end;"
 end_mutant
@@ -410,8 +410,8 @@ patch_run "            const found: usize = while (end >= smallest) : (end -= 1)
 end_mutant
 
 begin_mutant recover-leaves-root-header
-patch_run "            try self.writeRaw(ROOT_HEADER_START, &root_header);
-            removeTrailersFrom" "            _ = &root_header;
+patch_run "            try self.writeRaw(fileSizeStart(version), &file_size);
+            removeTrailersFrom" "            _ = &file_size;
             removeTrailersFrom"
 end_mutant
 

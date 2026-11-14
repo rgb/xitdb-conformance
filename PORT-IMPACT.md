@@ -11,7 +11,7 @@ fixtures are now, and each section after it says why.
 `./impact.sh` fills in the lists below from every script in the repository. The number after a name is how many ops. The
 gate fails if the lists aren't what the scripts do, so a new script that relies on one of these shows up here. A
 `<name>--<commit>` script in `tests/from-other-zig` isn't listed, as it's a version of one that is, and the Zig at
-`6b93af1` can't get to the end of it.
+`89da8e7` can't get to the end of it.
 
 **Three of the changes were tried.** `./impact.sh --prototypes` makes findings 12, 17 and 23 in a scratch copy of Zig
 and runs every script against it. Where this document says "the prototype", that's what ran, and everything else in a
@@ -41,30 +41,30 @@ refuse, unless the script says so with `expect_error`. So a fixture can't rely o
 and the gate runs them all that way.
 
 **A script that does what the port refuses isn't a fixture.** It goes on running on Zig, in the gate and `mutants.sh`, as
-what Zig does hasn't changed. `tests/zig-only.txt` lists all 47, with the gate holding it to what `run --port` refuses. That's
-33 of the 42 generated scripts, and these 14, each with a version of its own in `tests/port-variants`:
+what Zig does hasn't changed. `tests/zig-only.txt` lists all 48, with the gate holding it to what `run --port` refuses. That's
+33 of the 42 generated scripts, and these 15, each with a version of its own in `tests/port-variants`:
 
 | Script | Its variant `<name>--port` | Expected file from |
 |---|---|---|
-| `04-rollback` | The transaction that used to commit after a failed op is poisoned, and rolled back. A new one shows that an op that failed before writing anything poisons nothing | `6b93af1` |
-| `overwriting-committed-bytes` | Each write through a kept cursor raises `StaleCursor`, an init too, and nothing is overwritten. The writes that only skip an init part raise `ImmutableBytes` (D24): the list's through a fresh cursor, with nothing written before them, and the map's in a transaction of its own, which it poisons, as the get that adds a key writes the entry first. The earlier moment is as it was. It also has a read and a write through a cursor from a rolled-back transaction, and ends with a write from before a `db_freeze` | `6b93af1` |
-| `path-api-edges` | The part after a remove raises `PathPartMustBeAtEnd`. What poisons is in a transaction of its own, so that the other corners go on committing. `write_if_empty` goes by the slot as it is now | `185af01` |
-| `path-api-edges-sorted` | The same | `6b93af1` |
-| `every-construct-linked` | What a concat gives back counts as made before it, so it and the cursors from before it raise `StaleCursor`, on each kind of write, an init included. They can still be read. The way on is an init through the transaction's body, and finding 22's pin goes that way | `185af01` |
-| `every-construct-sorted` | Writing a key through a pair raises `CursorNotWriteable` | `6b93af1` |
-| `recovery-open-errors` | `UntrustedRootHeader` where the root header can't be trusted, and then `recover`, down to losing the last commit and going on from there | `6b93af1` |
-| `replicate-bad-trailer`, `replicate-failed-first-sync` | The same, on a replica | `6b93af1` |
-| `compact-roots` | The two compactions of a history with no last moment raise `EmptyLastMoment`, and so does one into a target with something in it. Written, the last moment compacts. A new case has three moments written and a fourth appended | `6b93af1` |
-| `held-init-after-freeze`, `held-init-after-root-copy` | Each init through a cursor held from before a freeze raises `StaleCursor` (D24), and the way on is from the transaction's body or through a cursor made from it since the freeze. Nothing is lost, and the clone is as it was | `6b93af1` |
-| `overwriting-committed-bytes-linked`, `overwriting-committed-bytes-sorted` | The write that skips an init part raises `ImmutableBytes`. Through a fresh cursor at the committed collection nothing is written before it, and the same write with the init goes into a copy. Through the moment's map, as in the original, the get copies first, so the transaction is poisoned and rolled back | `6b93af1` |
+| `04-rollback` | The transaction that used to commit after a failed op is poisoned, and rolled back. A new one shows that an op that failed before writing anything poisons nothing | `89da8e7` |
+| `overwriting-committed-bytes` | Each write through a kept cursor raises `StaleCursor`, an init too, and nothing is overwritten. The writes that only skip an init part raise `ImmutableBytes` (D24): the list's through a fresh cursor, with nothing written before them, and the map's in a transaction of its own, which it poisons, as the get that adds a key writes the entry first. The earlier moment is as it was. It also has a read and a write through a cursor from a rolled-back transaction, and ends with a write from before a `db_freeze` | `89da8e7` |
+| `path-api-edges` | The part after a remove raises `PathPartMustBeAtEnd`. What poisons is in a transaction of its own, so that the other corners go on committing. `write_if_empty` goes by the slot as it is now | `bd6abc3` |
+| `path-api-edges-sorted` | The same | `89da8e7` |
+| `every-construct-linked` | What a concat gives back counts as made before it, so it and the cursors from before it raise `StaleCursor`, on each kind of write, an init included. They can still be read. The way on is an init through the transaction's body, and finding 22's pin goes that way | `bd6abc3` |
+| `every-construct-sorted` | Writing a key through a pair raises `CursorNotWriteable` | `89da8e7` |
+| `recovery-open-errors`, `recovery-open-errors-version-1` | `UntrustedRootHeader` where the root header can't be trusted, and then `recover`, down to losing the last commit and going on from there, in version 2 and on a version 1 file | `89da8e7` |
+| `replicate-bad-trailer` | The same, on a replica | `89da8e7` |
+| `compact-roots` | The two compactions of a history with no last moment raise `EmptyLastMoment`, and so does one into a target with something in it. Written, the last moment compacts. Since `89da8e7` one appended and never written is a moment set to nothing, which compacts, and a version 1 history whose last slot is truly empty is refused | `89da8e7` |
+| `held-init-after-freeze`, `held-init-after-root-copy` | Each init through a cursor held from before a freeze raises `StaleCursor` (D24), and the way on is from the transaction's body or through a cursor made from it since the freeze. Nothing is lost, and the clone is as it was | `89da8e7` |
+| `overwriting-committed-bytes-linked`, `overwriting-committed-bytes-sorted` | The write that skips an init part raises `ImmutableBytes`. Through a fresh cursor at the committed collection nothing is written before it, and the same write with the init goes into a copy. Through the moment's map, as in the original, the get copies first, so the transaction is poisoned and rolled back | `89da8e7` |
 
-"From `6b93af1`" means the gate runs it, and that `185af01` gives the same bytes. Recovering leaves what Zig writes for the
+"From `89da8e7`" means the gate runs it, and that the fixes branch at `bd6abc3` gives the same bytes. Recovering leaves what Zig writes for the
 script without the damage: for `recovery-open-errors`, that was compared with a script of only what came after, and only the
 last trailer's commit ID and checksum differ.
 
-**Five scripts only the port can run** are in `tests/port-variants` too. What they do is an undefined use in Zig, so there's no
-Zig script to make a variant of, and their oracle is Zig on the same script without what the port refuses. That was compared on
-each kind, and each is the same bytes at `185af01`. They're there so that `guard-mutants.sh` finds every guard it gets wrong
+**Six scripts only the port can run** are in `tests/port-variants` too. What they do is an undefined use in Zig, or the port's own
+`recover`, so there's no Zig script to make a variant of, and their oracle is Zig on the same script without what the port refuses,
+or `run --port`'s recovery. That was compared on each kind, and each is the same bytes at `bd6abc3`. They're there so that `guard-mutants.sh` finds every guard it gets wrong
 noticed by two fixtures, at least:
 
 | Script | What it pins |
@@ -72,7 +72,8 @@ noticed by two fixtures, at least:
 | `write-kv-pair-slot--port`, `write-sorted-kv-pair-slot--port` | Every way to write a structural slot raises `StructuralSlot` (finding 3), apart from `write` and `write_path` below the root with no transaction going, where `ExpectedTxStart` comes first. They're versions of the scripts with those names in `tests/invalid`. The sorted one also writes a key through a pair by each way to write, the byte writer included |
 | `rolled-back-reads--port` | Every way to read through what a rolled-back transaction made: a cursor, a read-only cursor, a view made before or after the rollback, an iterator through one, and `next` on one made in it |
 | `stale-cursors--port` | Every way to write through each kind of stale cursor: from an earlier transaction, from before a `db_freeze`, from before a concat, and from a rolled-back transaction. And the reads, the init and the concat's result that stay valid |
-| `compact-sliced-history--port` | A list root sliced to nothing, and one whose last element was appended in a callback that wrote nothing, as `gen` found (finding 28) |
+| `compact-sliced-history--port` | A list root sliced to nothing, as `gen` found, and a version 1 list root whose only element is truly empty (finding 28). One whose last element was appended in a callback that wrote nothing compacts since `89da8e7` |
+| `recover-without-first-commit--port` | `recover` on a database without a first commit, in both versions: a file cut off during its creation, and a full copy that didn't finish, which it scans as any other (the director's ruling on conformance-09) |
 
 `every-construct-sorted--port` also tries the byte writer on a key through a pair, and `overwriting-committed-bytes--port` now
 ends with a write through a cursor from before a `db_freeze`. `body-write-after-freeze--port` is a variant of a script that's
@@ -85,7 +86,7 @@ same bytes, and valid on both. **`write-if-empty-emptied-slot`** and `write-if-e
 **`gen-fixed.sh` also writes the 42 seeds again with `--port-safe`**, as `safe-*`. They're fixtures, and valid on both.
 
 **What the port fails at the start of its brief**, before any of this is in it: the 14 variants, and
-`write-if-empty-emptied-slot`. Those are what fail without `--port` on `6b93af1` too, and everything else passes both ways.
+`write-if-empty-emptied-slot`. Those are what fail without `--port` on the original too, and everything else passes both ways.
 
 ## Summary
 
@@ -96,8 +97,8 @@ same bytes, and valid on both. **`write-if-empty-emptied-slot`** and `write-if-e
 | [3](#finding-3-a-structural-slot-as-a-value) | `write` rejects structural tags | 0, and 3 that `run` refuses | 0 | Nothing |
 | [12](#finding-12-parts-after-a-remove) | Parts after a remove are an error | 2 | 0 | Variant, with an error that already exists |
 | [16](#finding-16-a-failed-op-that-left-something-behind) | A failed op that wrote something poisons its transaction | 3 | 12 | Variant, `safe-*` |
-| [17](#finding-17-write_if_empty-and-the-snapshot) | `write_if_empty` goes by the slot as it is now | 2 | 4 | Done: regenerated from `185af01` |
-| [22](#finding-22-the-concat) | A concat freezes after its join | 1 changes | 1 changes | Variant, from `185af01` |
+| [17](#finding-17-write_if_empty-and-the-snapshot) | `write_if_empty` goes by the slot as it is now, and writes where the cursor's slot is empty and the slot now is a `none` | 2 | 4 | Done: regenerated from `bd6abc3` |
+| [22](#finding-22-the-concat) | A concat freezes after its join | 1 changes | 1 changes | Variant, from `bd6abc3` |
 | [23](#finding-23-a-cursors-freeze) | A freeze holds for every cursor | 2 of 6 change, in the prototype | 2 of 17 change | Deferred, so nothing happens |
 | [28](#finding-28-compacting-a-history-with-no-last-moment) | Compacting a history with no last moment is refused | 1 | 0 | Variant |
 | [29](#finding-29-an-init-on-a-held-cursor-after-a-freeze) | Nothing: an init on a held cursor after a freeze changes a clone that shares its record, on both | 1 | 0 | Nothing, and a fixture pins it |
@@ -219,31 +220,35 @@ header back too. A port may go either way on that shape, and no fixture has it.
 
 ## Finding 17: `write_if_empty` and the snapshot
 
-The port goes by the slot as it is now. Nothing raises an error, but what's written changes, so **no script can show this
-without a Zig that has the change**, which is `185af01` on the `xitdb` session's branch. There are two directions:
+The port goes by the slot as it is now: it writes when that slot is empty, or when the cursor's own slot is empty and the slot
+now is a `none`, and it holds back otherwise. The second half came on 2026-11-14, when the `xitdb` session found that the branch
+held back after an append, whose slot in the file is a `none` marked full, which is what makes an unwritten element count, for
+array lists since `89da8e7`, while the cursor's own copy is empty. Upstream writes there, and so does the port (`write-if-empty-append`).
+Nothing raises an error, but what's written changes, so **no script can show this without a Zig that has the change**, which is
+`fix-findings-v2` at `bd6abc3`, on `89da8e7`. There are two directions:
 
-Where the snapshot is empty and the slot isn't, so Zig at `6b93af1` overwrites a value it can't see, and the port leaves it:
+Where the snapshot is empty and the slot holds a value, so the original overwrites a value it can't see, and the port leaves it:
 
 <!-- list 17-overwrites -->
 - `tests/generated`: compact-203 (1), gen-16 (1), reads-101 (1), reads-107 (1)
 - `tests/valid`: path-api-edges (1)
 <!-- end -->
 
-Where the snapshot has something and the slot is empty, so Zig at `6b93af1` holds back, and the port writes:
+Where the snapshot has something and the slot is empty, so the original holds back, and the port writes:
 
 <!-- list 17-holds-back -->
 - `tests/from-other-zig`: write-if-empty-emptied-slot (3)
 <!-- end -->
 
-**This has been done.** `tests/zig-commits.txt` says which expected files come from `185af01`. The prototype's prediction held
+**This has been done.** `tests/zig-commits.txt` says which expected files come from `bd6abc3`. The prototype's prediction held
 for every script. The fixtures have the first direction in these two scripts, and in no generated one, as `gen --port-safe` keeps
 off it:
 
-| Script | On `185af01` | What happened |
+| Script | On the fixes branch | What happened |
 |---|---|---|
 | `compact-203`, `gen-16`, `reads-107`, `reads-101` | different bytes for the first three, and the same for the last | Only for Zig, as each has stale writes too |
-| `path-api-edges` | fails at the read after the write, which expects the overwritten value | Only for Zig, as the gate and `mutants.sh` run it on `6b93af1`. `path-api-edges--port` has that read and the note before it turned round |
-| `write-if-empty-emptied-slot` | new | The second direction, in `tests/from-other-zig` as it fails on `6b93af1` |
+| `path-api-edges` | fails at the read after the write, which expects the overwritten value | Only for Zig, as the gate and `mutants.sh` run it on the original. `path-api-edges--port` has that read and the note before it turned round |
+| `write-if-empty-emptied-slot` | new | The second direction, in `tests/from-other-zig` as it fails on the original. Its `none` written behind a cursor made on an empty slot writes, by the refined rule, as on the original |
 | `write-if-empty-unreachable` | new | Where it looks like the second direction and isn't, in `tests/valid` as it has the same bytes on both |
 
 **The second direction can't be reached through the wrappers alone in one transaction.** A remove empties the map's own
@@ -254,7 +259,7 @@ with the slot it captured. **A script can't do that**: `run` refuses to write a 
 `write` rejects one. So `write-if-empty-emptied-slot` writes a none, which leaves the map working, and a uint, which shows
 that it wrote, as reading that key then raises `UnexpectedTag`.
 
-**A cursor from a rolled-back transaction** has a position past the end of the file. At `185af01`, `write_if_empty` through
+**A cursor from a rolled-back transaction** has a position past the end of the file. On the fixes branch, `write_if_empty` through
 one raises the reader's error, where it used to do nothing if the snapshot had something. No script here can do that,
 because `run` refuses every use of such a cursor (`tests/invalid/cursor-from-rolled-back-transaction`, section 10). So it
 isn't in the lists under finding 1 or finding 24, and nothing happens to any script. The port's guard for reads through a
@@ -341,8 +346,10 @@ nothing is lost.
 
 ## Finding 28: compacting a history with no last moment
 
-Zig compacts a list at the root with no elements, or whose last element was appended and never written, to an empty root. So
-the list goes, and every moment written before that last one. The port refuses it with `EmptyLastMoment`, before writing
+Zig compacts a list at the root with no elements, or whose last slot is truly empty, to an empty root. So the list goes, and
+every moment written before that last one. Since `89da8e7` an element appended and never written is a `none` slot marked full,
+a moment set to nothing, which compacts, so a truly empty last slot is only in a version 1 file written before it, which
+`compact-roots` and `compact-sliced-history--port` have on inputs. The port refuses it with `EmptyLastMoment`, before writing
 anything (D22 item 7). Every `compact` of such a history:
 
 <!-- list 28 -->
@@ -482,15 +489,57 @@ whose checksum verifies (D22). So nothing is dropped except by that call. Every 
 | `recovery-open-errors`: a bad magic number | `InvalidDatabase` | The same error, as this isn't a database |
 | `recovery-open-errors`: a committed size smaller than a new database, past the end of the file, or that doesn't end at a trailer | `InvalidDatabase`, `TruncatedDatabase`, `InvalidDatabase` | `UntrustedRootHeader` |
 | `recovery-open-errors`: a changed root slot in the last trailer | `InvalidDatabase` | `UntrustedRootHeader`, and `recover` loses that commit |
-| `replicate-bad-trailer`: a last trailer with its commit ID and checksum overwritten | `InvalidDatabase` | `UntrustedRootHeader`, as its magic number is good, and `recover` goes back to 62 |
-| `replicate-failed-first-sync`: a file a byte short of what its root header says, after a failed sync | `TruncatedDatabase` | `UntrustedRootHeader`, and `recover` goes back to 62 |
+| `replicate-bad-trailer`: a last trailer with its commit ID and checksum overwritten | `InvalidDatabase` | `UntrustedRootHeader`, as its magic number is good, and `recover` goes back to 57 |
+| `recovery-open-errors-version-1`: the same on a version 1 file, with its committed size at 29 | the same | the same, and `recover` writes the size at 29 and leaves the copy of the root slot |
 | `op-after-failed-reopen`, `reopen-error-not-handled`, `reopen-wrong-error` | `InvalidDatabase`, as all three have a bad magic number | The same error, so they still fail |
 
 **The variants of those three** expect the error, then `recover`, then the reads. A `reopen` writes nothing, so that's the same
 as in Zig. `recover` isn't in Zig, so `run --port` does it itself, on the file's bytes. What it leaves is exactly a file cut off
 at that trailer, with a root header that says so, and that's what the port's has to leave.
 
-`recovery-torn-root-slot` isn't affected, as the root slot in the header is never read.
+`recovery-torn-root-slot` and `recovery-garbage-padding` aren't affected, as what's before the committed size is never read.
+`replicate-failed-first-sync` was here until `89da8e7`: a failed sync at 0 leaves a database without a first commit now, which
+the original opens, and the port does what the original does there (D31 item 4), so it's a plain fixture and its variant is
+gone. `recover` on such a database scans as on any other (`recover-without-first-commit--port`).
+
+## Upstream's 89da8e7: what it closes, narrows or leaves
+
+Upstream moved six commits past `6b93af1` on 2026-11-10 (D31). Each of the port's differences was run again on `89da8e7`
+(`second-zig.sh` and the step report of conformance-09) and sorted by what upstream's change does to it. **Closes** means
+the original now does what the port does, so the difference goes and its variant folds back into a plain fixture.
+**Narrows** means part of it closes and the rest stays, on a smaller set of files or cases. **Leaves** means upstream didn't
+touch it.
+
+| Entry | Finding | Upstream's change | What happens |
+|---|---|---|---|
+| `tests/port-differs/none-into-buffer` | 8 | none | Leaves |
+| `tests/port-differs/stream-none` | 21 | none | Leaves |
+| `tests/port-differs/stream-short-no-position` | 9 | `71ee0cf`: a key-only entry's key from `read_key_value_pair` has the entry's position | Narrows: the key from `{"sorted_map_get": {"key": ...}}` still has no position and still raises `ExpectedSlotPosition`, and the half through `read_key_value_pair` streams in both, which `stream-short-set-key` pins as a plain fixture |
+| `tests/port-differs/stream-short-overwritten` | 9 | none: a slot overwritten since the cursor was made is still read from the file | Leaves |
+| `tests/port-differs/iterator-past-slice` | 26 | `89da8e7`: an append writes a `none` slot marked full, which counts and which the iterator gives | Narrows to a version 1 file with a truly empty slot inside a list's size, where the original at `89da8e7` still skips it and gives what's past the end (1, then 2, and after an append 1, 9 and 3), and the port gives 1, and 1 and 9. It's remade on `inputs/v1-sliced-holes`. On a file the original writes now, the two agree (`unwritten-elements`), and so they do on a version 1 file with nothing past the end (`version-1-lists`) |
+| `replicate-failed-first-sync`, and its variant `--port` | D19 | `52c7283` and `92a926e`: a copy from 0 that fails leaves a database without a first commit, which opens, and `replica_state` gives zero and zero for it | Closes: the port does what the original does there (D31 item 4). The variant is gone and the script is a plain fixture |
+| `recovery-open-errors`, `--port` | D19 | `bdaa55e`: version 2 opens | Leaves, as what can't be trusted is the same. `InvalidVersion` is tested at 0 and 3, and `recovery-open-errors-version-1` with its variant is the same on a version 1 file, whose committed size is at 29 |
+| `replicate-bad-trailer`, `--port` | D19 | none: a trailer whose checksum fails after a sync that succeeded isn't a database without a first commit | Leaves |
+| `compact-roots`, `--port` | 28 | `89da8e7`: a last moment appended and never written is a `none` slot marked full, a moment set to nothing | Narrows to a history with no moments and a last slot that's truly empty, which only a version 1 file has (`inputs/v1-unwritten-last`, a new case in both). A history whose last element was appended and never written now compacts in both |
+| `compact-sliced-history--port` | 28 | the same | Narrows: the list sliced to nothing stays refused, and its element appended in a callback that wrote nothing now compacts in both |
+| `04-rollback`, `--port` | 16 | none | Leaves |
+| `overwriting-committed-bytes`, `-linked`, `-sorted`, `--port` | 1, 13, D24 | none | Leave |
+| `path-api-edges`, `-sorted`, `--port` | 12, 16, 17 | none | Leave. `path-api-edges--port`'s expected file is from the fixes branch at `bd6abc3` |
+| `every-construct-linked`, `--port` | 22, D24 | none | Leaves. Its expected file is from `bd6abc3` |
+| `every-construct-sorted`, `--port` | 2 | none | Leaves |
+| `held-init-after-freeze`, `held-init-after-root-copy`, `--port` | 29, 30, D24 | none | Leave |
+| `body-write-after-freeze--port` | D24 | none | Leaves |
+| `write-kv-pair-slot--port`, `write-sorted-kv-pair-slot--port` | 3 | none | Leave |
+| `rolled-back-reads--port`, `stale-cursors--port` | D16, D18 | none | Leave |
+| `write-if-empty-emptied-slot` | 17 | `89da8e7`: an append leaves a `none` marked full where the cursor's slot is empty | Leaves, with the rule refined (below): it writes now where a `none` was written behind a cursor made on an empty slot, as upstream does. From `bd6abc3` |
+| the 33 generated scripts in `tests/zig-only.txt` | 1, 16, D24 | none | Leave |
+| `recover` | D19 | `92a926e`: a database without a first commit is one the original opens | Leaves, as an explicit call that scans as it always did, on that state too (the director's ruling): `recover-without-first-commit--port` |
+
+**Finding 17's rule is refined** for the fixes branch and the port, on the `xitdb` session's finding that the branch's
+`writeIfEmpty` held back after an append or an insert, whose slot in the file is a `none` marked full while the cursor's own
+copy is empty: it writes when the slot as it is now is empty, or when the cursor's own copy is empty and the slot now is a
+`none`, and it holds back whenever the slot holds a value, and whenever the cursor's copy holds something and the slot isn't
+empty. `write-if-empty-append` is the append case on both lists, the same on `89da8e7` and on the branch.
 
 ## What this doesn't cover
 

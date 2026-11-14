@@ -170,30 +170,32 @@ try_mutant compact-first-separator-only-looked-up "s.* = try self.remapSlot(sep)
 # replication
 try_mutant replica-always-replaced "return if (trailer.checksum == state.checksum) state.committed_size else 0;" "return if (trailer.checksum == state.checksum and false) state.committed_size else 0;"
 try_mutant replica-never-replaced "return if (trailer.checksum == state.checksum) state.committed_size else 0;" "return if (trailer.checksum == state.checksum or true) state.committed_size else 0;"
-try_mutant first-sync-keeps-latest-root-header ".file_size = end, .root = trailer.root" ".file_size = try self.committedSize(), .root = trailer.root"
-try_mutant first-sync-keeps-latest-root-slot ".file_size = end, .root = trailer.root" ".file_size = end, .root = if (end == end) try self.readRootSlot() else trailer.root"
+try_mutant first-sync-keeps-latest-root-header "try writer.writeInt(u64, end, .big);" "try writer.writeInt(u64, try self.committedSize(), .big);"
+# since 92a926e a copy at 0 writes a root header of its own, and only fills the size in at the end
+try_mutant copy-at-0-takes-the-root-header-sent "try reader.readSliceAll(buffer[0 .. position - ROOT_HEADER_START]);" "try reader.readSliceAll(buffer[0 .. position - ROOT_HEADER_START]); { var sent = self.core.writer(); try sent.seekTo(ROOT_HEADER_START); try sent.interface.writeAll(buffer[0 .. position - ROOT_HEADER_START]); }"
+try_mutant copy-at-0-takes-the-padding-sent "try reader.readSliceAll(buffer[0 .. position - ROOT_HEADER_START]);" "try reader.readSliceAll(buffer[0 .. position - ROOT_HEADER_START]); { var sent = self.core.writer(); try sent.seekTo(ROOT_HEADER_START); try sent.interface.writeAll(buffer[0 .. position - ROOT_HEADER_START - byteSizeOf(u64)]); }"
+try_mutant copy-at-0-header-not-checked "if (len < position) return error.InvalidRange;" "if (len < position and false) return error.InvalidRange;"
 try_mutant replica-ahead-not-noticed "if (state.committed_size > try self.committedSize()) return 0;" "if (state.committed_size > try self.committedSize() and false) return 0;"
 try_mutant read-past-committed-allowed "if (start > end or end > try self.committedSize()) return error.InvalidRange;" "if (start > end) return error.InvalidRange;"
 try_mutant read-backwards-allowed "if (start > end or end > try self.committedSize()) return error.InvalidRange;" "if (end > try self.committedSize()) return error.InvalidRange;"
-try_mutant read-inside-root-header-allowed "if (start > 0 and start < ROOT_HEADER_END) return error.InvalidRange;" "if (start > 0 and start < ROOT_HEADER_END and false) return error.InvalidRange;"
+try_mutant read-inside-root-header-allowed "if (start > 0 and start < data_start) return error.InvalidRange;" "if (start > 0 and start < data_start and false) return error.InvalidRange;"
 try_mutant apply-anywhere-allowed "} else return error.InvalidRange;
 
-            var writer = self.core.writer();
-            try writer.seekTo(start);
-            try reader.streamExact64" "}
+            // copy through a buffer" "}
 
-            var writer = self.core.writer();
-            try writer.seekTo(start);
-            try reader.streamExact64"
-try_mutant apply-at-0-keeps-what-was-there "try self.core.setLength(0);" "_ = &self.core;"
+            // copy through a buffer"
+# the first setLength(0) is init's, for a file cut off during its creation
+try_mutant apply-at-0-keeps-what-was-there "try self.core.setLength(0);" "_ = &self.core;" 2
+try_mutant cut-file-not-created-again "try self.core.setLength(0);" "_ = &self.core;" 1
 try_mutant apply-keeps-leftovers "// discard anything past the committed bytes, such as the remains of an interrupted sync
                 try self.truncate();" "// discard anything past the committed bytes, such as the remains of an interrupted sync"
-try_mutant apply-at-0-keeps-the-old-header "try self.core.sync();
-                self.header = try self.readAndValidateHeader();" "try self.core.sync();
-                _ = try self.readAndValidateHeader();"
-try_mutant apply-leaves-root-header "try self.core.sync();
-                try self.writeRootHeader(trailer.root);" "try self.core.sync();
-                _ = trailer;"
+try_mutant apply-at-0-keeps-the-old-header "self.header = header;
+                try self.writeHeaders();" "_ = header;
+                try self.writeHeaders();"
+try_mutant apply-leaves-root-header "_ = try self.readRootTrailer(start + len);
+                try self.core.sync();
+                try self.writeRootHeader();" "_ = try self.readRootTrailer(start + len);
+                try self.core.sync();"
 try_mutant trailer-checksum-not-checked "if (trailer.checksum != RootTrailer.computeChecksum(self.header.file_id, trailer_pos, trailer.root, trailer.commit_id)) return error.InvalidDatabase;" "if (trailer.checksum != RootTrailer.computeChecksum(self.header.file_id, trailer_pos, trailer.root, trailer.commit_id) and false) return error.InvalidDatabase;"
 
 if [ "$tried" -eq 0 ]; then

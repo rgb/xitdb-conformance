@@ -15,6 +15,9 @@
 #
 # --regenerate takes those fixtures' expected files from that commit, and records it in
 # tests/zig-commits.txt. Commit that, and then run ./fixtures.sh for the manifest.
+#
+# With SECOND_ZIG_KEEP set to a folder, it also keeps there what each part wrote, and a line for
+# each script saying how it went, which is what follow.sh compares from one commit to the next.
 
 set -eu
 cd "$(dirname "$0")"
@@ -35,8 +38,28 @@ OUT=${SECOND_ZIG_OUT:-out/second-zig}
 WORK=$HERE/$OUT/$SHORT
 REPO=$WORK/repo/conformance
 
+KEEP=${SECOND_ZIG_KEEP:-}
 rm -rf "$WORK"
 mkdir -p "$WORK/xitdb" "$REPO" "$WORK/runs"
+if [ -n "$KEEP" ]; then
+    rm -rf "$KEEP"
+    mkdir -p "$KEEP/valid" "$KEEP/zig-only" "$KEEP/gen"
+    : > "$KEEP/valid.txt"
+    : > "$KEEP/zig-only.txt"
+    : > "$KEEP/failing.txt"
+    : > "$KEEP/differs.txt"
+    : > "$KEEP/undefined.txt"
+fi
+
+# what follow.sh goes by, if it's keeping things: a line for the script, and its files
+keep() { # list, name, outcome
+    [ -n "$KEEP" ] || return 0
+    echo "$2 $3" >> "$KEEP/$1.txt"
+    for file in "$WORK/runs/$2".db "$WORK/runs/$2".*.db "$WORK/runs/$2".db.sidecar.json; do
+        [ -e "$file" ] && cp "$file" "$KEEP/$1/"
+    done
+    return 0
+}
 git -C "$CHECKOUT" archive "$COMMIT" | tar -x -C "$WORK/xitdb"
 git archive HEAD build.zig build.zig.zon src tests | tar -x -C "$REPO"
 
@@ -105,11 +128,14 @@ for script in "$FIXTURES"/valid/*.json; do
     if ! "$BIN/run" "$script" "$WORK/runs/$name.db" --allow-port-differences --port > /dev/null 2> "$WORK/runs/$name.err"; then
         failed=$((failed + 1))
         echo "fails: $name: $(head -n 1 "$WORK/runs/$name.err" | cut -c1-160)"
+        keep valid "$name" "fails: $(head -n 1 "$WORK/runs/$name.err" | sed 's/, which started at.*//' | cut -c1-160)"
     elif "$BIN/detcheck" "$WORK/runs/$name.db" "$FIXTURES/valid/$name.db" > /dev/null 2> "$WORK/runs/$name.err"; then
         same=$((same + 1))
+        keep valid "$name" passes
     else
         different=$((different + 1))
         echo "different: $name: $(head -n 1 "$WORK/runs/$name.err" | sed 's/^detcheck: FAILED: //' | cut -c1-120)"
+        keep valid "$name" passes
     fi
     rm -f "$WORK/runs/$name".*
 done
@@ -117,6 +143,32 @@ echo "$same with the same bytes, $different with different bytes, $failed that f
 if [ "$skipped" -gt 0 ]; then
     echo "$skipped not compared, as their expected files are from another commit"
 fi
+
+echo
+echo "== what's only for Zig"
+# tests/zig-only.txt's scripts, as Zig runs them without --port
+runs=0
+fail_zig=0
+while read -r name why; do
+    case "$name" in
+        "" | "#"*) continue ;;
+    esac
+    script=
+    for dir in scripts tests/valid tests/generated; do
+        if [ -f "$dir/$name.json" ]; then script=$dir/$name.json; fi
+    done
+    [ -n "$script" ] || continue
+    if "$BIN/run" "$script" "$WORK/runs/$name.db" > /dev/null 2> "$WORK/runs/$name.err"; then
+        runs=$((runs + 1))
+        keep zig-only "$name" passes
+    else
+        fail_zig=$((fail_zig + 1))
+        echo "fails: $name: $(head -n 1 "$WORK/runs/$name.err" | cut -c1-160)"
+        keep zig-only "$name" "fails: $(head -n 1 "$WORK/runs/$name.err" | sed 's/, which started at.*//' | cut -c1-160)"
+    fi
+    rm -f "$WORK/runs/$name".*
+done < tests/zig-only.txt
+echo "$runs run on Zig, and $fail_zig fail"
 
 echo
 echo "== fixtures that should fail"
@@ -132,6 +184,7 @@ for script in "$FIXTURES"/failing/*.json; do
         now_pass=$((now_pass + 1))
         echo "exit status $code: $name"
     fi
+    [ -z "$KEEP" ] || echo "$name exit status $code" >> "$KEEP/failing.txt"
 done
 echo "$still still fail, and $now_pass don't"
 
@@ -156,6 +209,7 @@ for script in tests/port-differs/*.zig.json; do
             ;;
         *) echo "$name: passes as the original: $zig_passes, and as the port: $port_passes" ;;
     esac
+    [ -z "$KEEP" ] || echo "$name passes as the original: $zig_passes, and as the port: $port_passes" >> "$KEEP/differs.txt"
 done
 echo "$as_zig as the original does, and $as_port as the port does"
 
@@ -174,6 +228,7 @@ while read -r kind name want text; do
     else
         "$BIN/undefined-wrappers" "$name" > /dev/null 2> "$WORK/runs/undefined.err" || code=$?
     fi
+    [ -z "$KEEP" ] || echo "$kind $name exit status $code: $(grep -v '^$' "$WORK/runs/undefined.err" | head -n 1 | sed 's/^thread [0-9]* //' | cut -c1-110)" >> "$KEEP/undefined.txt"
     if [ "$code" -eq "$want" ] && grep -qF -- "$text" "$WORK/runs/undefined.err"; then
         unchanged=$((unchanged + 1))
     else
@@ -199,6 +254,7 @@ for script in tests/generated/*.json; do
         compact-*) "$BIN/gen" "${name#compact-}" "$WORK/runs/gen.json" --compact 2> /dev/null || true ;;
         replica-*) "$BIN/gen" "${name#replica-}" "$WORK/runs/gen.json" --replicate 2> /dev/null || true ;;
     esac
+    [ -z "$KEEP" ] || cp "$WORK/runs/gen.json" "$KEEP/gen/$name.json"
     if cmp -s "$script" "$WORK/runs/gen.json"; then
         gen_same=$((gen_same + 1))
     else

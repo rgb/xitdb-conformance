@@ -15,6 +15,7 @@ cd "$(dirname "$0")"
 RUN=$PWD/zig-out/bin/run
 DET=$PWD/zig-out/bin/detcheck
 MANIFEST=$PWD/zig-out/bin/manifest
+DUMP=$PWD/zig-out/bin/dump
 # check.sh points this at a copy to show that --check notices drift
 FIXTURES=${FIXTURES:-fixtures}
 ZIG_ORIGINAL=../../xitdb
@@ -24,6 +25,8 @@ ZIG_COMMITS=$PWD/tests/zig-commits.txt
 ZIG_ONLY=$PWD/tests/zig-only.txt
 # the files scripts start from with raw_load, which are copied as they are
 INPUTS=tests/inputs
+# databases written by programs that use the original, copied as they are with dump's listing of each
+SAMPLES=tests/samples
 
 MODE=update
 case "${1:-}" in
@@ -110,6 +113,10 @@ It was produced from:
   fixtures follow another Zig commit. Those called \`v1-*\` are version 1 databases written by the original at
   \`6b93af1af3a260399fa0a0b1b268ded2cbf5eec5\`, as nothing writes a new one any more. \`tests/inputs/README.md\` in
   the conformance repository says where each came from and what's in it.
+- \`samples/<program>/<name>.db\`: databases a program wrote through the original, with \`<name>.txt\`, what \`dump\` prints
+  for each, which doesn't depend on where things are in the file, and the SHA-256 of each in \`SHA256SUMS\`. They're
+  samples of real use, for a port's reading to be compared with the original's, and not byte-identity fixtures. Their
+  \`README.md\` says what they are.
 - \`failing/<name>.json\`: a well-formed script that must fail in every runner. The text after \`expected failure:\` in
   its description is why it fails in Zig, and it has no expected file, as there's nothing to compare.
 
@@ -155,6 +162,27 @@ zig_only() { # name of a script
 if [ "$MODE" = check ]; then
     [ -f "$FIXTURES/manifest.json" ] || fail "there's no manifest. Run ./fixtures.sh"
     elsewhere=0
+
+    # the samples, and what dump makes of them now
+    for dir in "$SAMPLES"/*/; do
+        [ -d "$dir" ] || continue
+        program=$(basename "$dir")
+        (cd "$dir" && shasum -a 256 -c SHA256SUMS > /dev/null) || fail "the samples in $dir aren't the ones SHA256SUMS names"
+        for file in "$dir"*; do
+            cmp -s "$file" "$FIXTURES/samples/$program/$(basename "$file")" || fail "the sample $program/$(basename "$file") differs from the one in $dir, or is missing"
+        done
+        for database in "$dir"*.db; do
+            name=$(basename "$database" .db)
+            "$DUMP" "$database" > "$TMP/sample.txt" || fail "dump can't read the sample $program/$name"
+            cmp -s "$TMP/sample.txt" "$FIXTURES/samples/$program/$name.txt" || fail "dump's listing of the sample $program/$name has drifted"
+        done
+    done
+    for file in "$FIXTURES"/samples/*/*; do
+        [ -e "$file" ] || continue
+        program=$(basename "$(dirname "$file")")
+        name=$(basename "$file")
+        [ -f "$SAMPLES/$program/$name" ] || [ -f "$SAMPLES/$program/${name%.txt}.db" ] || fail "$file has no source in $SAMPLES"
+    done
 
     # the inputs first, as the scripts that load them would only drift
     for input in "$INPUTS"/*.db; do
@@ -235,7 +263,8 @@ if [ "$MODE" = check ]; then
     valid=$(find "$FIXTURES/valid" -name '*.db' | wc -l | tr -d ' ')
     failing=$(find "$FIXTURES/failing" -name '*.json' | wc -l | tr -d ' ')
     inputs=$(find "$FIXTURES/inputs" -name '*.db' 2> /dev/null | wc -l | tr -d ' ')
-    echo "$FIXTURES: $valid expected files, $failing failing scripts and $inputs inputs haven't drifted"
+    samples=$(find "$FIXTURES/samples" -name '*.db' 2> /dev/null | wc -l | tr -d ' ')
+    echo "$FIXTURES: $valid expected files, $failing failing scripts, $inputs inputs and $samples samples haven't drifted"
     if [ "$elsewhere" -gt 0 ]; then
         echo "$elsewhere of those are from another Zig commit, so they weren't run here. ./second-zig.sh runs them"
     fi
@@ -266,6 +295,30 @@ for file in "$FIXTURES"/inputs/*; do
     echo "removed $file"
     changed=yes
 done
+
+rm -rf "$TMP/samples"
+for dir in "$SAMPLES"/*/; do
+    [ -d "$dir" ] || continue
+    program=$(basename "$dir")
+    (cd "$dir" && shasum -a 256 -c SHA256SUMS > /dev/null) || fail "the samples in $dir aren't the ones SHA256SUMS names"
+    mkdir -p "$TMP/samples/$program"
+    cp "$dir"* "$TMP/samples/$program/"
+    for database in "$dir"*.db; do
+        "$DUMP" "$database" > "$TMP/samples/$program/$(basename "$database" .db).txt" || fail "dump can't read the sample $database"
+    done
+done
+if [ -d "$TMP/samples" ]; then
+    if ! diff -r "$TMP/samples" "$FIXTURES/samples" > /dev/null 2>&1; then
+        rm -rf "$FIXTURES/samples"
+        cp -R "$TMP/samples" "$FIXTURES/samples"
+        echo "wrote $FIXTURES/samples"
+        changed=yes
+    fi
+elif [ -d "$FIXTURES/samples" ]; then
+    rm -rf "$FIXTURES/samples"
+    echo "removed $FIXTURES/samples"
+    changed=yes
+fi
 
 # what isn't a source script any more goes
 for file in "$FIXTURES"/valid/* "$FIXTURES"/failing/*; do

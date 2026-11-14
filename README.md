@@ -44,6 +44,10 @@ independent of the Swift code.
 - `PORT-IMPACT.md`: which scripts rely on what the port changes after its parity gate, and what would happen to each.
   `impact.sh` keeps its lists to what the scripts do, and `impact.sh --prototypes` tries three of the changes on copies of Zig.
 - `second-zig.sh <checkout>`: runs all of this against another commit of the Zig implementation, and says what differs.
+- `follow.sh <checkout> [commit]`: does that for each commit from the one the fixtures follow up to a later one, says
+  what each one moves, and lists every place that names the commit followed ([below](#following-the-original)).
+- `tests/samples/`: databases that programs using the original wrote, which `fixtures.sh` copies to `fixtures/samples/`
+  with `dump`'s listing of each, so that the port's reading can be compared with the original's.
 - `check.sh`: the gate. It builds everything and checks all of the above, in debug and release builds and across
   all three storage kinds.
 
@@ -120,6 +124,38 @@ variants have the same bytes on both. `PORT-IMPACT.md` has why.
 **What the port refuses** doesn't need another Zig, as a guard writes nothing. A script that does it goes in
 `tests/zig-only.txt`, which the gate holds to what `run --port` refuses, with a version in `tests/port-variants/` if it pins
 something worth having. The fixtures only ever come from `run --port`.
+
+## Following the original
+
+When upstream moves on, the fixtures follow it as a whole, as they did from `6b93af1` to `89da8e7` (D31):
+
+```
+./follow.sh ../../xitdb <commit>
+```
+
+That runs `second-zig.sh` against the commit the manifest names and against every commit after it up to that one, on
+the first-parent line, keeping what each wrote, and says, for each commit against the one before:
+
+- which fixtures' files move, with the first byte `detcheck` finds different, and which change their outcome, with why;
+- the same for the scripts only for Zig, run without `--port`;
+- which failing scripts stop failing, which of the two things each behaviour in `tests/port-differs` does, and what
+  changes in `tests/undefined`;
+- which seeds `gen` writes differently.
+
+It ends with every file that names the commit followed, and how many times. It changes nothing in either repository,
+and differences don't make it fail. It isn't part of the gate, as it builds the harness once for each commit.
+`FOLLOW_FROM=6b93af1 ./follow.sh ../../xitdb 89da8e7` shows again what conformance-09 followed. Then, to move the pin:
+
+1. Put the original at `../../xitdb` at the new commit, and see what fails in `./check.sh`.
+2. A script whose outcome changed pins what the old commit did. If the port is to follow the original there, rewrite
+   it as a fixture of what the original now does. If the port keeps its own behaviour, it's a difference to sort:
+   in `tests/port-differs`, or a variant in `tests/port-variants` with its script in `tests/zig-only.txt`.
+   A file the old commit wrote that the new one no longer can is an input in `tests/inputs/`.
+3. `./gen-fixed.sh` and `zig-out/bin/longscripts tests/valid` for the scripts they write, commit, `./fixtures.sh`, commit.
+4. Move what names the old commit as the one followed: the ref in `.github/workflows/gate.yml`, this README,
+   `SCRIPT-FORMAT.md` section 11, and `PORT-IMPACT.md`. What says something was so at the old commit stays.
+5. The fixtures in `tests/zig-commits.txt` come from the fixes branch, which follows separately: `second-zig.sh
+   --regenerate` once it's on the new commit.
 
 ## Contributing
 
