@@ -190,8 +190,7 @@ try_mutant cut-file-not-created-again "try self.core.setLength(0);" "_ = &self.c
 try_mutant apply-keeps-leftovers "// discard anything past the committed bytes, such as the remains of an interrupted sync
                 try self.truncate();" "// discard anything past the committed bytes, such as the remains of an interrupted sync"
 try_mutant apply-at-0-keeps-the-old-header "self.header = header;
-                try self.writeHeaders();" "_ = header;
-                try self.writeHeaders();"
+                try self.writeHeaders();" "try self.writeHeaders();"
 try_mutant apply-leaves-root-header "_ = try self.readRootTrailer(start + len);
                 try self.core.sync();
                 try self.writeRootHeader();" "_ = try self.readRootTrailer(start + len);
