@@ -696,7 +696,7 @@ writes over it. Its commit ID was still used, so it stays in the list.
 
 | Field | Meaning |
 |---|---|
-| `databases` | every database, including `main`. `file_id` is the one in that file's header by the end, and `file_size` is its size |
+| `databases` | every database the run left a file for, including `main`, in the order it made them. A `compact` that fails before it makes its target leaves none, so that target isn't here. `file_id` is the one in that file's header by the end, and `file_size` is its size |
 | `databases.*.trailers` | where the commit IDs in that file are, which `detcheck` needs and a second runner doesn't. `file_id` is what the trailer's checksum covers. One of these can be cut short by the end of a file that a sync didn't finish, and one that was overwritten by `raw_write` isn't listed |
 | `ops[i].db` | the database that `committed_size` and `commit_id` are about, if it isn't `main` |
 
@@ -1112,3 +1112,10 @@ it. Nothing else a script says changes meaning. To run the scripts at the new pi
 - what `52c7283` to `89da8e7` changed: a database without a first commit, which a failed sync at 0 leaves and a file cut off
   during its creation is created again from (sections 5 and 11), an element appended and never written that counts, and
   a set's key from `read_key_value_pair` that streams.
+
+**The manifest's `other_databases` goes by the sidecar** (2026-11-14, after conformance-09). It used to name every
+`create_database` and every `compact`'s target in a script's text, so it named a target `compact-sliced-history--port`'s
+guard refuses before making it, and there's no file for that. Now it names the databases in the sidecar's `databases`,
+apart from `main`, which are the ones the run left, and the gate checks that every path the manifest names is in the
+fixtures, and that every file there is named by it or is one the fixtures' README lists. Nothing a script says changes
+meaning, and no expected file moved.

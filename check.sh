@@ -544,6 +544,31 @@ expect_drift "a conformance commit from elsewhere" "isn't in this branch's histo
 fresh_copy
 printf ' ' >> "$COPY/README.md"
 expect_drift "a changed README" "README.md has drifted"
+# what the manifest names is what's here, and the other way round. this one is what it named in conformance-09,
+# a target that the port's guard refused to compact into before it made it, so it was in the script and not on disk
+fresh_copy
+edit_file "$COPY/manifest.json" 's|"v1_one": "valid/compact-sliced-history--port.v1_one.db"|&, "v1_one_target": "valid/compact-sliced-history--port.v1_one_target.db"|'
+expect_drift "a manifest naming a database the run didn't leave" "the manifest names valid/compact-sliced-history--port.v1_one_target.db, which isn't in"
+fresh_copy
+touch "$COPY/notes.txt"
+expect_drift "a file nothing names" "notes.txt is neither named by the manifest nor one of the files the README says are here"
+fresh_copy
+mkdir "$COPY/inputs/older"
+expect_drift "a folder nothing names" "inputs/older is neither named by the manifest nor one of the files the README says are here"
+# and the manifest goes by the sidecar, which is what the run left, so it won't name a file that isn't there
+fresh_copy
+rm "$COPY/valid/compact-sliced-history--port.v1_one.db"
+here=$PWD
+if (cd "$COPY" && "$here/zig-out/bin/manifest" x x x "$here/tests/zig-commits.txt" valid/compact-sliced-history--port.json) > "$OUT/manifest.out" 2>&1; then
+    echo "the manifest named a database that isn't there"
+    exit 1
+fi
+if ! grep -qF "the manifest would name valid/compact-sliced-history--port.v1_one.db, which isn't here" "$OUT/manifest.out"; then
+    echo "the manifest refused a database that isn't there for the wrong reason:"
+    cat "$OUT/manifest.out"
+    exit 1
+fi
+echo "the manifest names only what's there"
 rm -rf "$COPY"
 
 echo "== what the port will change"

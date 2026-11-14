@@ -107,7 +107,8 @@ It was produced from:
   hundreds of writes, and they're what tells copying from rewriting in place. These and \`iterator-tiers*\` come from
   \`longscripts\`, because they're too long to write by hand.
 - \`valid/<name>.<database>.db\`: for a script with several databases, each one's file. \`other_databases\` in the
-  manifest lists them.
+  manifest lists them, and they're the ones the run left, which the sidecar's \`databases\` lists too, with \`main\`. A
+  compaction that fails before it makes its target leaves no file for it, and nothing is listed.
 - \`inputs/<name>.db\`: files that scripts start from, which \`raw_load\` puts in place of a database's file, and
   \`inputs\` in the manifest lists for each script. They aren't expected files, and they stay as they are when the
   fixtures follow another Zig commit. Those called \`v1-*\` are version 1 databases written by the original at
@@ -249,6 +250,44 @@ if [ "$MODE" = check ]; then
         [ -f "$FAILING_SOURCES/$(basename "$file")" ] || fail "$file has no source script"
     done
 
+    # every path the manifest names is here. a path is any string in it that ends in .db or .json
+    grep -oE '"[^"]+\.(db|json)"' "$FIXTURES/manifest.json" | tr -d '"' | sort -u > "$TMP/named.txt"
+    while read -r path; do
+        [ -f "$FIXTURES/$path" ] || fail "the manifest names $path, which isn't in $FIXTURES"
+    done < "$TMP/named.txt"
+    # and everything here is named by the manifest, or is one of what the README lists that isn't a script's
+    (cd "$FIXTURES" && find . -mindepth 1 | sed 's|^\./||' | sort) > "$TMP/here.txt"
+    while read -r path; do
+        unlisted="$FIXTURES/$path is neither named by the manifest nor one of the files the README says are here"
+        if [ -d "$FIXTURES/$path" ]; then
+            case "$path" in
+                valid | failing | inputs | samples) ;;
+                samples/*/*) fail "$unlisted" ;;
+                samples/*) ;;
+                *) fail "$unlisted" ;;
+            esac
+            continue
+        fi
+        [ -f "$FIXTURES/$path" ] || fail "$unlisted"
+        case "$path" in
+            manifest.json | README.md) ;;
+            valid/* | failing/*) grep -qxF "$path" "$TMP/named.txt" || fail "$FIXTURES/$path isn't named by the manifest" ;;
+            # what scripts start from, which have a source in tests/inputs, as checked above
+            inputs/*/*) fail "$unlisted" ;;
+            inputs/*.db) ;;
+            # each sample with dump's listing of it, the checksums, and what they are
+            samples/*/*/*) fail "$unlisted" ;;
+            samples/*/README.md | samples/*/SHA256SUMS) ;;
+            samples/*/*.db)
+                [ -f "$FIXTURES/${path%.db}.txt" ] || fail "the sample $path has no listing beside it"
+                awk -v name="$(basename "$path")" '$2 == name { found = 1 } END { exit !found }' "$(dirname "$FIXTURES/$path")/SHA256SUMS" 2> /dev/null ||
+                    fail "the sample $path isn't in SHA256SUMS"
+                ;;
+            samples/*/*.txt) [ -f "$FIXTURES/${path%.txt}.db" ] || fail "$unlisted" ;;
+            *) fail "$unlisted" ;;
+        esac
+    done < "$TMP/here.txt"
+
     # the commit they say they came from is in this repository's history
     commit=$(recorded_commit)
     [ -n "$commit" ] || fail "the manifest doesn't say which commit it came from"
@@ -367,6 +406,8 @@ for dir in $SOURCES; do
         cp "$script" "$copy.json"
         cp "$TMP/$name.db" "$copy.db"
         cp "$TMP/$name.db.sidecar.json" "$copy.db.sidecar.json"
+        # the other databases are the ones this run left, and only those
+        rm -f "$FIXTURES/valid/$name".*.db
         for other in "$TMP/$name".*.db; do
             [ -e "$other" ] || continue
             cp "$other" "$FIXTURES/valid/$(basename "$other")"

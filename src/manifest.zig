@@ -8,7 +8,9 @@
 //! unless the zig commits file (tests/zig-commits.txt) says otherwise.
 //!
 //! The scripts have passed through `run`, so they're well-formed, and this only
-//! fails on what it can't classify.
+//! fails on what it can't classify, or on a file it would name that isn't there.
+//! The other databases of a script are the ones its sidecar lists, which are the
+//! ones the run left.
 
 const std = @import("std");
 
@@ -105,27 +107,26 @@ fn inputsOf(arena: std.mem.Allocator, ops: Json) ![]const []const u8 {
     return names.items;
 }
 
-/// the names of the other databases a script makes, which only the top level can do.
-/// a compaction into main or into one made earlier doesn't make one.
-fn otherDatabases(arena: std.mem.Allocator, ops: Json) ![]const []const u8 {
+/// the names of the other databases a script's run left, in the order it made them, from the
+/// sidecar, which lists every database the run has a file for. it goes by what was written and
+/// not by the script's text, as a compaction that fails can do so before it makes its target
+/// or after, depending on the error and on whether it's the port's guard.
+fn otherDatabases(io: Io, arena: std.mem.Allocator, sidecar_path: []const u8) ![]const []const u8 {
+    const text = try Io.Dir.cwd().readFileAlloc(io, sidecar_path, arena, .unlimited);
+    const sidecar = (try std.json.parseFromSliceLeaky(Json, arena, text, .{ .parse_numbers = false })).object;
+    // a script with one database has no list
+    const databases = sidecar.get("databases") orelse return &.{};
     var names: std.ArrayList([]const u8) = .empty;
-    for (ops.array.items) |item| {
-        const op = item.object;
-        const name = op.get("op").?.string;
-        const made = if (std.mem.eql(u8, name, "create_database"))
-            op.get("name").?.string
-        else if (std.mem.eql(u8, name, "compact"))
-            op.get("into").?.string
-        else
-            continue;
-        if (std.mem.eql(u8, made, "main")) continue;
-        var seen = false;
-        for (names.items) |existing| {
-            if (std.mem.eql(u8, existing, made)) seen = true;
-        }
-        if (!seen) try names.append(arena, made);
+    for (databases.object.keys()) |name| {
+        if (std.mem.eql(u8, name, "main")) continue;
+        try names.append(arena, name);
     }
     return names.items;
+}
+
+/// every path the manifest names is a file that's here, as a runner goes by them
+fn mustExist(io: Io, path: []const u8) void {
+    Io.Dir.cwd().access(io, path, .{}) catch fail("the manifest would name {s}, which isn't here", .{path});
 }
 
 const Collections = struct {
@@ -242,12 +243,18 @@ pub fn main(init: std.process.Init) !void {
             path,
         });
         if (passes) {
-            try w.print(", \"db\": \"valid/{s}.db\", \"sidecar\": \"valid/{s}.db.sidecar.json\"", .{ name, name });
-            const others = try otherDatabases(arena, script.get("ops").?);
+            const db = try std.fmt.allocPrint(arena, "valid/{s}.db", .{name});
+            const sidecar = try std.fmt.allocPrint(arena, "valid/{s}.db.sidecar.json", .{name});
+            mustExist(io, db);
+            mustExist(io, sidecar);
+            try w.print(", \"db\": \"{s}\", \"sidecar\": \"{s}\"", .{ db, sidecar });
+            const others = try otherDatabases(io, arena, sidecar);
             if (others.len > 0) {
                 try w.writeAll(", \"other_databases\": {");
                 for (others, 0..) |other, other_index| {
-                    try w.print("{s}\"{s}\": \"valid/{s}.{s}.db\"", .{ if (other_index == 0) "" else ", ", other, name, other });
+                    const other_db = try std.fmt.allocPrint(arena, "valid/{s}.{s}.db", .{ name, other });
+                    mustExist(io, other_db);
+                    try w.print("{s}\"{s}\": \"{s}\"", .{ if (other_index == 0) "" else ", ", other, other_db });
                 }
                 try w.writeAll("}");
             }
@@ -256,7 +263,9 @@ pub fn main(init: std.process.Init) !void {
         if (inputs.len > 0) {
             try w.writeAll(", \"inputs\": [");
             for (inputs, 0..) |input, input_index| {
-                try w.print("{s}\"inputs/{s}.db\"", .{ if (input_index == 0) "" else ", ", input });
+                const input_path = try std.fmt.allocPrint(arena, "inputs/{s}.db", .{input});
+                mustExist(io, input_path);
+                try w.print("{s}\"{s}\"", .{ if (input_index == 0) "" else ", ", input_path });
             }
             try w.writeAll("]");
         }
