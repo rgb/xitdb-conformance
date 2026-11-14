@@ -6,7 +6,7 @@ What the Swift port of xitdb has to do, byte for byte, as Zig shows it. This is 
 
 It was produced from:
 
-- conformance repository: commit `5bb30968f9b969fc10700b31c52ddf6160142172`
+- conformance repository: commit `98c1d45168c8140326ec5d6697c713e838c65012`
 - xitdb, the Zig original: commit `89da8e76f0dd82baefeadb656f0f734bf920be05`, or the one the manifest gives for that fixture as its `zig_commit`
 - Zig 0.17.1, with the runner `run` built in debug mode and using the `buffered_file` storage kind
 
@@ -27,7 +27,8 @@ It was produced from:
   hundreds of writes, and they're what tells copying from rewriting in place. These and `iterator-tiers*` come from
   `longscripts`, because they're too long to write by hand.
 - `valid/<name>.<database>.db`: for a script with several databases, each one's file. `other_databases` in the
-  manifest lists them.
+  manifest lists them, and they're the ones the run left, which the sidecar's `databases` lists too, with `main`. A
+  compaction that fails before it makes its target leaves no file for it, and nothing is listed.
 - `inputs/<name>.db`: files that scripts start from, which `raw_load` puts in place of a database's file, and
   `inputs` in the manifest lists for each script. They aren't expected files, and they stay as they are when the
   fixtures follow another Zig commit. Those called `v1-*` are version 1 databases written by the original at
