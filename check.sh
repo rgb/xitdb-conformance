@@ -553,8 +553,8 @@ fresh_copy
 touch "$COPY/notes.txt"
 expect_drift "a file nothing names" "notes.txt is neither named by the manifest nor one of the files the README says are here"
 fresh_copy
-mkdir "$COPY/inputs/older"
-expect_drift "a folder nothing names" "inputs/older is neither named by the manifest nor one of the files the README says are here"
+mkdir "$COPY/older"
+expect_drift "a folder nothing names" "fixtures-copy/older is neither named by the manifest nor one of the files the README says are here"
 # and the manifest goes by the sidecar, which is what the run left, so it won't name a file that isn't there
 fresh_copy
 rm "$COPY/valid/compact-sliced-history--port.v1_one.db"
