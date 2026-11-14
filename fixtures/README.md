@@ -6,7 +6,7 @@ What the Swift port of xitdb has to do, byte for byte, as Zig shows it. This is 
 
 It was produced from:
 
-- conformance repository: commit `5d939a3e68a3e0d20d92f2d9d47b754f9f157572`
+- conformance repository: commit `21faf7221387bd8f7131caefa51bdd2b1684d52d`
 - xitdb, the Zig original: commit `89da8e76f0dd82baefeadb656f0f734bf920be05`, or the one the manifest gives for that fixture as its `zig_commit`
 - Zig 0.17.1, with the runner `run` built in debug mode and using the `buffered_file` storage kind
 
@@ -33,6 +33,10 @@ It was produced from:
   fixtures follow another Zig commit. Those called `v1-*` are version 1 databases written by the original at
   `6b93af1af3a260399fa0a0b1b268ded2cbf5eec5`, as nothing writes a new one any more. `tests/inputs/README.md` in
   the conformance repository says where each came from and what's in it.
+- `samples/<program>/<name>.db`: databases a program wrote through the original, with `<name>.txt`, what `dump` prints
+  for each, which doesn't depend on where things are in the file, and the SHA-256 of each in `SHA256SUMS`. They're
+  samples of real use, for a port's reading to be compared with the original's, and not byte-identity fixtures. Their
+  `README.md` says what they are.
 - `failing/<name>.json`: a well-formed script that must fail in every runner. The text after `expected failure:` in
   its description is why it fails in Zig, and it has no expected file, as there's nothing to compare.
 
