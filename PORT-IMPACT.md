@@ -41,8 +41,8 @@ refuse, unless the script says so with `expect_error`. So a fixture can't rely o
 and the gate runs them all that way.
 
 **A script that does what the port refuses isn't a fixture.** It goes on running on Zig, in the gate and `mutants.sh`, as
-what Zig does hasn't changed. `tests/zig-only.txt` lists all 48, with the gate holding it to what `run --port` refuses. That's
-33 of the 42 generated scripts, and these 15, each with a version of its own in `tests/port-variants`:
+what Zig does hasn't changed. `tests/zig-only.txt` lists all 47, with the gate holding it to what `run --port` refuses. That's
+33 of the 42 generated scripts, and these 14, each with a version of its own in `tests/port-variants`:
 
 | Script | Its variant `<name>--port` | Expected file from |
 |---|---|---|

@@ -70,10 +70,11 @@ compare() { # what it's about, list, earlier folder, later folder
     changed=0
     same=0
     while read -r name outcome; do
-        before=$(status_of "$3" "$2" "$name")
-        if [ "$before" != "$outcome" ]; then
+        # the shell has no local variables, so this mustn't be called what the loop below uses
+        was=$(status_of "$3" "$2" "$name")
+        if [ "$was" != "$outcome" ]; then
             changed=$((changed + 1))
-            echo "  $name: was \"${before:-not run}\", and now it's \"$outcome\""
+            echo "  $name: was \"${was:-not run}\", and now it's \"$outcome\""
             continue
         fi
         [ "$outcome" = passes ] || continue
