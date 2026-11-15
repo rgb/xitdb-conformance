@@ -2,6 +2,9 @@
 # that commit to this, and second-zig.sh says which of them another commit does differently.
 #
 #   script|wrapper  name  exit status  text that's in what it prints
+#
+# A case with no text prints nothing to look for: the frozen-clone-* makers, which make tests/inputs/.
+# Scripts run with --allow-port-differences, as two of them panic in reads the port corrects.
 script frozen-clone-linked-read 1 unexpected error InvalidBTreeNode
 script frozen-clone-sorted-read 1 unexpected error InvalidBTreeNode
 script frozen-clone-linked-append 134 start index 4 is larger than end index 2
@@ -21,3 +24,13 @@ wrapper array_frozen_clone 0 finished
 wrapper array_frozen_clone_slice 0 finished
 wrapper hash_frozen_clone 0 finished
 wrapper no_problem_without_freeze 0 finished
+script frozen-clone-sorted-header-above-tree 0
+script frozen-clone-sorted-header-below-tree 0
+script frozen-clone-sorted-counts-above-leaves 0
+script frozen-clone-sorted-counts-below-leaves 0
+script frozen-clone-linked-header-above-tree 0
+script frozen-clone-linked-header-below-tree 0
+script frozen-clone-linked-counts-above-leaves 0
+script frozen-clone-linked-counts-below-leaves 0
+script frozen-clone-sorted-iterator-past-tree 134 index out of bounds: index 18, len 16
+script frozen-clone-linked-iterator-past-tree 134 index out of bounds: index 17, len 16

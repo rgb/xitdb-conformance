@@ -2,3 +2,8 @@ replicate-bad-trailer replica
 replicate-failed-first-sync left_behind
 recovery-cut-during-creation main
 recovery-cut-during-creation-read-only main
+sorted-header-above-tree main
+sorted-counts-above-leaves main
+linked-header-above-tree main
+linked-counts-above-leaves main
+linked-counts-below-leaves main

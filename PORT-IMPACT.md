@@ -299,13 +299,14 @@ None of them is a fixture.
 ## Finding 23: a cursor's freeze
 
 **Deferred**, so nothing happens: a cursor's freeze isn't a freeze for the guard, and `gen --port-safe` keeps off it in case that
-changes. `zig-findings.md` says a fix makes a cursor's freeze equivalent to `Database.freeze`, or needs another design. Every
-script with a cursor's freeze:
+changes. `zig-findings.md` says a fix makes a cursor's freeze equivalent to `Database.freeze`, or needs another design. The
+`frozen-clone-*` makers in `tests/undefined` made the `sorted-*` and `linked-*` inputs once, and those stay as they are, so
+the fixtures that only read them don't change with a fix. Every script with a cursor's freeze:
 
 <!-- list 23 -->
 - `scripts`: 03-clone-and-freeze (1)
 - `tests/generated`: compact-201 (1), compact-203 (3), compact-205 (2), gen-10 (2), gen-12 (1), gen-13 (1), gen-17 (2), gen-2 (2), gen-3 (1), gen-6 (1), gen-7 (1), reads-101 (2), reads-102 (1), reads-103 (2), reads-108 (1), replica-302 (2), replica-305 (2)
-- `tests/undefined`: frozen-clone-linked-append (1), frozen-clone-linked-read (1), frozen-clone-sorted-read (1)
+- `tests/undefined`: frozen-clone-linked-append (1), frozen-clone-linked-counts-above-leaves (1), frozen-clone-linked-counts-below-leaves (1), frozen-clone-linked-header-above-tree (1), frozen-clone-linked-header-below-tree (1), frozen-clone-linked-read (1), frozen-clone-sorted-counts-above-leaves (2), frozen-clone-sorted-counts-below-leaves (2), frozen-clone-sorted-header-above-tree (2), frozen-clone-sorted-header-below-tree (2), frozen-clone-sorted-iterator-past-tree (1), frozen-clone-sorted-read (1)
 - `tests/valid`: deep-linked (1), deep-sorted (1), deep-sorted-existing (1), deep-tries (2), path-api-edges (3)
 <!-- end -->
 

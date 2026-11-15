@@ -224,12 +224,13 @@ while read -r kind name want text; do
     esac
     code=0
     if [ "$kind" = script ]; then
-        "$BIN/run" "tests/undefined/$name.json" "$WORK/runs/undefined.db" > /dev/null 2> "$WORK/runs/undefined.err" || code=$?
+        "$BIN/run" "tests/undefined/$name.json" "$WORK/runs/undefined.db" --allow-port-differences > /dev/null 2> "$WORK/runs/undefined.err" || code=$?
     else
         "$BIN/undefined-wrappers" "$name" > /dev/null 2> "$WORK/runs/undefined.err" || code=$?
     fi
     [ -z "$KEEP" ] || echo "$kind $name exit status $code: $(grep -v '^$' "$WORK/runs/undefined.err" | head -n 1 | sed 's/^thread [0-9]* //' | cut -c1-110)" >> "$KEEP/undefined.txt"
-    if [ "$code" -eq "$want" ] && grep -qF -- "$text" "$WORK/runs/undefined.err"; then
+    # a case with no text prints nothing to look for
+    if [ "$code" -eq "$want" ] && { [ -z "$text" ] || grep -qF -- "$text" "$WORK/runs/undefined.err"; }; then
         unchanged=$((unchanged + 1))
     else
         changed=$((changed + 1))

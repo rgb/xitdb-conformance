@@ -227,6 +227,7 @@ const WANT = [_][]const u8{
     "error:StreamTooLong",
     "error:TargetNotEmpty",
     "error:InvalidRange",
+    "error:InvalidBTreeNode",
 };
 
 fn fail(comptime fmt: []const u8, args: anytype) noreturn {

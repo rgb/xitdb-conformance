@@ -17,14 +17,17 @@ independent of the Swift code.
 - `tests/port-variants/`: the port's versions of scripts that pin what it refuses, as `<name>--port`, which `run --port` runs.
   `tests/zig-only.txt` lists what they replace. Those go on running on Zig, and aren't fixtures. Some have no Zig script, or
   one in `tests/invalid/`, as what they do is an undefined use in Zig, and their oracle is Zig without what the port refuses.
-- `tests/inputs/`: version 1 databases the original wrote at `6b93af1`, which scripts start from with `raw_load`, as nothing
-  creates version 1 any more. `fixtures.sh` copies them to `fixtures/inputs/`, and their `README.md` says where each came from.
+- `tests/inputs/`: files that scripts start from with `raw_load`: version 1 databases the original wrote at `6b93af1`, as
+  nothing creates version 1 any more, and clones the freeze hazard left with a header that disagrees with its tree, which
+  only an undefined use makes. `fixtures.sh` copies them to `fixtures/inputs/`, and their `README.md` says where each came
+  from.
 - `tests/invalid/`: scripts that `run` must reject, before running them or, for an undefined use, when it gets there.
   A second runner never sees these.
 - `tests/port-differs/`: the reads that the port corrects from the start, with what Zig does and what the port does, so
   that a valid script can't use them, and the gate notices if Zig changes.
 - `tests/undefined/`: what happens with the uses `SCRIPT-FORMAT.md` calls undefined, as scripts and through the
-  collection wrappers. Some of it crashes the engine, so none of it is among the fixtures.
+  collection wrappers. Some of it crashes the engine, so none of it is among the fixtures. The `frozen-clone-*` makers
+  there made the `sorted-*` and `linked-*` inputs, which the scripts of the same names in `tests/valid/` only read.
 - `src/gen.zig`: `gen <seed> <out.script>`, which writes a valid random script, with reads through it if given `--reads`,
   ending with a compaction if given `--compact`, with a sync to a replica if given `--replicate`, and keeping off what the
   port changes if given `--port-safe`. `tests/generated/` has the ones that are committed, which `gen-fixed.sh` writes, and

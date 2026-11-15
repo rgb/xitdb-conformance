@@ -244,8 +244,8 @@ for script in tests/port-differs/*.zig.json; do
     done
     count=$((count + 1))
 done
-if [ "$count" -ne 5 ]; then
-    echo "tests/port-differs should have 5 behaviours, and it has $count"
+if [ "$count" -ne 7 ]; then
+    echo "tests/port-differs should have 7 behaviours, and it has $count"
     exit 1
 fi
 echo "$count behaviours: Zig does what they say, and a valid script can't use them"
@@ -328,19 +328,20 @@ while read -r kind name want text; do
     esac
     code=0
     if [ "$kind" = script ]; then
-        "$RUN" "tests/undefined/$name.json" "$OUT/undefined.db" > /dev/null 2> "$OUT/undefined.err" || code=$?
+        "$RUN" "tests/undefined/$name.json" "$OUT/undefined.db" --allow-port-differences > /dev/null 2> "$OUT/undefined.err" || code=$?
     else
         zig-out/bin/undefined-wrappers "$name" > /dev/null 2> "$OUT/undefined.err" || code=$?
     fi
-    if [ "$code" -ne "$want" ] || ! grep -qF -- "$text" "$OUT/undefined.err"; then
+    # a case with no text prints nothing to look for
+    if [ "$code" -ne "$want" ] || { [ -n "$text" ] && ! grep -qF -- "$text" "$OUT/undefined.err"; }; then
         echo "$kind $name: expected exit status $want with \"$text\", got $code:"
         head -n 3 "$OUT/undefined.err"
         exit 1
     fi
     count=$((count + 1))
 done < tests/undefined/expected.txt
-if [ "$count" -ne 19 ]; then
-    echo "tests/undefined/expected.txt should have 19 cases, and it has $count"
+if [ "$count" -ne 29 ]; then
+    echo "tests/undefined/expected.txt should have 29 cases, and it has $count"
     exit 1
 fi
 echo "$count cases do what tests/undefined/expected.txt says"
@@ -609,8 +610,8 @@ generated=$(find tests/generated -name '*.json' | wc -l | tr -d ' ')
 expect_report "$valid_fixtures with the same bytes, 0 with different bytes, 0 that fail"
 expect_report "$failing_fixtures still fail, and 0 don't"
 expect_report "$(grep -c '^[^#]' tests/zig-only.txt) run on Zig, and 0 fail"
-expect_report "5 as the original does, and 0 as the port does"
-expect_report "19 as they were, and 0 changed"
+expect_report "7 as the original does, and 0 as the port does"
+expect_report "29 as they were, and 0 changed"
 expect_report "$generated scripts the same, and 0 different"
 # and what it does with a changed fixture, in copies of what it would change
 COPY="$OUT/fixtures-second"
