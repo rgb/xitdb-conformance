@@ -51,7 +51,10 @@ independent of the Swift code.
 - `check.sh`: the gate. It builds everything and checks all of the above, in debug and release builds and across
   all three storage kinds.
 
-It uses the Zig original by path, as `../../xitdb`, without modifying it. It needs Zig 0.17.1.
+It uses the Zig original by path, as `../../xitdb`, without modifying it. It needs Zig 0.17.1. So a clone of this
+repository has to sit two folders below a checkout of the original, as `xitdb-swift/conformance` sits beside `xitdb`.
+Anywhere else, `check.sh` fails at once with `failed to open ../../xitdb`. A symbolic link at `../../xitdb` to a checkout
+works as well.
 
 `.github/workflows/gate.yml` runs `check.sh` on a self-hosted macOS runner at every push and pull request. It checks
 this repository out, with its history, at `xitdb-swift/conformance` and clones `xit-vcs/xitdb` at `89da8e7`, the commit
