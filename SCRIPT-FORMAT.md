@@ -605,6 +605,7 @@ Truncating is all a rollback does, so it doesn't undo a write that landed before
 | `StreamTooLong` | `read_bytes`, `read_bytes_into`: a value longer than `max_size` or `size` |
 | `TargetNotEmpty` | `compact`: a target with something in its root |
 | `InvalidRange` | `read_committed`: a `start` after `end`, an `end` past the committed size, or a `start` above 0 that's before the committed data. `apply_replicated`: a `start` that isn't 0 or the committed size, and at 0, fewer bytes than the database header and the root header after it |
+| `InvalidEnumTag` | a trailer whose checksum verifies but whose root slot has a tag this version doesn't know: `reopen`, and the port's `recover`, which refuses it as opening does and changes nothing. Only a writer that knows more tags than this version writes one, so a script makes it with `raw_write`, checksum and all |
 | `InvalidBTreeNode` | a descent by rank that runs past a leaf's count, below the size its header gives: a read by position (`sorted_map_get_index`, `linked_array_list_get`), an `iterator` with `from_index`, and since `274418f` a linked array list's append, insert, remove, slice and get in a write path. Only a tree whose header disagrees with it has such a position, which takes an undefined use to make (section 10), so a script meets one only in an input made that way |
 
 The engine has more errors than these, like `KeyOffsetExceeded`. Reaching them takes an undefined use, a corrupt file,
@@ -1040,14 +1041,19 @@ that's no bigger than a new database again, opens a bigger one as it is, and rai
 
 | `op` | Other fields | What it does |
 |---|---|---|
-| `recover` | | The port's recovery call, at the top level, while the database is closed |
+| `recover` | `ignoring_root_header?` | The port's recovery call, at the top level, while the database is closed. With `ignoring_root_header: true` it goes by the trailers alone |
 
 What it does depends on the root header, by the port's own rule (the user's decision of 2026-11-17; the original has no
 recovery). **Where the root header is sound**, which is where `reopen` would open the file, it opens at that commit: it cuts
 the file off at the committed size, writes nothing else, and doesn't go on to a later trailer, even one that verifies, as a
 trailer's checksum covers the trailer and not the data before it, so after a power cut one can verify whose data never
-arrived. Going by the trailers alone there has to be asked for, which no script does yet. A trailer that verifies but whose
-root slot has a tag the port doesn't know is refused as opening refuses it, and not gone past or cut back before.
+arrived. Going by the trailers alone there has to be asked for, with `ignoring_root_header`, and then it scans as below even
+where the root header is sound.
+
+**A trailer it would open at whose root slot has a tag the port doesn't know**, whether the root header names it or the scan
+finds it, raises `InvalidEnumTag`, as opening raises it, and changes nothing: that isn't damage but a writer that knows a tag
+this version doesn't, so recovery neither goes on past it nor cuts back before it. One past a sound root header is cut off
+without its tag being looked at, as what lies past a sound root header was never committed, whoever wrote it.
 
 **Where it can't be trusted**, in the cases above where `reopen` raises `UntrustedRootHeader`, or where the committed size is
 0, which is no commit to open at, it scans the trailers. It looks from the end of the file back, a byte at a time, for the
@@ -1058,9 +1064,11 @@ in has no commit. A commit past that position is lost, and its commit ID stays i
 number, or no trailer that verifies, it raises `InvalidDatabase`, and the database stays closed. So all it leaves is what the
 file held just after that commit, and nothing is dropped except by this call.
 
-`run --port` acts out the scan. Every script that recovers does so where the root header can't be trusted or says 0, where
-the two rules agree, so none meets the sound case yet; a script of its own is to hold it, with the argument that asks for the
-trailers alone.
+`run --port` acts all of this out. `recover-sound-root-header--port`, and its `-version-1` twin on `inputs/v1-history`,
+hold the sound case, each way: a commit past a sound root header; the same with that commit's data zeros, which recovery by
+the trailers alone goes to, as its trailer still verifies, and where only what follows from the zeros is read (its root slot,
+a count of 0, and no elements), as reading on would hold a port to taking a pointer of 0 as the file's own header; and the
+unknown tag, past a sound root header and named by one.
 
 **Compacting a history with no last moment.** A `compact` raises `EmptyLastMoment` if the current database's root is an
 array list with no elements, or whose last element is empty: its tag is `none` and `full` isn't set (finding 28). Since
@@ -1220,4 +1228,5 @@ To run the new scripts, a runner needs nothing new: `InvalidBTreeNode` from more
 **`recover` opens at a sound root header** (2026-11-17, the user's decision, the port's own rule). Where the root header can
 be trusted, the port's recovery opens at that commit, cuts what's past it and writes nothing, and goes by the trailers alone
 only when asked to. Where it can't be trusted, or says 0, nothing changes, and that's every script that recovers, so no
-expected file moved. Section 11 says the rule, and that the sound case has no script yet.
+expected file moved. Section 11 says the rule. `recover-sound-root-header--port` and its `-version-1` twin hold it, and to
+run them a runner needs `ignoring_root_header` on `recover`, and `InvalidEnumTag` (section 7).

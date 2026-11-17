@@ -67,6 +67,9 @@ const ERROR_NAMES = [_][]const u8{
     // only from a tree whose header disagrees with it, in an input made by an undefined use:
     // a read, an iterator from a position or a write whose descent runs past a leaf's count
     "InvalidBTreeNode",
+    // a trailer that verifies, whose root slot has a tag this version doesn't know: opening
+    // raises it, and so does the port's recover, which neither goes past it nor cuts back before
+    "InvalidEnumTag",
 };
 
 /// what only the port raises, so only --port lets a script name them
@@ -345,7 +348,7 @@ fn opFields(kind: OpKind) []const []const u8 {
         .rank => &.{ "op", "note", "expect_error", "on", "key", "expect" },
         .close => &.{ "op", "note" },
         .reopen => &.{ "op", "note", "expect_error", "read_only", "hash_size", "file_id", "hash_id" },
-        .recover => &.{ "op", "note", "expect_error" },
+        .recover => &.{ "op", "ignoring_root_header", "note", "expect_error" },
         .raw_append => &.{ "op", "note", "bytes" },
         .raw_write => &.{ "op", "note", "offset", "bytes" },
         .raw_load => &.{ "op", "note", "input" },
@@ -704,6 +707,7 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 .close => {},
                 .recover => {
                     if (!port_mode) die("recover is what the port has in place of Zig's errors on opening, so it needs --port", .{});
+                    if (op.get("ignoring_root_header")) |v| _ = asBool(v, "ignoring_root_header");
                 },
                 .reopen => {
                     if (op.get("read_only")) |v| {
@@ -1257,29 +1261,61 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             return std.hash.crc.@"CRC-64/XZ".hash(&covered) == checksum;
         }
 
-        /// what the port's recovery has to do, as Zig has none: the file ends at the last
-        /// trailer that verifies, and its root header says so. that's only the committed size,
-        /// at the version's place, and in version 1 the copy of the root slot before it is
-        /// left as it is, as the original leaves it (D31 item 1)
-        fn recover(self: *Self) !void {
+        /// the committed size in the root header, if it's sound: what reopen would open, which is
+        /// a size no smaller than a new database's, inside the file, that ends at a trailer whose
+        /// checksum verifies. a size of 0 is no commit to open at
+        fn soundRootHeader(bytes: []const u8, file_id: u64, version: u16) ?usize {
+            const at: usize = @intCast(fileSizeStart(version));
+            if (bytes.len < at + 8) return null;
+            const committed = std.mem.readInt(u64, bytes[at..][0..8], .big);
+            if (committed < newDatabaseSize(version) or committed > bytes.len) return null;
+            const end: usize = @intCast(committed);
+            if (!trailerVerifies(bytes, file_id, end)) return null;
+            return end;
+        }
+
+        /// whether the root slot of the trailer that ends here has a tag this version knows. the
+        /// slot's first byte is `full` above its seven bits of tag
+        fn trailerTagKnown(bytes: []const u8, end: usize) bool {
+            const tag: u7 = @truncate(bytes[end - TRAILER_SIZE]);
+            return std.enums.fromInt(xitdb.Tag, tag) != null;
+        }
+
+        /// what the port's recovery has to do, as Zig has none, by the port's own rule (the user's
+        /// decision of 2026-11-17). a sound root header is the commit: the file is cut off at it and
+        /// opened, and nothing is written, and no later trailer is gone on to, even one that
+        /// verifies, as a checksum covers its trailer and not the data before it. otherwise, or when
+        /// it's asked to ignore the root header, the file ends at the last trailer that verifies, and
+        /// its root header says so. that's only the committed size, at the version's place, and in
+        /// version 1 the copy of the root slot before it is left as it is, as the original leaves it
+        /// (D31 item 1). a trailer it would open at whose root slot has a tag this version doesn't
+        /// know isn't damage, but a writer that knows more: it raises InvalidEnumTag, as opening
+        /// does, and changes nothing
+        fn recover(self: *Self, ignoring_root_header: bool) !void {
             const bytes = try self.rawBytes();
             if (bytes.len < ROOT_HEADER_START or !std.mem.eql(u8, bytes[0..3], "xit")) return error.InvalidDatabase;
             const file_id = std.mem.readInt(u64, bytes[FILE_ID_OFFSET..][0..8], .big);
             const version = std.mem.readInt(u16, bytes[VERSION_OFFSET..][0..2], .big);
-            const smallest = newDatabaseSize(version);
-            var end: usize = bytes.len;
-            const found: usize = while (end >= smallest) : (end -= 1) {
-                if (trailerVerifies(bytes, file_id, end)) break end;
-            } else return error.InvalidDatabase;
+            const sound = if (ignoring_root_header) null else soundRootHeader(bytes, file_id, version);
+            const found: usize = sound orelse found: {
+                const smallest = newDatabaseSize(version);
+                var end: usize = bytes.len;
+                break :found while (end >= smallest) : (end -= 1) {
+                    if (trailerVerifies(bytes, file_id, end)) break end;
+                } else return error.InvalidDatabase;
+            };
+            if (!trailerTagKnown(bytes, found)) return error.InvalidEnumTag;
 
-            var file_size: [8]u8 = undefined;
-            std.mem.writeInt(u64, &file_size, found, .big);
             if (kind == .memory) {
                 self.store.buffer.shrinkRetainingCapacity(found);
             } else {
                 try self.store.out.setLength(self.io, found);
             }
-            try self.writeRaw(fileSizeStart(version), &file_size);
+            if (sound == null) {
+                var file_size: [8]u8 = undefined;
+                std.mem.writeInt(u64, &file_size, found, .big);
+                try self.writeRaw(fileSizeStart(version), &file_size);
+            }
             removeTrailersFrom(self.store, found);
             self.store.may_have_leftovers = false;
             self.store.db = try DB.init(self.io, initOpts(self.store, self.store.out, null, null));
@@ -2054,7 +2090,8 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
                 },
                 .recover => {
                     if (!self.store.closed) die("the database is already open", .{});
-                    try self.recover();
+                    const ignoring = if (op.get("ignoring_root_header")) |v| v.bool else false;
+                    try self.recover(ignoring);
                 },
                 .raw_append => {
                     if (!self.store.closed) die("the file can only be written to directly while the database is closed", .{});

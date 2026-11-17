@@ -390,29 +390,63 @@ patch_run "if (bytes.len >= 3 and std.mem.eql(u8, bytes[0..3], \"xit\")) return 
 end_mutant
 
 begin_mutant recover-opens-damaged-commit
-patch_run "            var end: usize = bytes.len;
-" "            var end: usize = bytes.len;
-            const claimed: u64 = std.mem.readInt(u64, bytes[@intCast(fileSizeStart(version))..][0..8], .big);
+patch_run "                var end: usize = bytes.len;
+" "                var end: usize = bytes.len;
+                const claimed: u64 = std.mem.readInt(u64, bytes[@intCast(fileSizeStart(version))..][0..8], .big);
 "
 patch_run "if (trailerVerifies(bytes, file_id, end)) break end;" "if (end == claimed or trailerVerifies(bytes, file_id, end)) break end;"
 end_mutant
 
 begin_mutant recover-drops-one-more
-patch_run "            const found: usize = while (end >= smallest) : (end -= 1) {
-                if (trailerVerifies(bytes, file_id, end)) break end;
-            } else return error.InvalidDatabase;" "            const first: usize = while (end >= smallest) : (end -= 1) {
-                if (trailerVerifies(bytes, file_id, end)) break end;
-            } else return error.InvalidDatabase;
-            end = first - 1;
-            const found: usize = while (end >= smallest) : (end -= 1) {
-                if (trailerVerifies(bytes, file_id, end)) break end;
-            } else return error.InvalidDatabase;"
+patch_run "                break :found while (end >= smallest) : (end -= 1) {
+                    if (trailerVerifies(bytes, file_id, end)) break end;
+                } else return error.InvalidDatabase;" "                const first: usize = while (end >= smallest) : (end -= 1) {
+                    if (trailerVerifies(bytes, file_id, end)) break end;
+                } else return error.InvalidDatabase;
+                end = first - 1;
+                break :found while (end >= smallest) : (end -= 1) {
+                    if (trailerVerifies(bytes, file_id, end)) break end;
+                } else return error.InvalidDatabase;"
 end_mutant
 
 begin_mutant recover-leaves-root-header
-patch_run "            try self.writeRaw(fileSizeStart(version), &file_size);
-            removeTrailersFrom" "            _ = &file_size;
-            removeTrailersFrom"
+patch_run "                try self.writeRaw(fileSizeStart(version), &file_size);
+            }" "                _ = &file_size;
+            }"
+end_mutant
+
+# the port's rule of 2026-11-17: a sound root header is the commit, the trailers alone only when asked, and a
+# trailer with a tag this version doesn't know neither gone past nor cut back before
+begin_mutant recover-goes-past-sound-header
+patch_run "const sound = if (ignoring_root_header) null else soundRootHeader(bytes, file_id, version);" \
+    "const sound: ?usize = if (ignoring_root_header or true) null else soundRootHeader(bytes, file_id, version);"
+end_mutant
+
+begin_mutant recover-ignoring-root-header-not-heard
+patch_run "const sound = if (ignoring_root_header) null else soundRootHeader(bytes, file_id, version);" \
+    "const sound = if (false and ignoring_root_header) null else soundRootHeader(bytes, file_id, version);"
+end_mutant
+
+begin_mutant recover-sound-header-not-cut
+patch_run "                try self.store.out.setLength(self.io, found);" \
+    "                if (sound == null) try self.store.out.setLength(self.io, found);"
+end_mutant
+
+begin_mutant unknown-tag-cut-back-to-the-commit-before
+patch_run "if (trailerVerifies(bytes, file_id, end)) break end;" \
+    "if (trailerVerifies(bytes, file_id, end) and trailerTagKnown(bytes, end)) break end;"
+patch_run "if (!trailerTagKnown(bytes, found)) return error.InvalidEnumTag;" \
+    "if (sound != null and !trailerTagKnown(bytes, found)) return error.InvalidEnumTag;"
+end_mutant
+
+begin_mutant unknown-tag-cut-before-raising
+patch_run "            if (!trailerTagKnown(bytes, found)) return error.InvalidEnumTag;
+" "            const tag_known = trailerTagKnown(bytes, found);
+"
+patch_run "            removeTrailersFrom(self.store, found);
+            self.store.may_have_leftovers = false;" "            removeTrailersFrom(self.store, found);
+            if (!tag_known) return error.InvalidEnumTag;
+            self.store.may_have_leftovers = false;"
 end_mutant
 
 # compacting a history with no last moment (finding 28)

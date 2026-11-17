@@ -63,7 +63,7 @@ what Zig does hasn't changed. `tests/zig-only.txt` lists all 47, with the gate h
 script without the damage: for `recovery-open-errors`, that was compared with a script of only what came after, and only the
 last trailer's commit ID and checksum differ.
 
-**Seven scripts only the port can run** are in `tests/port-variants` too. What they do is an undefined use in Zig, or the port's own
+**Nine scripts only the port can run** are in `tests/port-variants` too. What they do is an undefined use in Zig, or the port's own
 `recover`, so there's no Zig script to make a variant of, and their oracle is Zig on the same script without what the port refuses,
 or `run --port`'s recovery. That was compared on each kind, and each is the same bytes at `bd6abc3`. They're there so that `guard-mutants.sh` finds every guard it gets wrong
 noticed by two fixtures, at least:
@@ -76,6 +76,7 @@ noticed by two fixtures, at least:
 | `compact-sliced-history--port` | A list root sliced to nothing, as `gen` found, and a version 1 list root whose only element is truly empty (finding 28). One whose last element was appended in a callback that wrote nothing compacts since `89da8e7` |
 | `recover-cut-during-creation--port` | `recover` on a file cut off during its creation, in both versions, made with raw ops: one whose empty root's trailer is whole becomes that new database with the file's own IDs, and one with that trailer cut short raises `InvalidDatabase`. It was the first half of `recover-without-first-commit--port`, and runs on every storage, as no sync made these files (D55) |
 | `recover-without-first-commit--port` | `recover` on a full copy that didn't finish, in both versions, which it scans, as a committed size of 0 is no commit to open at (the director's ruling on conformance-09). The manifest marks it `cut_short_copy`, as the port's file storages leave the database as it was after a failed copy (D55, below) |
+| `recover-sound-root-header--port`, `recover-sound-root-header-version-1--port` | `recover` by the port's rule of 2026-11-17, in both versions, each case in a database of its own and once with `ignoring_root_header`: a commit past a sound root header, which it cuts off, and goes to when asked; the same with that commit's data zeros, which by the trailers alone it goes to, reading only what follows from the zeros; a trailer with an unknown root tag past a sound root header, cut off without its tag being looked at, and refused with `InvalidEnumTag` when asked; and the root header naming such a trailer, refused either way, the bytes left as they were |
 
 `every-construct-sorted--port` also tries the byte writer on a key through a pair, and `overwriting-committed-bytes--port` now
 ends with a write through a cursor from before a `db_freeze`. `body-write-after-freeze--port` is a variant of a script that's
@@ -494,7 +495,18 @@ cuts what lies past it and writes nothing, and doesn't go on to a later trailer,
 checksum covers the trailer and not the data before it. Going by the trailers alone has to be asked for, by an argument. A
 trailer that verifies but whose root slot has a tag the port doesn't know is refused, as opening refuses it. **This rule is
 the port's own**, as the original has no recovery, so a second port reads it as a rule to follow, and not as what the
-original does. Every fixture that recovers does so where the root header can't be trusted, or says 0, where nothing changed. Every `reopen` that raises `InvalidDatabase` or
+original does. The fixtures that recovered before do so where the root header can't be trusted, or says 0, where nothing
+changed. `recover-sound-root-header--port` and its `-version-1` twin hold the rest, and what a port must match there is:
+
+| Case | Without the argument | With `ignoring_root_header` |
+|---|---|---|
+| a commit B past a sound root header at A | committed size A's, B cut off, nothing written | committed size B's, as a scan |
+| the same, B's data zeros, B's trailer whole | A's | B's: the root slot from B's trailer, a count of 0 and no elements, and nothing read beyond that |
+| past a sound root header at A, B's trailer verifying with a root tag this version doesn't know | A's, B cut off without its tag being looked at | `InvalidEnumTag`, and nothing cut or written: a `reopen` then opens at A |
+| the root header naming that trailer | `InvalidEnumTag`, and nothing changed | the same |
+
+Five guard mutants hold it: going past a sound root header, not hearing the argument, not cutting at a sound root header, an
+unknown tag cut back to the commit before, and an unknown tag cut before raising. Each is noticed by both scripts. Every `reopen` that raises `InvalidDatabase` or
 `TruncatedDatabase`:
 
 <!-- list 19 -->
