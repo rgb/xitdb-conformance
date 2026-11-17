@@ -16,6 +16,12 @@ fn commitOf(b: *std.Build, path: []const u8) []const u8 {
     return commit;
 }
 
+/// the folder a package's build.zig is in, for git to be asked about
+fn rootOf(b: *std.Build, package: *std.Build) []const u8 {
+    const path = package.root.toString(b.allocator) catch return ".";
+    return if (path.len == 0) "." else path;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -27,9 +33,9 @@ pub fn build(b: *std.Build) void {
     // ask, gives the commits it was exported from, as second-zig.sh does
     const options = b.addOptions();
     options.addOption([]const u8, "xitdb_commit", b.option([]const u8, "xitdb-commit", "the original's commit, for a build git can't ask") orelse
-        commitOf(b, xitdb_dep.builder.build_root.path orelse "."));
+        commitOf(b, rootOf(b, xitdb_dep.builder)));
     options.addOption([]const u8, "conformance_commit", b.option([]const u8, "conformance-commit", "this repository's commit, for a build git can't ask") orelse
-        commitOf(b, b.build_root.path orelse "."));
+        commitOf(b, rootOf(b, b)));
     const build_options = options.createModule();
 
     const run_exe = b.addExecutable(.{
