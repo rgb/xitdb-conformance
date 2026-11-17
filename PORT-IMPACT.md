@@ -203,7 +203,7 @@ committed. An op that failed before writing anything isn't listed, as it wouldn'
 <!-- list 16 -->
 - `scripts`: 04-rollback (2)
 - `tests/generated`: compact-203 (1), compact-205 (1), compact-206 (1), gen-12 (1), gen-16 (1), gen-17 (1), gen-3 (1), gen-9 (2), reads-105 (2), reads-107 (1), reads-110 (1), replica-305 (2)
-- `tests/valid`: path-api-edges (1), path-api-edges-sorted (1)
+- `tests/valid`: linked-counts-below-leaves-writes (1), linked-header-above-tree-writes (1), path-api-edges (1), path-api-edges-sorted (1)
 <!-- end -->
 
 | Script | What happens |
@@ -621,7 +621,17 @@ handles the error, a port poisons the transaction only if the write had written 
 header copied into the transaction first so that it's the write's own: only a slice has, on `linked-header-above-tree` and
 `linked-counts-below-leaves`, so those two are only for Zig, and their `--port` variants are the fixtures. Everywhere else the
 transaction commits, and the bytes must agree. The positions next to the ones that raise succeed, each in a database of its
-own, so a check made too early shows. That's work for the port only if its write descents lack the leaf check, which its
+own, so a check made too early shows.
+
+**Open: the slice's two variants.** The original's slice is two splits, one at the offset and then one at the size in what's
+left. At the first position that raises, 31 on `linked-header-above-tree` and 40 on `linked-counts-below-leaves`, the split at
+the offset still fits and writes its new leaves, and it's the second that runs past a leaf. That's why `run --port`, which goes
+by whether the original's op changed a byte of the file (`SCRIPT-FORMAT.md` section 11), poisons there. So the variants'
+`PoisonedTransaction` is the port's answer only if its slice has written before its check too. A port that checks the offset
+and the size against the tree before it writes anything refuses cleanly: its transaction goes on, and commits the bytes of one
+in which the slice never happened, which is also within the rule "a refusal reaches no file". The package session's run on
+copying decides which of the two these variants hold. If it's the second, they become plain fixtures where the callback
+commits, and the two `-writes` scripts leave `tests/zig-only.txt`. That's work for the port only if its write descents lack the leaf check, which its
 reads already have.
 
 ## What this doesn't cover
