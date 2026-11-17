@@ -1,26 +1,26 @@
 const std = @import("std");
 
-/// what `run --version` and `dump --version` say they were built from: a checkout's commit, with "(with
-/// uncommitted changes)" if its tracked files differ from it, and "unknown" where git can't say. That includes a
-/// folder that isn't the top of a repository of its own, like the exports second-zig.sh makes inside this one, so
-/// that git's search upward can't name this repository's commit for the original
-fn commitOf(b: *std.Build, path: []const u8) []const u8 {
-    var code: u8 = 0;
-    const prefix = b.runAllowFail(&.{ "git", "-C", path, "rev-parse", "--show-prefix" }, &code, .ignore) catch return "unknown";
-    if (std.mem.trim(u8, prefix, " \r\n").len != 0) return "unknown";
-    const head = b.runAllowFail(&.{ "git", "-C", path, "rev-parse", "HEAD" }, &code, .ignore) catch return "unknown";
-    const commit = b.dupe(std.mem.trim(u8, head, " \r\n"));
-    const changes = b.runAllowFail(&.{ "git", "-C", path, "status", "--porcelain", "--untracked-files=no" }, &code, .ignore) catch
-        return b.fmt("{s} (whether with uncommitted changes, unknown)", .{commit});
-    if (std.mem.trim(u8, changes, " \r\n").len != 0) return b.fmt("{s} (with uncommitted changes)", .{commit});
-    return commit;
-}
-
-/// the folder a package's build.zig is in, for git to be asked about
-fn rootOf(b: *std.Build, package: *std.Build) []const u8 {
-    const path = package.root.toString(b.allocator) catch return ".";
-    return if (path.len == 0) "." else path;
-}
+/// what `run --version` and `dump --version` say they were built from, as a file of two constants: a checkout's
+/// commit, with "(with uncommitted changes)" if its tracked files differ from it, and "unknown" where git can't say.
+/// That includes a folder that isn't the top of a repository of its own, like the exports second-zig.sh makes inside
+/// this one, so that git's search upward can't name this repository's commit for the original. A commit given to the
+/// build is used as it is
+const DESCRIBE =
+    \\commit_of() { # folder, commit given
+    \\    if [ -n "$2" ]; then printf '%s' "$2"; return; fi
+    \\    prefix=$(git -C "$1" rev-parse --show-prefix 2> /dev/null) || { printf unknown; return; }
+    \\    if [ -n "$prefix" ]; then printf unknown; return; fi
+    \\    head=$(git -C "$1" rev-parse HEAD 2> /dev/null) || { printf unknown; return; }
+    \\    if ! changes=$(git -C "$1" status --porcelain --untracked-files=no 2> /dev/null); then
+    \\        printf '%s (whether with uncommitted changes, unknown)' "$head"
+    \\    elif [ -n "$changes" ]; then
+    \\        printf '%s (with uncommitted changes)' "$head"
+    \\    else
+    \\        printf '%s' "$head"
+    \\    fi
+    \\}
+    \\printf 'pub const xitdb_commit = "%s";\npub const conformance_commit = "%s";\n' "$(commit_of "$1" "$2")" "$(commit_of "$3" "$4")"
+;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -29,14 +29,16 @@ pub fn build(b: *std.Build) void {
     const xitdb_dep = b.dependency("xitdb", .{});
     const xitdb = xitdb_dep.module("xitdb");
 
-    // asked of git every time zig build runs, so it follows the checkouts. A build from an export, which git can't
-    // ask, gives the commits it was exported from, as second-zig.sh does
-    const options = b.addOptions();
-    options.addOption([]const u8, "xitdb_commit", b.option([]const u8, "xitdb-commit", "the original's commit, for a build git can't ask") orelse
-        commitOf(b, rootOf(b, xitdb_dep.builder)));
-    options.addOption([]const u8, "conformance_commit", b.option([]const u8, "conformance-commit", "this repository's commit, for a build git can't ask") orelse
-        commitOf(b, rootOf(b, b)));
-    const build_options = options.createModule();
+    // asked of git at every build, by a step whose result is never kept, as git's answer changes without build.zig
+    // changing, which is all the build's own cache would see. A build from an export, which git can't ask, is given
+    // the commits it was exported from, as second-zig.sh does
+    const describe = b.addSystemCommand(&.{ "sh", "-c", DESCRIBE, "describe" });
+    describe.addDirectoryArg(xitdb_dep.path("."));
+    describe.addArg(b.option([]const u8, "xitdb-commit", "the original's commit, for a build git can't ask") orelse "");
+    describe.addDirectoryArg(b.path("."));
+    describe.addArg(b.option([]const u8, "conformance-commit", "this repository's commit, for a build git can't ask") orelse "");
+    describe.has_side_effects = true;
+    const build_options = b.createModule(.{ .root_source_file = describe.captureStdOut(.{ .basename = "build_options.zig" }) });
 
     const run_exe = b.addExecutable(.{
         .name = "run",
