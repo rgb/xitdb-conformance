@@ -630,15 +630,16 @@ header copied into the transaction first so that it's the write's own: only a sl
 transaction commits, and the bytes must agree. The positions next to the ones that raise succeed, each in a database of its
 own, so a check made too early shows.
 
-**Open: the slice's two variants.** The original's slice is two splits, one at the offset and then one at the size in what's
-left. At the first position that raises, 31 on `linked-header-above-tree` and 40 on `linked-counts-below-leaves`, the split at
-the offset still fits and writes its new leaves, and it's the second that runs past a leaf. That's why `run --port`, which goes
-by whether the original's op changed a byte of the file (`SCRIPT-FORMAT.md` section 11), poisons there. So the variants'
-`PoisonedTransaction` is the port's answer only if its slice has written before its check too. A port that checks the offset
-and the size against the tree before it writes anything refuses cleanly: its transaction goes on, and commits the bytes of one
-in which the slice never happened, which is also within the rule "a refusal reaches no file". The package session's run on
-copying decides which of the two these variants hold. If it's the second, they become plain fixtures where the callback
-commits, and the two `-writes` scripts leave `tests/zig-only.txt`. That's work for the port only if its write descents lack the leaf check, which its
+**The slice's two variants rest on the port's order of writing, which matches.** The original's slice is two splits, one at
+the offset and then one at the size in what's left. At the first position that raises, 31 on `linked-header-above-tree` and 40
+on `linked-counts-below-leaves`, the split at the offset still fits and writes its new leaves, and it's the second that runs past
+a leaf. That's why `run --port`, which goes by whether the original's op changed a byte of the file (`SCRIPT-FORMAT.md` section
+11), poisons there. A port that checked the offset and the size against the tree before writing would refuse cleanly and commit
+instead, which is also within the rule "a refusal reaches no file". So this was open until the package session ran both variants
+from this branch's fixtures (2026-11-17, at `845582f`, every one of its 1,678 cases passing). The port's slice is two splits and
+then the header, as the original's is, and its first split has written before the second runs past a leaf. So there it raises
+`InvalidBTreeNode` in the callback, and the transaction is then refused with `PoisonedTransaction`, as the variants hold. The
+other writes commit with the original's bytes, as they write nothing before their checks. That's work for the port only if its write descents lack the leaf check, which its
 reads already have.
 
 ## What this doesn't cover
