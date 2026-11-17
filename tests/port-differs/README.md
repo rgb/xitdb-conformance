@@ -15,7 +15,7 @@ first passes and the second fails, and `check.sh` holds it to that, so it notice
 |---|---|---|---|
 | `none-into-buffer` | 8 | a slot set to nothing, read into a buffer that isn't empty, raises `EndOfStream` | it's empty |
 | `stream-none` | 21 | streaming a slot set to nothing raises `UnexpectedTag` | it's an empty stream |
-| `stream-short-no-position` | 9 | streaming a short value from a cursor with no position raises `ExpectedSlotPosition` | it gives the value |
+| `stream-short-no-position` | 9 | streaming a short value from a cursor with no position raises `ExpectedSlotPosition`: a key from `sorted_map_get` with `key`, and a set's key-only entry's key from `read_key_value_pair` on `sorted_map_get` with `kv_pair` in a read path, read-only and after a map's init has retagged the set | it gives the value |
 | `stream-short-overwritten` | 9 | streaming a short value after its slot was overwritten gives the old length of the new bytes | it gives the cursor's value |
 | `iterator-past-slice` | 26 | an iterator on a sliced array list with an unwritten element gives an element past the end | it stops at the end, and agrees with `array_list_get` |
 | `iterator-from-key-past-size` | the director's ruling, 2026-11-15 | on a clone with fewer in its header than in its tree (`inputs/sorted-header-below-tree`), an iterator from a key whose place is past the size goes on to the tree's end | it gives nothing |

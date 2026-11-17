@@ -1,6 +1,14 @@
-{ "format": "xitdb-script/1", "description": "Finding 9, as Zig does it: streaming a short value needs the slot's position, which a sorted key reached by sorted_map_get with key doesn't have, so a two-byte key raises ExpectedSlotPosition while a long one works. Since 71ee0cf a key-only entry's key from read_key_value_pair has the entry's position, so that one streams in both (stream-short-set-key).", "hash_size": 20, "hash_id": "sha1", "file_id": "0011223344556677",
+{ "format": "xitdb-script/1", "description": "Finding 9, as Zig does it: streaming a short value needs the slot's position, which a sorted key can come without, so a two-byte key raises ExpectedSlotPosition while a long one works. There are three ways: the key reached by sorted_map_get with key; and a set's key-only entry reached by sorted_map_get with kv_pair in a read path, which leaves the entry where it is and gives it no position, so the key read_key_value_pair gives for it has none either. That is what getKeyValuePair does on a sorted map made over the set, read-only, or writable, where the map's init retags the set as a map first. Since 71ee0cf a key-only entry's key from read_key_value_pair has the entry's position when the entry has one, so a set's entry from an iterator streams in both (stream-short-set-key).", "hash_size": 20, "hash_id": "sha1", "file_id": "0011223344556677",
   "ops": [
     { "op": "write_path", "on": "root", "path": [{ "sorted_map_init": { "set": true } }, { "sorted_map_get": { "key": "ab" } }] },
     { "op": "read_path", "on": "root", "path": [{ "sorted_map_get": { "key": "ab" } }], "as": "by_path" },
-    { "op": "read_stream", "on": "by_path", "steps": [], "expect_error": "ExpectedSlotPosition" }
+    { "op": "read_stream", "on": "by_path", "steps": [], "expect_error": "ExpectedSlotPosition" },
+    { "op": "read_path", "on": "root", "path": [{ "sorted_map_get": { "kv_pair": "ab" } }], "as": "entry_read_only", "note": "what getKeyValuePair does: the entry in a read path, which leaves a key-only entry where it is, with no position" },
+    { "op": "read_key_value_pair", "on": "entry_read_only", "key_as": "key_read_only" },
+    { "op": "read_stream", "on": "key_read_only", "steps": [], "expect_error": "ExpectedSlotPosition" },
+    { "op": "write_path", "on": "root", "path": [{ "sorted_map_init": {  } }], "note": "a writable init as a map, which retags the set" },
+    { "op": "slot", "on": "root", "expect": { "tag": "sorted_map" } },
+    { "op": "read_path", "on": "root", "path": [{ "sorted_map_get": { "kv_pair": "ab" } }], "as": "entry_retagged", "note": "what getKeyValuePair does: the entry in a read path, which leaves a key-only entry where it is, with no position" },
+    { "op": "read_key_value_pair", "on": "entry_retagged", "key_as": "key_retagged" },
+    { "op": "read_stream", "on": "key_retagged", "steps": [], "expect_error": "ExpectedSlotPosition" }
   ] }

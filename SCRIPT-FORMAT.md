@@ -816,7 +816,7 @@ scripts for each, one with what Zig does and one with what the port does.
 |---|---|---|
 | `read_bytes_into` with a `size` above 0, on a slot with nothing in it | `EndOfStream` | it's empty |
 | `read_stream` on a slot with nothing in it | `UnexpectedTag` | an empty stream |
-| `read_stream` on a `short_bytes` slot from a cursor with no position, which is a key from `{"sorted_map_get": {"key": ...}}`. Since `71ee0cf`, the key `read_key_value_pair` gives for a set's entry has the entry's position, and streams in both | `ExpectedSlotPosition` | it gives the value |
+| `read_stream` on a `short_bytes` slot from a cursor with no position, which is a key from `{"sorted_map_get": {"key": ...}}`, or the key `read_key_value_pair` gives for a set's key-only entry reached by `{"sorted_map_get": {"kv_pair": ...}}` in a read path, which leaves the entry where it is with no position. That's what a wrapper's `getKeyValuePair` does on a sorted map made over a set, read-only, or after a writable init has retagged the set as a map. Since `71ee0cf`, the key `read_key_value_pair` gives for a set's entry has the entry's position where the entry has one, as from an iterator, and streams in both | `ExpectedSlotPosition` | it gives the value |
 | `read_stream` on a `short_bytes` slot that has since been overwritten | the length from the cursor and the bytes from the file, so neither value | it gives what the cursor holds |
 | `next` on an array list's iterator, when what it would give is past the end of the list. It stops after giving as many elements as the list has, it skips a slot that's truly empty, and a slice leaves what's past the new end in its blocks. Since `89da8e7` an append writes a `none` slot marked full, which isn't skipped, so only a version 1 file written before it can have this: `[unwritten, 1, 2, 3]` sliced to a size of 2 at `6b93af1` gives 1 and 2 | it gives what `{"array_list_get": 2}` says isn't there | it goes through the positions up to the list's size and no further, so here it gives 1 |
 | `iterator` with `from_key` on a sorted map or set, from a key whose place, its `rank`, is past the collection's `count` (`iterator-from-key-past-size`) | it stops only when its index equals the size, so it goes on to the tree's end | it gives nothing |
@@ -1288,3 +1288,7 @@ none of it is left running.
 
 None of this is a fixture. The answers to expect come from the writer as it commits, so a port's runner needs none of
 it, only its reader.
+
+**A third key with no position** (2026-11-17). `tests/port-differs/stream-short-no-position` has a set's key-only entry's
+key from `read_key_value_pair` on `{"sorted_map_get": {"kv_pair": ...}}` in a read path too, read-only and after a map's
+init has retagged the set, which is what a wrapper's `getKeyValuePair` does (section 10). Nothing a script says changes.

@@ -1,6 +1,14 @@
-{ "format": "xitdb-script/1", "description": "Finding 9, as the port does it: streaming a short value serves the cursor's own slot, with or without a position, so a key reached by sorted_map_get with key streams.", "hash_size": 20, "hash_id": "sha1", "file_id": "0011223344556677",
+{ "format": "xitdb-script/1", "description": "Finding 9, as the port does it: streaming a short value serves the cursor's own slot, with or without a position, so each of the three keys streams: the one reached by sorted_map_get with key, and a set's key-only entry's key from read_key_value_pair on sorted_map_get with kv_pair in a read path, read-only and after a writable init has retagged the set as a map.", "hash_size": 20, "hash_id": "sha1", "file_id": "0011223344556677",
   "ops": [
     { "op": "write_path", "on": "root", "path": [{ "sorted_map_init": { "set": true } }, { "sorted_map_get": { "key": "ab" } }] },
     { "op": "read_path", "on": "root", "path": [{ "sorted_map_get": { "key": "ab" } }], "as": "by_path" },
-    { "op": "read_stream", "on": "by_path", "steps": [{ "read": 10, "expect": "ab" }] }
+    { "op": "read_stream", "on": "by_path", "steps": [{ "read": 10, "expect": "ab" }] },
+    { "op": "read_path", "on": "root", "path": [{ "sorted_map_get": { "kv_pair": "ab" } }], "as": "entry_read_only", "note": "what getKeyValuePair does: the entry in a read path, which leaves a key-only entry where it is, with no position" },
+    { "op": "read_key_value_pair", "on": "entry_read_only", "key_as": "key_read_only" },
+    { "op": "read_stream", "on": "key_read_only", "steps": [{ "read": 10, "expect": "ab" }] },
+    { "op": "write_path", "on": "root", "path": [{ "sorted_map_init": {  } }], "note": "a writable init as a map, which retags the set" },
+    { "op": "slot", "on": "root", "expect": { "tag": "sorted_map" } },
+    { "op": "read_path", "on": "root", "path": [{ "sorted_map_get": { "kv_pair": "ab" } }], "as": "entry_retagged", "note": "what getKeyValuePair does: the entry in a read path, which leaves a key-only entry where it is, with no position" },
+    { "op": "read_key_value_pair", "on": "entry_retagged", "key_as": "key_retagged" },
+    { "op": "read_stream", "on": "key_retagged", "steps": [{ "read": 10, "expect": "ab" }] }
   ] }
