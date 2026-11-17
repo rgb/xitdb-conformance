@@ -10,8 +10,13 @@
 //!   the old file open goes on seeing the old file's last state, whole, whatever is committed to the new one, and a
 //!   reader opened after the rename sees the new file's states, and then its last.
 //!
-//! Three runs: with a pause, the writer commits and then asks. Without one, it asks several times and commits while
-//! the reader answers. Then the rename. It exits with 0 if the rule held, and says where it didn't otherwise.
+//! Three runs: "a commit, then a question", where the writer commits and then asks; "questions during a commit",
+//! where it asks several times and commits while the reader answers; and "after the rename". It exits with 0 if the
+//! rule held, and says where it didn't otherwise.
+//!
+//! While it runs, the folder holds `run`, the words of the run it's in, and `readers`, the process ID of each reader
+//! it has started, each the leader of a process group of its own. So when two-processes.sh's alarm ends it, the
+//! script can say which run a reader stopped answering in, and end whatever is left of the readers.
 
 const std = @import("std");
 const xitdb = @import("xitdb");
@@ -95,6 +100,28 @@ const Writer = struct {
     }
 };
 
+/// what two-processes.sh reads if the alarm ends this: the run, and the readers' process IDs
+const Record = struct {
+    io: Io,
+    arena: std.mem.Allocator,
+    folder: []const u8,
+    pids: std.ArrayList(u8) = .empty,
+
+    fn write(self: *Record, name: []const u8, data: []const u8) void {
+        const path = std.fs.path.join(self.arena, &.{ self.folder, name }) catch fail("out of memory", .{});
+        Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = data }) catch |err| fail("{s} couldn't be written: {s}", .{ path, @errorName(err) });
+    }
+
+    fn run(self: *Record, words: []const u8) void {
+        self.write("run", words);
+    }
+
+    fn started(self: *Record, pid: anytype) void {
+        self.pids.print(self.arena, "{d}\n", .{pid}) catch fail("out of memory", .{});
+        self.write("readers", self.pids.items);
+    }
+};
+
 const Reader = struct {
     name: []const u8,
     child: std.process.Child,
@@ -106,13 +133,15 @@ const Reader = struct {
     seen: ?u64 = null,
     answers: u64 = 0,
 
-    fn start(io: Io, arena: std.mem.Allocator, name: []const u8, argv: []const []const u8) !*Reader {
+    fn start(io: Io, arena: std.mem.Allocator, record: *Record, name: []const u8, argv: []const []const u8) !*Reader {
         const self = try arena.create(Reader);
         self.* = .{
             .name = name,
-            .child = std.process.spawn(io, .{ .argv = argv, .stdin = .pipe, .stdout = .pipe, .stderr = .inherit }) catch |err|
+            // a process group of its own, so that whatever it starts can be ended with it
+            .child = std.process.spawn(io, .{ .argv = argv, .stdin = .pipe, .stdout = .pipe, .stderr = .inherit, .pgid = 0 }) catch |err|
                 fail("{s} couldn't be started: {s}", .{ argv[0], @errorName(err) }),
         };
+        record.started(self.child.id.?);
         self.in = self.child.stdin.?.writerStreaming(io, &self.in_buffer);
         self.out = self.child.stdout.?.readerStreaming(io, &self.out_buffer);
         const first = self.line();
@@ -170,6 +199,8 @@ pub fn main(init: std.process.Init) !void {
     const path = try std.fs.path.join(arena, &.{ folder, "db.db" });
     const new_path = try std.fs.path.join(arena, &.{ folder, "compacted.db" });
 
+    var record = Record{ .io = io, .arena = arena, .folder = folder };
+    record.run("opening the file");
     const file = try Io.Dir.cwd().createFile(io, path, .{ .read = true, .truncate = true });
     var writer = Writer{ .io = io, .gpa = gpa, .arena = arena, .file = file, .db = undefined, .history = undefined };
     writer.db = try DB.init(io, .{ .file = file, .hash_id = xitdb.HashId.fromBytes("sha1"), .file_id = 0x2b0c0e55e5000001 });
@@ -177,7 +208,8 @@ pub fn main(init: std.process.Init) !void {
     try writer.commit(0);
 
     // with a pause: commit, then ask
-    const first = try Reader.start(io, arena, "the reader", &.{ reader_path, kind, path });
+    const first = try Reader.start(io, arena, &record, "the reader", &.{ reader_path, kind, path });
+    record.run("a commit, then a question");
     first.send(1);
     first.check(&writer, "before the first commit");
     var k: u64 = 1;
@@ -190,6 +222,7 @@ pub fn main(init: std.process.Init) !void {
     first.expect(writer.last(), "once the writer had finished with a pause");
 
     // without one: ask, and commit while the reader answers
+    record.run("questions during a commit");
     while (k <= WITH_A_PAUSE + WITHOUT_A_PAUSE) : (k += 1) {
         first.send(ASKED_AT_ONCE);
         try writer.commit(k);
@@ -199,6 +232,7 @@ pub fn main(init: std.process.Init) !void {
     first.expect(writer.last(), "once the writer had finished without a pause");
 
     // the rename: compacted into a new file, which takes the old one's name
+    record.run("after the rename");
     const old_last = writer.last();
     const new_file = try Io.Dir.cwd().createFile(io, new_path, .{ .read = true, .truncate = true });
     var offsets = std.AutoHashMap(u64, u64).init(gpa);
@@ -212,7 +246,7 @@ pub fn main(init: std.process.Init) !void {
 
     first.send(1);
     first.expect(old_last, "the old file, just after the rename");
-    const second = try Reader.start(io, arena, "the reader opened after the rename", &.{ reader_path, kind, path });
+    const second = try Reader.start(io, arena, &record, "the reader opened after the rename", &.{ reader_path, kind, path });
     second.send(1);
     second.check(&writer, "after the rename");
     while (k <= WITH_A_PAUSE + WITHOUT_A_PAUSE + AFTER_THE_RENAME) : (k += 1) {

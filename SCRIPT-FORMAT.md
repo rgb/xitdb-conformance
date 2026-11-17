@@ -1262,10 +1262,11 @@ before it copied, with `n` set to k, `blob` set to 2000 + 13k bytes, byte i bein
 
 **The rule**, in three runs on each kind:
 
-- With a pause: 300 commits, each followed by a question.
-- Without one: 300 commits, each with four questions sent before it, which the reader answers while the writer commits.
-- The rename: the file compacted into a new one, which is renamed over the old one's name, and then 50 commits to the
-  new one, as the original's main client does when it collects garbage.
+- "a commit, then a question": 300 commits, each followed by a question.
+- "questions during a commit": 300 commits, each with four questions sent before it, which the reader answers while the
+  writer commits.
+- "after the rename": the file compacted into a new one, which is renamed over the old one's name, and then 50 commits
+  to the new one, as the original's main client does when it collects garbage.
 
 Every answer has to be a state the writer committed. The n of a reader's answers never goes down, and no answer is an
 error. Once the writer has finished a run, the next answer is the last state, without which a reader stuck on its first
@@ -1277,6 +1278,13 @@ and its last one at the end.
 if `XITDB_READER` names one; without one it says so. It also shows that the writer refuses a reader stuck on its first
 answer, one that opens the file again for each answer, which can't keep the old file across the rename, and one that
 answers an error. Each kind takes a second or two.
+
+**A reader that stops answering** is ended. A reader's three runs on one kind have `TWO_PROCESSES_ALARM` seconds, 300
+unless it's set. If they run out, `two-processes.sh` says "the <reader> on <kind> gave no answer for <n> s, in the run
+"<run>"", by the run's words above, and fails. The writer starts each reader in a process group of its own and writes
+their process IDs, so whatever is left of a reader, and of what it started, is ended whenever the writer doesn't end
+well. `check.sh` shows it with a reader that says `open` and never answers, under an alarm of 8 seconds, and checks that
+none of it is left running.
 
 None of this is a fixture. The answers to expect come from the writer as it commits, so a port's runner needs none of
 it, only its reader.

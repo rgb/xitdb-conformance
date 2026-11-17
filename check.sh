@@ -698,6 +698,29 @@ expect_broken reopening "the old file, after a commit to the new one"
 fake_reader failing "echo open; while read -r _; do echo 'error NotToday'; done"
 expect_broken failing "an answer was \"error NotToday\""
 echo "two-processes refuses a reader stuck on its first answer, one that opens the file again, and one that can't read"
+# and a reader that never answers is ended by the alarm, which says which reader on which kind and in which run, and
+# nothing of it is left running
+fake_reader silent "echo open; exec sleep 100000"
+status=0
+TWO_PROCESSES_ALARM=8 TWO_PROCESSES_OUT="$OUT/two-processes-silent" ./two-processes.sh "$OUT/silent" > "$OUT/silent.out" 2>&1 || status=$?
+want='the port reader on file gave no answer for 8 s, in the run "a commit, then a question"'
+if [ "$status" -ne 1 ] || ! grep -qF -- "$want" "$OUT/silent.out"; then
+    echo "two-processes.sh should have said \"$want\" and failed, and its exit status is $status:"
+    tail -n 3 "$OUT/silent.out"
+    exit 1
+fi
+for pid in $(cat "$OUT/two-processes-silent/port-file/readers"); do
+    tries=0
+    while kill -0 "$pid" 2> /dev/null && [ "$tries" -lt 30 ]; do
+        sleep 0.1
+        tries=$((tries + 1))
+    done
+    if kill -0 "$pid" 2> /dev/null; then
+        echo "the reader that never answered was left running, as process $pid"
+        exit 1
+    fi
+done
+echo "the alarm ends a reader that never answers, says where, and leaves nothing of it running"
 
 echo "== what the port will change"
 ./impact.sh --check
