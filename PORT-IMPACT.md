@@ -75,7 +75,7 @@ noticed by two fixtures, at least:
 | `stale-cursors--port` | Every way to write through each kind of stale cursor: from an earlier transaction, from before a `db_freeze`, from before a concat, and from a rolled-back transaction. And the reads, the init and the concat's result that stay valid |
 | `compact-sliced-history--port` | A list root sliced to nothing, as `gen` found, and a version 1 list root whose only element is truly empty (finding 28). One whose last element was appended in a callback that wrote nothing compacts since `89da8e7` |
 | `recover-cut-during-creation--port` | `recover` on a file cut off during its creation, in both versions, made with raw ops: one whose empty root's trailer is whole becomes that new database with the file's own IDs, and one with that trailer cut short raises `InvalidDatabase`. It was the first half of `recover-without-first-commit--port`, and runs on every storage, as no sync made these files (D55) |
-| `recover-without-first-commit--port` | `recover` on a full copy that didn't finish, in both versions, which it scans as any other (the director's ruling on conformance-09). The manifest marks it `cut_short_copy`, as the port's file storages leave the database as it was after a failed copy (D55, below) |
+| `recover-without-first-commit--port` | `recover` on a full copy that didn't finish, in both versions, which it scans, as a committed size of 0 is no commit to open at (the director's ruling on conformance-09). The manifest marks it `cut_short_copy`, as the port's file storages leave the database as it was after a failed copy (D55, below) |
 
 `every-construct-sorted--port` also tries the byte writer on a key through a pair, and `overwriting-committed-bytes--port` now
 ends with a write through a cursor from before a `db_freeze`. `body-write-after-freeze--port` is a variant of a script that's
@@ -488,7 +488,13 @@ a cursor from a transaction that didn't commit, which no script can do, as `run`
 ## D19: opening a file whose root header can't be trusted
 
 The port refuses to open such a file, with `UntrustedRootHeader`, and a separate call, `recover`, goes back to the last trailer
-whose checksum verifies (D22). So nothing is dropped except by that call. Every `reopen` that raises `InvalidDatabase` or
+whose checksum verifies (D22). So nothing is dropped except by that call. **Since 2026-11-17 a sound root header is the
+commit** (the user's decision, on its first client's review): where the root header can be trusted, `recover` opens at it,
+cuts what lies past it and writes nothing, and doesn't go on to a later trailer, even one that verifies, as a trailer's
+checksum covers the trailer and not the data before it. Going by the trailers alone has to be asked for, by an argument. A
+trailer that verifies but whose root slot has a tag the port doesn't know is refused, as opening refuses it. **This rule is
+the port's own**, as the original has no recovery, so a second port reads it as a rule to follow, and not as what the
+original does. Every fixture that recovers does so where the root header can't be trusted, or says 0, where nothing changed. Every `reopen` that raises `InvalidDatabase` or
 `TruncatedDatabase`:
 
 <!-- list 19 -->
@@ -512,7 +518,8 @@ at that trailer, with a root header that says so, and that's what the port's has
 `recovery-torn-root-slot` and `recovery-garbage-padding` aren't affected, as what's before the committed size is never read.
 `replicate-failed-first-sync` was here until `89da8e7`: a failed sync at 0 leaves a database without a first commit now, which
 the original opens, and the port does what the original does there (D31 item 4), so it's a plain fixture and its variant is
-gone. `recover` on such a database scans as on any other (`recover-without-first-commit--port`).
+gone. `recover` on such a database scans the trailers, as a committed size of 0 is no commit to open at
+(`recover-without-first-commit--port`).
 
 ## D55: a full copy into a file
 
@@ -573,7 +580,7 @@ touch it.
 | `rolled-back-reads--port`, `stale-cursors--port` | D16, D18 | none | Leave |
 | `write-if-empty-emptied-slot` | 17 | `89da8e7`: an append leaves a `none` marked full where the cursor's slot is empty | Leaves, with the rule refined (below): it writes now where a `none` was written behind a cursor made on an empty slot, as upstream does. From `bd6abc3` |
 | the 33 generated scripts in `tests/zig-only.txt` | 1, 16, D24 | none | Leave |
-| `recover` | D19 | `92a926e`: a database without a first commit is one the original opens | Leaves, as an explicit call that scans as it always did, on that state too (the director's ruling): `recover-without-first-commit--port`, and `recover-cut-during-creation--port` for a file cut off during its creation |
+| `recover` | D19 | `92a926e`: a database without a first commit is one the original opens | Leaves, as an explicit call that scans, on that state too (the director's ruling; since 2026-11-17 it opens at a sound root header instead, and scans where there's none, which this state is): `recover-without-first-commit--port`, and `recover-cut-during-creation--port` for a file cut off during its creation |
 
 **Finding 17's rule is refined** for the fixes branch and the port, on the `xitdb` session's finding that the branch's
 `writeIfEmpty` held back after an append or an insert, whose slot in the file is a `none` marked full while the cursor's own

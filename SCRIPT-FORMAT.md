@@ -1042,13 +1042,25 @@ that's no bigger than a new database again, opens a bigger one as it is, and rai
 |---|---|---|
 | `recover` | | The port's recovery call, at the top level, while the database is closed |
 
-It looks from the end of the file back, a byte at a time, for the last position that ends a trailer whose checksum verifies,
-using the file ID in the file's header. It cuts the file off there, and writes that position as the root header's committed
+What it does depends on the root header, by the port's own rule (the user's decision of 2026-11-17; the original has no
+recovery). **Where the root header is sound**, which is where `reopen` would open the file, it opens at that commit: it cuts
+the file off at the committed size, writes nothing else, and doesn't go on to a later trailer, even one that verifies, as a
+trailer's checksum covers the trailer and not the data before it, so after a power cut one can verify whose data never
+arrived. Going by the trailers alone there has to be asked for, which no script does yet. A trailer that verifies but whose
+root slot has a tag the port doesn't know is refused as opening refuses it, and not gone past or cut back before.
+
+**Where it can't be trusted**, in the cases above where `reopen` raises `UntrustedRootHeader`, or where the committed size is
+0, which is no commit to open at, it scans the trailers. It looks from the end of the file back, a byte at a time, for the
+last position that ends a trailer whose checksum verifies, using the file ID in the file's header. It cuts the file off there, and writes that position as the root header's committed
 size, at offset 24 in version 2 and 29 in version 1, and leaves what's before it as it is, so a version 1 file's copy of the root
 slot isn't updated, as the original no longer updates it (D31 item 1). Then it opens the database, which is left open. It takes no commit ID, and a top-level op with it
 in has no commit. A commit past that position is lost, and its commit ID stays in the sidecar, as it was used. With a bad magic
 number, or no trailer that verifies, it raises `InvalidDatabase`, and the database stays closed. So all it leaves is what the
 file held just after that commit, and nothing is dropped except by this call.
+
+`run --port` acts out the scan. Every script that recovers does so where the root header can't be trusted or says 0, where
+the two rules agree, so none meets the sound case yet; a script of its own is to hold it, with the argument that asks for the
+trailers alone.
 
 **Compacting a history with no last moment.** A `compact` raises `EmptyLastMoment` if the current database's root is an
 array list with no elements, or whose last element is empty: its tag is `none` and `full` isn't set (finding 28). Since
@@ -1204,3 +1216,8 @@ buffered file's length only after a write succeeds, and check a leaf's count in 
   runs, says how it stands now, without failing.
 
 To run the new scripts, a runner needs nothing new: `InvalidBTreeNode` from more ops, and the inputs it already reads.
+
+**`recover` opens at a sound root header** (2026-11-17, the user's decision, the port's own rule). Where the root header can
+be trusted, the port's recovery opens at that commit, cuts what's past it and writes nothing, and goes by the trailers alone
+only when asked to. Where it can't be trusted, or says 0, nothing changes, and that's every script that recovers, so no
+expected file moved. Section 11 says the rule, and that the sound case has no script yet.
