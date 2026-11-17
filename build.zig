@@ -134,4 +134,28 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(wrappers_exe);
+
+    // two processes on one file: the original's own reader, and the writer that holds a reader to the rule
+    // (SCRIPT-FORMAT.md section 15)
+    const reader_exe = b.addExecutable(.{
+        .name = "reader",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/reader.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "xitdb", .module = xitdb }},
+        }),
+    });
+    b.installArtifact(reader_exe);
+
+    const two_processes_exe = b.addExecutable(.{
+        .name = "two-processes",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/two_processes.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "xitdb", .module = xitdb }},
+        }),
+    });
+    b.installArtifact(two_processes_exe);
 }

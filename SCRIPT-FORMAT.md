@@ -1232,3 +1232,51 @@ be trusted, the port's recovery opens at that commit, cuts what's past it and wr
 only when asked to. Where it can't be trusted, or says 0, nothing changes, and that's every script that recovers, so no
 expected file moved. Section 11 says the rule. `recover-sound-root-header--port` and its `-version-1` twin hold it, and to
 run them a runner needs `ignoring_root_header` on `recover`, and `InvalidEnumTag` (section 7).
+
+**A reader in another process** (2026-11-17, brief conformance-10). Section 15 says what a program must do for
+`two-processes.sh` to hold it to the arrangement a port's first client rests on. Nothing a script says changes.
+
+## 15. A reader in another process
+
+`two-processes.sh` holds what no script can: the original commits to a file while a reader in another process, with no
+lock and one database object, reads it. The writer is the original, in `src/two_processes.zig`. The reader is a program
+given by its path, as the script's argument or as `XITDB_READER`, which a port provides. The original's own reader,
+`src/reader.zig`, always runs too, which holds the test itself.
+
+**What a reader does.**
+
+- `<reader> --kinds` prints the file storage kinds it has, one word to a line, in its own words. It's run on each.
+- `<reader> <kind> <file>` opens the file once, read-only, with no lock, with that storage kind, and prints `open`. If it
+  can't, it prints `error <name>` and exits.
+- Then, for each line on its standard input, whatever the line says, it prints one line, and flushes it:
+  - `state <n> <sha256> <count>`. These are all read from ONE cursor to the root's last moment, `{"array_list_get": -1}`,
+    so that one answer can't mix two commits: the uint at the key `n`; the SHA-256 of the bytes at the key `blob`, in
+    lowercase hex; and the count of the array list at the key `items`. The keys are the SHA-1 of `n`, `blob` and
+    `items`, as `{"sha1": ...}` is in a script.
+  - `error <name>`, if any of that fails, with the error's name in the reader's own words.
+- At the end of its input it exits with 0.
+
+**What the writer commits.** A history at the root, with a hash size of 20 and the hash ID `sha1`. Moment k is the one
+before it copied, with `n` set to k, `blob` set to 2000 + 13k bytes, byte i being (7k + 31i) mod 256, and k appended to
+`items`. State 0 is committed before the reader opens the file, so there's always a moment.
+
+**The rule**, in three runs on each kind:
+
+- With a pause: 300 commits, each followed by a question.
+- Without one: 300 commits, each with four questions sent before it, which the reader answers while the writer commits.
+- The rename: the file compacted into a new one, which is renamed over the old one's name, and then 50 commits to the
+  new one, as the original's main client does when it collects garbage.
+
+Every answer has to be a state the writer committed. The n of a reader's answers never goes down, and no answer is an
+error. Once the writer has finished a run, the next answer is the last state, without which a reader stuck on its first
+answer would pass. Across the rename, the reader that kept the old file open answers the old file's last state every
+time, whole, through all the commits to the new one. A reader opened after the rename answers the new file's states,
+and its last one at the end.
+
+**What `check.sh` holds.** It runs the script with the original's reader on `file` and `buffered_file`, and with a port's
+if `XITDB_READER` names one; without one it says so. It also shows that the writer refuses a reader stuck on its first
+answer, one that opens the file again for each answer, which can't keep the old file across the rename, and one that
+answers an error. Each kind takes a second or two.
+
+None of this is a fixture. The answers to expect come from the writer as it commits, so a port's runner needs none of
+it, only its reader.

@@ -664,6 +664,41 @@ expect_upstream "wasn't asked" XITDB_OFFLINE=1
 rm -rf "$UP"
 echo "upstream.sh says each of its answers, a pin behind upstream among them, and none of them fails the check"
 
+echo "== two processes on one file"
+# the original writing while a reader in another process reads, with the original's own reader on each of its kinds,
+# and a port's if XITDB_READER names one (SCRIPT-FORMAT.md section 15)
+TWO_PROCESSES_OUT="$OUT/two-processes" ./two-processes.sh
+# and the writer notices a reader that breaks the rule. These are made of the original's reader
+OWN=$PWD/zig-out/bin/reader
+fake_reader() { # its name, then what it does once it has said it's open
+    {
+        echo '#!/bin/sh'
+        echo 'if [ "$1" = --kinds ]; then echo file; exit 0; fi'
+        echo "$2"
+    } > "$OUT/$1"
+    chmod +x "$OUT/$1"
+}
+expect_broken() { # the fake reader, what the writer should say
+    status=0
+    perl -e 'alarm shift; exec @ARGV' 300 zig-out/bin/two-processes "$OUT/$1" file "$OUT/two-processes-$1" > /dev/null 2> "$OUT/$1.err" || status=$?
+    if [ "$status" -ne 1 ] || ! grep -qF -- "$2" "$OUT/$1.err"; then
+        echo "two-processes should have refused the reader $1 with \"$2\", and its exit status is $status:"
+        head -n 3 "$OUT/$1.err"
+        exit 1
+    fi
+}
+# one stuck on its first answer, which every answer allows but the last
+fake_reader stuck "first=\$(printf 'read\n' | '$OWN' \"\$1\" \"\$2\" | sed -n 2p); echo open; while read -r _; do echo \"\$first\"; done"
+expect_broken stuck "once the writer had finished with a pause"
+# one that opens the file again for each answer, which can't keep the old file across the rename. Just after it,
+# the compacted file's last state is the old one's, so it shows at the first commit to the new file
+fake_reader reopening "echo open; while read -r _; do printf 'read\n' | '$OWN' \"\$1\" \"\$2\" | sed -n 2p; done"
+expect_broken reopening "the old file, after a commit to the new one"
+# and one that can't read
+fake_reader failing "echo open; while read -r _; do echo 'error NotToday'; done"
+expect_broken failing "an answer was \"error NotToday\""
+echo "two-processes refuses a reader stuck on its first answer, one that opens the file again, and one that can't read"
+
 echo "== what the port will change"
 ./impact.sh --check
 # and that it can notice, as a list out of date is the failure it's for

@@ -55,6 +55,11 @@ independent of the Swift code.
   what each one moves, and lists every place that names the commit followed ([below](#following-the-original)).
 - `upstream.sh`: says how the commit the fixtures follow stands against upstream's HEAD, against the record in
   `tests/upstream.txt`, without failing. `check.sh` runs it.
+- `two-processes.sh [reader]`: the original, `src/two_processes.zig`, commits to a file while a reader in another
+  process reads it, and holds the reader to every answer being a committed state, in order, up to the last, and to a
+  file kept open across a rename of a compacted copy over its name. The original's own reader, `src/reader.zig`, always
+  runs; a port's is given as the argument or `XITDB_READER`. `SCRIPT-FORMAT.md` section 15 says what a reader prints.
+  `check.sh` runs it.
 - `tests/samples/`: databases that programs using the original wrote, which `fixtures.sh` copies to `fixtures/samples/`
   with `dump`'s listing of each, so that the port's reading can be compared with the original's.
 - `check.sh`: the gate. It builds everything and checks all of the above, in debug and release builds and across
