@@ -29,6 +29,9 @@ rm -rf "$WORK"
 mkdir -p "$WORK/reference" "$WORK/zig"
 git -C "$ZIG_ORIGINAL" archive HEAD src | tar -x -C "$WORK/zig"
 cp "$WORK/zig/src/lib.zig" "$WORK/lib.original.zig"
+# what run --version says a mutant's runner was built from
+printf 'pub const xitdb_commit = "%s (src/lib.zig as mutants.sh changes it)";\npub const conformance_commit = "%s";\n' \
+    "$(git -C "$ZIG_ORIGINAL" rev-parse HEAD)" "$(git rev-parse HEAD)" > "$WORK/build_options.zig"
 
 SCRIPTS=$(ls scripts/*.json tests/valid/*.json tests/generated/*.json)
 
@@ -70,7 +73,8 @@ try_mutant() { # name, old text, new text, which occurrence
         echo "$name: the patch changed nothing"
         exit 1
     fi
-    zig build-exe --dep xitdb -Mroot=src/run.zig "-Mxitdb=$WORK/zig/src/lib.zig" "-femit-bin=$WORK/run-mutant" --cache-dir "$WORK/cache" 2> "$WORK/build.err" || {
+    zig build-exe --dep xitdb --dep build_options -Mroot=src/run.zig "-Mxitdb=$WORK/zig/src/lib.zig" "-Mbuild_options=$WORK/build_options.zig" \
+        "-femit-bin=$WORK/run-mutant" --cache-dir "$WORK/cache" 2> "$WORK/build.err" || {
         echo "$name: it doesn't build:"
         head -n 5 "$WORK/build.err"
         exit 1

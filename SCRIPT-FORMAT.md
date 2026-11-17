@@ -732,6 +732,7 @@ The checksum is computed by the engine and isn't in the sidecar. It should come 
 
 ```
 run <script> <out.db> [--kind buffered_file|file|memory] [--allow-port-differences] [--port] [--inputs <dir>]
+run --version
 ```
 
 The Zig runner truncates `<out.db>`, runs the script, and writes the file and the sidecar. The default kind is

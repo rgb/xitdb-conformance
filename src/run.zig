@@ -31,6 +31,8 @@ const Json = std.json.Value;
 const ObjectMap = std.json.ObjectMap;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+// which commits this was built from, for --version: build.zig asks git, and a direct build is given them
+const build_options = @import("build_options");
 
 const SIDECAR_SUFFIX = ".sidecar.json";
 const SCRIPT_FORMAT = "xitdb-script/1";
@@ -2596,7 +2598,7 @@ fn parseHashId(arena: Allocator, v: Json) ?xitdb.HashId {
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: run <script> <out.db> [--kind buffered_file|file|memory] [--allow-port-differences] [--note-port-changes] [--port] [--inputs <dir>]\n", .{});
+    std.debug.print("usage: run <script> <out.db> [--kind buffered_file|file|memory] [--allow-port-differences] [--note-port-changes] [--port] [--inputs <dir>]\n       run --version\n", .{});
     std.process.exit(2);
 }
 
@@ -2605,6 +2607,13 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
 
     const args = try init.minimal.args.toSlice(arena);
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
+        var buffer: [512]u8 = undefined;
+        var stdout = Io.File.stdout().writerStreaming(io, &buffer);
+        try stdout.interface.print("run: xitdb {s}, conformance {s}\n", .{ build_options.xitdb_commit, build_options.conformance_commit });
+        try stdout.interface.flush();
+        return;
+    }
     if (args.len < 3) usage();
     var kind: xitdb.DatabaseKind = .buffered_file;
     var allow_port_differences = false;

@@ -38,6 +38,12 @@ for f in json.load(open(sys.argv[1]))["fixtures"]:
     print(f["name"], f["outcome"], f["script"], f["zig_commit"])
 EOF
 
+# what run --version says a runner here was built from: that Zig commit, and run.zig as this changes it
+build_options() { # the Zig commit
+    printf 'pub const xitdb_commit = "%s";\npub const conformance_commit = "%s (src/run.zig as guard-mutants.sh changes it)";\n' \
+        "$1" "$(git rev-parse HEAD)" > "$WORK/zig-$1/build_options.zig"
+}
+
 # the Zig of each commit the fixtures come from
 ORIGINAL_COMMIT=$(git -C "$ZIG_ORIGINAL" rev-parse HEAD)
 COMMITS=$(awk '{ print $4 }' "$WORK/fixtures.txt" | sort -u)
@@ -45,8 +51,10 @@ for commit in $COMMITS; do
     mkdir -p "$WORK/zig-$commit"
     if [ "$commit" = "$ORIGINAL_COMMIT" ]; then
         git -C "$ZIG_ORIGINAL" archive HEAD src | tar -x -C "$WORK/zig-$commit"
+        build_options "$commit"
     elif [ -n "$OTHER" ] && git -C "$OTHER" cat-file -e "$commit^{commit}" 2> /dev/null; then
         git -C "$OTHER" archive "$commit" src | tar -x -C "$WORK/zig-$commit"
+        build_options "$commit"
     else
         rmdir "$WORK/zig-$commit"
         left_out=$(awk -v c="$commit" '$4 == c' "$WORK/fixtures.txt" | wc -l | tr -d ' ')
@@ -57,7 +65,8 @@ done
 build() { # the runner's source, what to call it
     for commit in $COMMITS; do
         [ -d "$WORK/zig-$commit" ] || continue
-        zig build-exe --dep xitdb "-Mroot=$1" "-Mxitdb=$WORK/zig-$commit/src/lib.zig" "-femit-bin=$WORK/$2-$commit" --cache-dir "$WORK/cache" 2> "$WORK/build.err" || return 1
+        zig build-exe --dep xitdb --dep build_options "-Mroot=$1" "-Mxitdb=$WORK/zig-$commit/src/lib.zig" "-Mbuild_options=$WORK/zig-$commit/build_options.zig" \
+            "-femit-bin=$WORK/$2-$commit" --cache-dir "$WORK/cache" 2> "$WORK/build.err" || return 1
     done
 }
 

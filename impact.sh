@@ -37,6 +37,9 @@ if [ "$MODE" = prototypes ]; then
     ZIG_ORIGINAL=${ZIG_ORIGINAL:-../../xitdb}
     mkdir -p "$TMP/reference" "$TMP/zig"
     git -C "$ZIG_ORIGINAL" archive HEAD src | tar -x -C "$TMP/zig"
+    # what run --version says a prototype's runner was built from
+    printf 'pub const xitdb_commit = "%s (src/lib.zig as impact.sh --prototypes changes it)";\npub const conformance_commit = "%s";\n' \
+        "$(git -C "$ZIG_ORIGINAL" rev-parse HEAD)" "$(git rev-parse HEAD)" > "$TMP/build_options.zig"
     cp "$TMP/zig/src/lib.zig" "$TMP/lib.original.zig"
     SCRIPTS=$(ls scripts/*.json tests/valid/*.json tests/generated/*.json)
     for script in $SCRIPTS; do
@@ -53,7 +56,8 @@ if [ "$MODE" = prototypes ]; then
 
     # after however many patches have been made since the last time
     try_prototype() { # name
-        zig build-exe --dep xitdb -Mroot=src/run.zig "-Mxitdb=$TMP/zig/src/lib.zig" "-femit-bin=$TMP/run-prototype" --cache-dir "$TMP/cache" 2> "$TMP/build.err" || {
+        zig build-exe --dep xitdb --dep build_options -Mroot=src/run.zig "-Mxitdb=$TMP/zig/src/lib.zig" "-Mbuild_options=$TMP/build_options.zig" \
+            "-femit-bin=$TMP/run-prototype" --cache-dir "$TMP/cache" 2> "$TMP/build.err" || {
             echo "$1: it doesn't build:"
             head -n 8 "$TMP/build.err"
             exit 1

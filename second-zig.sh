@@ -63,7 +63,8 @@ keep() { # list, name, outcome
 git -C "$CHECKOUT" archive "$COMMIT" | tar -x -C "$WORK/xitdb"
 git archive HEAD build.zig build.zig.zon src tests | tar -x -C "$REPO"
 
-if ! (cd "$REPO" && zig build) > "$WORK/build.log" 2>&1; then
+# an export has no repository for build.zig to ask, so it's given the commits it was exported from
+if ! (cd "$REPO" && zig build -Dxitdb-commit="$COMMIT" -Dconformance-commit="$(git rev-parse HEAD)") > "$WORK/build.log" 2>&1; then
     echo "second-zig: the harness doesn't build against $SHORT:"
     head -n 20 "$WORK/build.log"
     exit 1

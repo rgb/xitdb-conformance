@@ -39,6 +39,52 @@ zig build
 zig build -Doptimize=ReleaseFast --prefix out/release
 RELEASE_RUN=out/release/bin/run
 
+echo "== what the tools say they were built from"
+# run --version and dump --version name the original's commit and this repository's, for a record to name in place
+# of a time. Nothing else they write depends on it, which fixtures.sh --check shows below
+xitdb_head=$(git -C ../../xitdb rev-parse HEAD)
+here_head=$(git rev-parse HEAD)
+for tool in run dump; do
+    said=$(zig-out/bin/$tool --version)
+    case "$said" in
+        "$tool: xitdb $xitdb_head"*", conformance $here_head"*) ;;
+        *)
+            echo "$tool --version should name xitdb $xitdb_head and conformance $here_head, and it said: $said"
+            exit 1
+            ;;
+    esac
+done
+# and it follows the checkout: the original's files in a repository of their own, at a commit made for this, beside
+# an export of this repository, where build.zig.zon looks. The export is inside this repository, which isn't one of
+# its own, so its commit is unknown
+V="$OUT/version"
+rm -rf "$V"
+mkdir -p "$V/xitdb" "$V/xitdb-swift/conformance"
+git -C ../../xitdb archive HEAD | tar -x -C "$V/xitdb"
+git archive HEAD build.zig build.zig.zon src tests | tar -x -C "$V/xitdb-swift/conformance"
+git -C "$V/xitdb" init -q
+git -C "$V/xitdb" add -A
+GIT_AUTHOR_NAME=check GIT_AUTHOR_EMAIL=check@example.invalid GIT_COMMITTER_NAME=check GIT_COMMITTER_EMAIL=check@example.invalid \
+    git -C "$V/xitdb" commit -q -m "the original's files, at a commit of their own"
+other=$(git -C "$V/xitdb" rev-parse HEAD)
+expect_version() { # what dump --version should say
+    (cd "$V/xitdb-swift/conformance" && zig build) > "$V/build.log" 2>&1 || {
+        echo "the export doesn't build:"
+        head -n 20 "$V/build.log"
+        exit 1
+    }
+    said=$("$V/xitdb-swift/conformance/zig-out/bin/dump" --version)
+    if [ "$said" != "$1" ]; then
+        echo "dump --version should have said \"$1\", and it said \"$said\""
+        exit 1
+    fi
+}
+expect_version "dump: xitdb $other, conformance unknown"
+echo "// a change, for check.sh" >> "$V/xitdb/build.zig"
+expect_version "dump: xitdb $other (with uncommitted changes), conformance unknown"
+rm -rf "$V"
+echo "run and dump name the commits they were built from, and follow the checkout"
+
 echo "== the generated scripts"
 ./gen-fixed.sh --check
 

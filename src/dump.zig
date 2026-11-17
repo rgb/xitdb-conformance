@@ -13,6 +13,8 @@ const std = @import("std");
 const xitdb = @import("xitdb");
 
 const Io = std.Io;
+// which commits this was built from, for --version: build.zig asks git
+const build_options = @import("build_options");
 const Allocator = std.mem.Allocator;
 
 const HEADER_SIZE = 20;
@@ -233,8 +235,15 @@ pub fn main(init: std.process.Init) !void {
 
     const args = try init.minimal.args.toSlice(arena);
     if (args.len != 2) {
-        std.debug.print("usage: dump <file>\n", .{});
+        std.debug.print("usage: dump <file>\n       dump --version\n", .{});
         std.process.exit(2);
+    }
+    if (std.mem.eql(u8, args[1], "--version")) {
+        var buffer: [512]u8 = undefined;
+        var stdout = Io.File.stdout().writerStreaming(io, &buffer);
+        try stdout.interface.print("dump: xitdb {s}, conformance {s}\n", .{ build_options.xitdb_commit, build_options.conformance_commit });
+        try stdout.interface.flush();
+        return;
     }
 
     const file = Io.Dir.cwd().openFile(io, args[1], .{ .mode = .read_only }) catch |err| fail("{s}: {s}", .{ args[1], @errorName(err) });

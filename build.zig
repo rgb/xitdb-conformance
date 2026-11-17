@@ -1,10 +1,36 @@
 const std = @import("std");
 
+/// what `run --version` and `dump --version` say they were built from: a checkout's commit, with "(with
+/// uncommitted changes)" if its tracked files differ from it, and "unknown" where git can't say. That includes a
+/// folder that isn't the top of a repository of its own, like the exports second-zig.sh makes inside this one, so
+/// that git's search upward can't name this repository's commit for the original
+fn commitOf(b: *std.Build, path: []const u8) []const u8 {
+    var code: u8 = 0;
+    const prefix = b.runAllowFail(&.{ "git", "-C", path, "rev-parse", "--show-prefix" }, &code, .ignore) catch return "unknown";
+    if (std.mem.trim(u8, prefix, " \r\n").len != 0) return "unknown";
+    const head = b.runAllowFail(&.{ "git", "-C", path, "rev-parse", "HEAD" }, &code, .ignore) catch return "unknown";
+    const commit = b.dupe(std.mem.trim(u8, head, " \r\n"));
+    const changes = b.runAllowFail(&.{ "git", "-C", path, "status", "--porcelain", "--untracked-files=no" }, &code, .ignore) catch
+        return b.fmt("{s} (whether with uncommitted changes, unknown)", .{commit});
+    if (std.mem.trim(u8, changes, " \r\n").len != 0) return b.fmt("{s} (with uncommitted changes)", .{commit});
+    return commit;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const xitdb = b.dependency("xitdb", .{}).module("xitdb");
+    const xitdb_dep = b.dependency("xitdb", .{});
+    const xitdb = xitdb_dep.module("xitdb");
+
+    // asked of git every time zig build runs, so it follows the checkouts. A build from an export, which git can't
+    // ask, gives the commits it was exported from, as second-zig.sh does
+    const options = b.addOptions();
+    options.addOption([]const u8, "xitdb_commit", b.option([]const u8, "xitdb-commit", "the original's commit, for a build git can't ask") orelse
+        commitOf(b, xitdb_dep.builder.build_root.path orelse "."));
+    options.addOption([]const u8, "conformance_commit", b.option([]const u8, "conformance-commit", "this repository's commit, for a build git can't ask") orelse
+        commitOf(b, b.build_root.path orelse "."));
+    const build_options = options.createModule();
 
     const run_exe = b.addExecutable(.{
         .name = "run",
@@ -12,7 +38,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/run.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "xitdb", .module = xitdb }},
+            .imports = &.{ .{ .name = "xitdb", .module = xitdb }, .{ .name = "build_options", .module = build_options } },
         }),
     });
     b.installArtifact(run_exe);
@@ -85,7 +111,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/dump.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "xitdb", .module = xitdb }},
+            .imports = &.{ .{ .name = "xitdb", .module = xitdb }, .{ .name = "build_options", .module = build_options } },
         }),
     });
     b.installArtifact(dump_exe);

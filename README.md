@@ -38,6 +38,9 @@ independent of the Swift code.
   `fixtures.sh` regenerates it, and `src/manifest.zig` lists what each script needs.
 - `src/coverage.zig`: `coverage <script>...`, which checks that the scripts use everything in the format.
 - `src/dump.zig`: `dump <file>`, which prints what's in a database in a form that doesn't depend on file layout.
+  `dump --version` and `run --version` name the commit of the original each was built against, and this repository's,
+  each with "(with uncommitted changes)" where so, or "unknown" where git can't say, so a record can name them and not a
+  time. `build.zig` asks git at every build, and the scripts that build `run.zig` directly give it the commits they used.
 - `src/bench.zig`: `bench`, the Zig side of the workloads in `../director/spec/benchmarks.md`. For real numbers, build
   it with `zig build -Doptimize=ReleaseFast --prefix out/release` and run `out/release/bin/bench`.
 - `mutants.sh`: makes copies of the Zig original that get copying or rewriting in place wrong, and compaction and
