@@ -1,5 +1,6 @@
 //! reader --kinds
 //! reader <kind> <file>
+//! reader --version
 //!
 //! The original's own reader for two-processes.sh, doing what SCRIPT-FORMAT.md section 15 says a reader does, so
 //! that the test runs with the original on both sides when no port's reader is given, which holds the test itself.
@@ -7,10 +8,15 @@
 //! line on its standard input, it takes one cursor to the root's last moment, reads n, the blob and the items' count
 //! from that cursor only, so that one answer can't mix two commits, and prints `state <n> <sha256 of the blob>
 //! <count>`, or `error <name>`. At the end of its input it exits with 0.
+//!
+//! `reader --version` names the commits it was built from, as `run --version` does, which isn't part of what a reader
+//! does: a port's needn't have it.
 
 const std = @import("std");
 const xitdb = @import("xitdb");
 const Io = std.Io;
+// which commits this was built from, for --version: build.zig asks git
+const build_options = @import("build_options");
 
 /// a moment's keys are the SHA-1 of these names, as in every script
 fn key(comptime name: []const u8) u160 {
@@ -84,8 +90,13 @@ pub fn main(init: std.process.Init) !void {
         try out.flush();
         return;
     }
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
+        try out.print("reader: xitdb {s}, conformance {s}\n", .{ build_options.xitdb_commit, build_options.conformance_commit });
+        try out.flush();
+        return;
+    }
     if (args.len != 3) {
-        std.debug.print("usage: reader --kinds\n       reader <kind> <file>\n", .{});
+        std.debug.print("usage: reader --kinds\n       reader <kind> <file>\n       reader --version\n", .{});
         std.process.exit(2);
     }
     if (std.mem.eql(u8, args[1], "file")) return serve(.file, io, init.gpa, args[2], out);

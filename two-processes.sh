@@ -16,7 +16,8 @@
 # group of its own.
 #
 # TWO_PROCESSES_DRIVER and TWO_PROCESSES_OWN_READER say where the writer and the original's reader are, zig-out/bin
-# unless they're set, so that linux-two-processes.sh can run builds for another system.
+# unless they're set, so that linux-two-processes.sh can run builds for another system. It first prints what each says
+# with --version it was built from, as a build can be older than this folder's commit, and a record should name one.
 
 set -eu
 cd "$(dirname "$0")"
@@ -26,6 +27,9 @@ OWN=${TWO_PROCESSES_OWN_READER:-$PWD/zig-out/bin/reader}
 WORK=${TWO_PROCESSES_OUT:-out/two-processes}
 ALARM=${TWO_PROCESSES_ALARM:-300}
 [ -x "$DRIVER" ] && [ -x "$OWN" ] || { echo "run zig build first"; exit 2; }
+for tool in "$DRIVER" "$OWN"; do
+    "$tool" --version 2> /dev/null || echo "$tool doesn't say what it was built from, as a build from before --version doesn't"
+done
 rm -rf "$WORK"
 mkdir -p "$WORK"
 

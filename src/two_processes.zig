@@ -1,4 +1,5 @@
 //! two-processes <reader> <kind> <folder>
+//! two-processes --version
 //!
 //! The writer for two-processes.sh, on the original: it commits states to a file while the reader, another process
 //! given by its path, opened once on that file with the storage kind named and no lock, is asked what it sees
@@ -17,10 +18,14 @@
 //! While it runs, the folder holds `run`, the words of the run it's in, and `readers`, the process ID of each reader
 //! it has started, each the leader of a process group of its own. So when two-processes.sh's alarm ends it, the
 //! script can say which run a reader stopped answering in, and end whatever is left of the readers.
+//!
+//! `two-processes --version` names the commits it was built from, as `run --version` does.
 
 const std = @import("std");
 const xitdb = @import("xitdb");
 const Io = std.Io;
+// which commits this was built from, for --version: build.zig asks git
+const build_options = @import("build_options");
 
 const DB = xitdb.Database(.file, u160);
 const RW = DB.Cursor(.read_write);
@@ -190,8 +195,15 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
+        var buffer: [512]u8 = undefined;
+        var stdout = Io.File.stdout().writerStreaming(io, &buffer);
+        try stdout.interface.print("two-processes: xitdb {s}, conformance {s}\n", .{ build_options.xitdb_commit, build_options.conformance_commit });
+        try stdout.interface.flush();
+        return;
+    }
     if (args.len != 4) {
-        std.debug.print("usage: two-processes <reader> <kind> <folder>\n", .{});
+        std.debug.print("usage: two-processes <reader> <kind> <folder>\n       two-processes --version\n", .{});
         std.process.exit(2);
     }
     const reader_path, const kind, const folder = .{ args[1], args[2], args[3] };

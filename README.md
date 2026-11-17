@@ -59,7 +59,8 @@ independent of the Swift code.
   process reads it, and holds the reader to every answer being a committed state, in order, up to the last, and to a
   file kept open across a rename of a compacted copy over its name. The original's own reader, `src/reader.zig`, always
   runs; a port's is given as the argument or `XITDB_READER`. `SCRIPT-FORMAT.md` section 15 says what a reader prints.
-  `check.sh` runs it.
+  The writer and the original's reader name with `--version` the commits they were built from, as `dump` does, and it
+  prints both first. `check.sh` runs it.
 - `linux-two-processes.sh [--on-volume]`: the same on Linux, with the writer and the original's reader built for aarch64
   Linux by Zig here and run in a container, the image the port's gate uses, which it never pulls. `--on-volume` puts the
   files on a named volume of their own rather than the container's overlay, which matters to a reader that maps.

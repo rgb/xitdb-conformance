@@ -1,10 +1,10 @@
 const std = @import("std");
 
-/// what `run --version` and `dump --version` say they were built from, as a file of two constants: a checkout's
-/// commit, with "(with uncommitted changes)" if its tracked files differ from it, and "unknown" where git can't say.
-/// That includes a folder that isn't the top of a repository of its own, like the exports second-zig.sh makes inside
-/// this one, so that git's search upward can't name this repository's commit for the original. A commit given to the
-/// build is used as it is
+/// what `run`, `dump`, `two-processes` and `reader` say with --version they were built from, as a file of two
+/// constants: a checkout's commit, with "(with uncommitted changes)" if its tracked files differ from it, and "unknown"
+/// where git can't say. That includes a folder that isn't the top of a repository of its own, like the exports
+/// second-zig.sh makes inside this one, so that git's search upward can't name this repository's commit for the
+/// original. A commit given to the build is used as it is
 const DESCRIBE =
     \\commit_of() { # folder, commit given
     \\    if [ -n "$2" ]; then printf '%s' "$2"; return; fi
@@ -143,7 +143,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/reader.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "xitdb", .module = xitdb }},
+            .imports = &.{ .{ .name = "xitdb", .module = xitdb }, .{ .name = "build_options", .module = build_options } },
         }),
     });
     b.installArtifact(reader_exe);
@@ -154,7 +154,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/two_processes.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "xitdb", .module = xitdb }},
+            .imports = &.{ .{ .name = "xitdb", .module = xitdb }, .{ .name = "build_options", .module = build_options } },
         }),
     });
     b.installArtifact(two_processes_exe);

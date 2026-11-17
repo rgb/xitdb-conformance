@@ -40,11 +40,12 @@ zig build -Doptimize=ReleaseFast --prefix out/release
 RELEASE_RUN=out/release/bin/run
 
 echo "== what the tools say they were built from"
-# run --version and dump --version name the original's commit and this repository's, for a record to name in place
-# of a time. Nothing else they write depends on it, which fixtures.sh --check shows below
+# run, dump, the two-process writer and the original's reader name with --version the original's commit and this
+# repository's, for a record to name in place of a time. Nothing else they write depends on it, which fixtures.sh
+# --check shows below
 xitdb_head=$(git -C ../../xitdb rev-parse HEAD)
 here_head=$(git rev-parse HEAD)
-for tool in run dump; do
+for tool in run dump two-processes reader; do
     said=$(zig-out/bin/$tool --version)
     case "$said" in
         "$tool: xitdb $xitdb_head"*", conformance $here_head"*) ;;
@@ -83,7 +84,7 @@ expect_version "dump: xitdb $other, conformance unknown"
 echo "// a change, for check.sh" >> "$V/xitdb/build.zig"
 expect_version "dump: xitdb $other (with uncommitted changes), conformance unknown"
 rm -rf "$V"
-echo "run and dump name the commits they were built from, and follow the checkout"
+echo "run, dump, two-processes and reader name the commits they were built from, and follow the checkout"
 
 echo "== the generated scripts"
 ./gen-fixed.sh --check
@@ -726,13 +727,21 @@ echo "== two processes on Linux"
 # the same on Linux, in a container on a volume of its own, when docker and the port's gate's image are here. It never
 # pulls. 77, and only 77, means it didn't try, which it says, and which is gone past
 status=0
-./linux-two-processes.sh --on-volume || status=$?
+./linux-two-processes.sh --on-volume > "$OUT/linux-own.out" 2>&1 || status=$?
+cat "$OUT/linux-own.out"
 if [ "$status" -eq 77 ]; then
     echo "so the two processes weren't tried on Linux here"
 elif [ "$status" -ne 0 ]; then
     echo "linux-two-processes.sh failed, with $status"
     exit 1
 else
+    # the pair that ran there is the one this checkout builds, by what each said it was built from
+    for tool in two-processes reader; do
+        grep -qF "$tool: xitdb $xitdb_head, conformance $here_head" "$OUT/linux-own.out" || {
+            echo "the Linux $tool should have said it was built from xitdb $xitdb_head and conformance $here_head"
+            exit 1
+        }
+    done
     # and not trying is told apart from failing: no such image is a 77, and a reader that breaks the rule in the
     # container, or one that isn't there, is a failure and never a 77
     expect_linux() { # the status it should give, what it should say, then what to set for it

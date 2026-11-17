@@ -1236,6 +1236,9 @@ run them a runner needs `ignoring_root_header` on `recover`, and `InvalidEnumTag
 **A reader in another process** (2026-11-17, brief conformance-10). Section 15 says what a program must do for
 `two-processes.sh` to hold it to the arrangement a port's first client rests on. Nothing a script says changes.
 
+**The two-process writer and the original's reader say what they were built from** (2026-11-17), with `--version`, which
+`two-processes.sh` prints first (section 15). Nothing a script says changes.
+
 ## 15. A reader in another process
 
 `two-processes.sh` holds what no script can: the original commits to a file while a reader in another process, with no
@@ -1298,6 +1301,13 @@ with `--on-volume`, as on the overlay it might never map, and pass for the wrong
 `./linux-two-processes.sh --on-volume` where docker and that image are here, and says so and goes on where they aren't.
 That's 77, which the script gives for nothing else. A reader that breaks the rule in the container, or a container that
 fails, is a failure, which the gate shows with a reader that answers an error and one that isn't there.
+
+**What ran.** `two-processes --version` and `reader --version` name the commits they were built from, as `run --version`
+does (section 10), and `two-processes.sh` prints both lines before anything else, so that a record of a run, on either
+system, names a commit and not a time. A file's time says little: a build whose inputs haven't changed leaves the
+installed file as it was, so the pair can be older than a commit and still be what it builds, or have been built from
+another checkout. `check.sh` holds both lines on macOS, and in what the container printed on Linux. A port's reader
+needn't have `--version`.
 
 None of this is a fixture. The answers to expect come from the writer as it commits, so a port's runner needs none of
 it, only its reader.
