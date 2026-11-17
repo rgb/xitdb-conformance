@@ -722,6 +722,37 @@ for pid in $(cat "$OUT/two-processes-silent/port-file/readers"); do
 done
 echo "the alarm ends a reader that never answers, says where, and leaves nothing of it running"
 
+echo "== two processes on Linux"
+# the same on Linux, in a container on a volume of its own, when docker and the port's gate's image are here. It never
+# pulls. 77, and only 77, means it didn't try, which it says, and which is gone past
+status=0
+./linux-two-processes.sh --on-volume || status=$?
+if [ "$status" -eq 77 ]; then
+    echo "so the two processes weren't tried on Linux here"
+elif [ "$status" -ne 0 ]; then
+    echo "linux-two-processes.sh failed, with $status"
+    exit 1
+else
+    # and not trying is told apart from failing: no such image is a 77, and a reader that breaks the rule in the
+    # container, or one that isn't there, is a failure and never a 77
+    expect_linux() { # the status it should give, what it should say, then what to set for it
+        want_status=$1
+        want_text=$2
+        shift 2
+        status=0
+        env "$@" ./linux-two-processes.sh --on-volume > "$OUT/linux.out" 2>&1 || status=$?
+        if [ "$status" -ne "$want_status" ] || ! grep -qF -- "$want_text" "$OUT/linux.out"; then
+            echo "linux-two-processes.sh with $* should have given $want_status and said \"$want_text\", and it gave $status:"
+            tail -n 3 "$OUT/linux.out"
+            exit 1
+        fi
+    }
+    expect_linux 77 "isn't here, and this never pulls it" TWO_PROCESSES_IMAGE=xitdb-two-processes-no-such-image:never
+    expect_linux 1 "the port reader on file didn't hold to the rule" XITDB_READER="/conformance/$OUT/failing"
+    expect_linux 1 "--kinds failed" XITDB_READER=/conformance/no-such-reader
+    echo "linux-two-processes.sh says when it didn't try, and a reader that breaks the rule there, or isn't there, fails it"
+fi
+
 echo "== what the port will change"
 ./impact.sh --check
 # and that it can notice, as a list out of date is the failure it's for

@@ -1294,7 +1294,10 @@ container's overlay, or with `--on-volume` on a named volume of their own that i
 kind of file system that is. On 2026-11-17 the original's reader held to the rule there, on both of its kinds, in all
 three runs, on `overlayfs` and on `btrfs`, in Ubuntu 26.04.1 on aarch64. A port's reader for Linux is given by
 `XITDB_READER`, as a path inside the container. One that maps the file only on a kind of volume it trusts should be run
-with `--on-volume`, as on the overlay it might never map, and pass for the wrong reason.
+with `--on-volume`, as on the overlay it might never map, and pass for the wrong reason. `check.sh` runs
+`./linux-two-processes.sh --on-volume` where docker and that image are here, and says so and goes on where they aren't.
+That's 77, which the script gives for nothing else. A reader that breaks the rule in the container, or a container that
+fails, is a failure, which the gate shows with a reader that answers an error and one that isn't there.
 
 None of this is a fixture. The answers to expect come from the writer as it commits, so a port's runner needs none of
 it, only its reader.
