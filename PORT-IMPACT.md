@@ -502,7 +502,7 @@ changed. `recover-sound-root-header--port` and its `-version-1` twin hold the re
 |---|---|---|
 | a commit B past a sound root header at A | committed size A's, B cut off, nothing written | committed size B's, as a scan |
 | the same, B's data zeros, B's trailer whole | A's | B's: the root slot from B's trailer, a count of 0 and no elements, and nothing read beyond that |
-| past a sound root header at A, B's trailer verifying with a root tag this version doesn't know | A's, B cut off without its tag being looked at | `InvalidEnumTag`, and nothing cut or written: a `reopen` then opens at A |
+| past a sound root header at A, B's trailer verifying with a root tag this version doesn't know | A's, B cut off without its tag being looked at | `InvalidEnumTag`, and nothing cut or written: a `reopen` then opens at A, and a `recover` without the argument then cuts B off, which is the way out a port has to offer |
 | the root header naming that trailer | `InvalidEnumTag`, and nothing changed | the same |
 
 Five guard mutants hold it: going past a sound root header, not hearing the argument, not cutting at a sound root header, an

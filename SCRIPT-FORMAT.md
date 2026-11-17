@@ -1053,7 +1053,8 @@ where the root header is sound.
 **A trailer it would open at whose root slot has a tag the port doesn't know**, whether the root header names it or the scan
 finds it, raises `InvalidEnumTag`, as opening raises it, and changes nothing: that isn't damage but a writer that knows a tag
 this version doesn't, so recovery neither goes on past it nor cuts back before it. One past a sound root header is cut off
-without its tag being looked at, as what lies past a sound root header was never committed, whoever wrote it.
+without its tag being looked at, as what lies past a sound root header was never committed, whoever wrote it. So where the
+argument met one and was refused, a `recover` without it cuts it off: the way out for a caller who met the unknown tag.
 
 **Where it can't be trusted**, in the cases above where `reopen` raises `UntrustedRootHeader`, or where the committed size is
 0, which is no commit to open at, it scans the trailers. It looks from the end of the file back, a byte at a time, for the

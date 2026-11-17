@@ -1,6 +1,6 @@
 {
   "format": "xitdb-script/1",
-  "description": "The port's recover by its own rule of 2026-11-17 (the user's decision; the original has no recovery), on inputs/v1-history, whose two commits end at 839 and 1215, A and B, version 1. A sound root header, where reopen would open, is the commit: recover opens at it, cuts what lies past it, and writes nothing, and doesn't go on to a later trailer, even one that verifies, as a trailer's checksum covers the trailer and not the data before it. With ignoring_root_header it goes by the trailers alone, to the last that verifies. Each case is a database of its own, once each way: (a) B past a sound root header at A; (b) the same with B's data zeros, which recovery by the trailers alone goes to, where only what follows from the zeros is read, as reading on would hold a port to taking a pointer of 0 as the file's own header; (c1) past a sound root header, a trailer that verifies with a root tag this version doesn't know, which recover cuts off without looking at, and which with the argument it refuses as opening does, cutting nothing; (c2) the root header naming such a trailer, which recover refuses either way, leaving the bytes as they were. recover is only in what the port does, so this is a script only the port runs, whose oracle is run --port.",
+  "description": "The port's recover by its own rule of 2026-11-17 (the user's decision; the original has no recovery), on inputs/v1-history, whose two commits end at 839 and 1215, A and B, version 1. A sound root header, where reopen would open, is the commit: recover opens at it, cuts what lies past it, and writes nothing, and doesn't go on to a later trailer, even one that verifies, as a trailer's checksum covers the trailer and not the data before it. With ignoring_root_header it goes by the trailers alone, to the last that verifies. Each case is a database of its own, once each way: (a) B past a sound root header at A; (b) the same with B's data zeros, which recovery by the trailers alone goes to, where only what follows from the zeros is read, as reading on would hold a port to taking a pointer of 0 as the file's own header; (c1) past a sound root header, a trailer that verifies with a root tag this version doesn't know, which recover cuts off without looking at, and which with the argument it refuses as opening does, cutting nothing, so that a recover without the argument then cuts it off, the way out for a caller who met the unknown tag; (c2) the root header naming such a trailer, which recover refuses either way, leaving the bytes as they were. recover is only in what the port does, so this is a script only the port runs, whose oracle is run --port.",
   "hash_size": 20,
   "hash_id": "sha1",
   "file_id": "0000000000000001",
@@ -67,6 +67,10 @@
     {"op": "recover", "ignoring_root_header": true, "expect_error": "InvalidEnumTag", "note": "the last trailer that verifies has a tag it doesn't know: it raises as opening does, and cuts nothing"},
     {"op": "reopen", "note": "so the file is as it was: the root header at A, and B past it"},
     {"op": "committed_size", "expect": 839},
+    {"op": "close"},
+    {"op": "recover", "note": "the way out for a caller who met the unknown tag: without the argument, the sound root header at A is the commit, and B is cut off"},
+    {"op": "committed_size", "expect": 839},
+    {"op": "count", "on": "root", "expect": 1},
     {"op": "create_database", "name": "c2_ignoring", "file_id": "00000000000000a8", "note": "(c2) the root header itself naming a trailer whose root slot has a tag this version doesn't know, with ignoring_root_header"},
     {"op": "use", "name": "c2_ignoring"},
     {"op": "close"},
