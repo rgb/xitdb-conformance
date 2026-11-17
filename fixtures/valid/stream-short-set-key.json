@@ -1,6 +1,6 @@
 {
   "format": "xitdb-script/1",
-  "description": "Streaming a sorted set's key reached through its entry. A key-only entry is its own key slot, and since 71ee0cf the key cursor that read_key_value_pair gives for it has the entry's position, so a short key streams like a long one, and like a key in a pair with a value. The key reached by sorted_map_get with key still has no position, which is in tests/port-differs/stream-short-no-position.",
+  "description": "Streaming a sorted set's key reached through its entry. A key-only entry is its own key slot, and since 71ee0cf the key cursor that read_key_value_pair gives for it has the entry's position, so a short key streams like a long one, and like a key in a pair with a value. The key reached by sorted_map_get with key still has no position, and so does a key-only entry's key from read_key_value_pair on sorted_map_get with kv_pair in a read path, which leaves the entry where it is: both are in tests/port-differs/stream-short-no-position.",
   "hash_size": 20,
   "hash_id": "sha1",
   "file_id": "0011223344556677",
