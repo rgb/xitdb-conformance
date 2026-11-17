@@ -6,6 +6,8 @@ every-construct-linked StaleCursor
 every-construct-sorted CursorNotWriteable
 held-init-after-freeze StaleCursor
 held-init-after-root-copy StaleCursor
+linked-counts-below-leaves-writes PoisonedTransaction
+linked-header-above-tree-writes PoisonedTransaction
 overwriting-committed-bytes-linked ImmutableBytes
 overwriting-committed-bytes-sorted ImmutableBytes
 overwriting-committed-bytes ImmutableBytes

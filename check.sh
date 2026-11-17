@@ -328,7 +328,7 @@ while read -r kind name want text; do
     esac
     code=0
     if [ "$kind" = script ]; then
-        "$RUN" "tests/undefined/$name.json" "$OUT/undefined.db" --allow-port-differences > /dev/null 2> "$OUT/undefined.err" || code=$?
+        "$RUN" "tests/undefined/$name.json" "$OUT/undefined.db" > /dev/null 2> "$OUT/undefined.err" || code=$?
     else
         zig-out/bin/undefined-wrappers "$name" > /dev/null 2> "$OUT/undefined.err" || code=$?
     fi
@@ -340,8 +340,8 @@ while read -r kind name want text; do
     fi
     count=$((count + 1))
 done < tests/undefined/expected.txt
-if [ "$count" -ne 29 ]; then
-    echo "tests/undefined/expected.txt should have 29 cases, and it has $count"
+if [ "$count" -ne 28 ]; then
+    echo "tests/undefined/expected.txt should have 28 cases, and it has $count"
     exit 1
 fi
 echo "$count cases do what tests/undefined/expected.txt says"
@@ -580,6 +580,44 @@ fi
 echo "the manifest names only what's there"
 rm -rf "$COPY"
 
+echo "== the pin against upstream"
+# it says how the pin stands and never fails: a pin behind upstream is a fact to act on, not a broken gate
+./upstream.sh
+# each of its answers leaves the check passing. a repository of its own stands in for upstream, sharing the
+# original's objects, so none of this needs the network
+UP="$OUT/upstream"
+rm -rf "$UP"
+git clone -q --bare --shared ../../xitdb "$UP"
+pin=$(sed -n 's/^  "zig_commit": "\([0-9a-f]*\)",$/\1/p' fixtures/manifest.json)
+past=$(GIT_AUTHOR_NAME=check GIT_AUTHOR_EMAIL=check@example.invalid GIT_COMMITTER_NAME=check GIT_COMMITTER_EMAIL=check@example.invalid \
+    git -C "$UP" commit-tree "$pin^{tree}" -p "$pin" -m "a commit past the pin")
+expect_upstream() { # what it should say, then what to set for it
+    want=$1
+    shift
+    said=$(env "$@" ./upstream.sh) || {
+        echo "upstream.sh failed, with $*, and it never should"
+        exit 1
+    }
+    case "$said" in
+        *"$want"*) ;;
+        *)
+            echo "upstream.sh should have said \"$want\", with $*, and it said: $said"
+            exit 1
+            ;;
+    esac
+}
+git -C "$UP" update-ref refs/heads/main "$pin"
+git -C "$UP" symbolic-ref HEAD refs/heads/main
+expect_upstream "the pin is upstream's HEAD" XITDB_UPSTREAM="$UP"
+git -C "$UP" update-ref refs/heads/main "$past"
+expect_upstream "and not in" XITDB_UPSTREAM="$UP"
+{ cat tests/upstream.txt; echo "2026-11-17 $past stays at the pin, for this check"; } > "$OUT/upstream.txt"
+expect_upstream "known since 2026-11-17" XITDB_UPSTREAM="$UP" XITDB_UPSTREAM_RECORD="$OUT/upstream.txt"
+expect_upstream "couldn't be reached" XITDB_UPSTREAM="$OUT/no-such-repository"
+expect_upstream "wasn't asked" XITDB_OFFLINE=1
+rm -rf "$UP"
+echo "upstream.sh says each of its answers, a pin behind upstream among them, and none of them fails the check"
+
 echo "== what the port will change"
 ./impact.sh --check
 # and that it can notice, as a list out of date is the failure it's for
@@ -618,8 +656,8 @@ generated=$(find tests/generated -name '*.json' | wc -l | tr -d ' ')
 expect_report "$valid_fixtures with the same bytes, 0 with different bytes, 0 that fail"
 expect_report "$failing_fixtures still fail, and 0 don't"
 expect_report "$(grep -c '^[^#]' tests/zig-only.txt) run on Zig, and 0 fail"
-expect_report "7 as the original does, and 0 as the port does"
-expect_report "29 as they were, and 0 changed"
+expect_report "6 as the original does, and 0 as the port does"
+expect_report "28 as they were, and 0 changed"
 expect_report "$generated scripts the same, and 0 different"
 # and what it does with a changed fixture, in copies of what it would change
 COPY="$OUT/fixtures-second"

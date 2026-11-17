@@ -224,7 +224,7 @@ while read -r kind name want text; do
     esac
     code=0
     if [ "$kind" = script ]; then
-        "$BIN/run" "tests/undefined/$name.json" "$WORK/runs/undefined.db" --allow-port-differences > /dev/null 2> "$WORK/runs/undefined.err" || code=$?
+        "$BIN/run" "tests/undefined/$name.json" "$WORK/runs/undefined.db" > /dev/null 2> "$WORK/runs/undefined.err" || code=$?
     else
         "$BIN/undefined-wrappers" "$name" > /dev/null 2> "$WORK/runs/undefined.err" || code=$?
     fi

@@ -100,7 +100,7 @@ same bytes, and valid on both. **`write-if-empty-emptied-slot`** and `write-if-e
 | [12](#finding-12-parts-after-a-remove) | Parts after a remove are an error | 2 | 0 | Variant, with an error that already exists |
 | [16](#finding-16-a-failed-op-that-left-something-behind) | A failed op that wrote something poisons its transaction | 3 | 12 | Variant, `safe-*` |
 | [17](#finding-17-write_if_empty-and-the-snapshot) | `write_if_empty` goes by the slot as it is now, and writes where the cursor's slot is empty and the slot now is a `none` | 2 | 4 | Done: regenerated from `bd6abc3` |
-| [22](#finding-22-the-concat) | A concat freezes after its join | 1 changes | 1 changes | Variant, from `bd6abc3` |
+| [22](#finding-22-the-concat) | A concat freezes after its join | 1 changes | 1 changes | Variants, from the fixes branch |
 | [23](#finding-23-a-cursors-freeze) | A freeze holds for every cursor | 2 of 6 change, in the prototype | 2 of 17 change | Deferred, so nothing happens |
 | [28](#finding-28-compacting-a-history-with-no-last-moment) | Compacting a history with no last moment is refused | 1 | 0 | Variant |
 | [29](#finding-29-an-init-on-a-held-cursor-after-a-freeze) | Nothing: an init on a held cursor after a freeze changes a clone that shares its record, on both | 1 | 0 | Nothing, and a fixture pins it |
@@ -227,7 +227,8 @@ now is a `none`, and it holds back otherwise. The second half came on 2026-11-14
 held back after an append, whose slot in the file is a `none` marked full, which is what makes an unwritten element count, for
 array lists since `89da8e7`, while the cursor's own copy is empty. Upstream writes there, and so does the port (`write-if-empty-append`).
 Nothing raises an error, but what's written changes, so **no script can show this without a Zig that has the change**, which is
-`fix-findings-v2` at `bd6abc3`, on `89da8e7`. There are two directions:
+`fix-findings-v3` at `6b48d2d`, on `274418f`, and was `fix-findings-v2` at `bd6abc3`, on `89da8e7`, until the pin moved. There are
+two directions:
 
 Where the snapshot is empty and the slot holds a value, so the original overwrites a value it can't see, and the port leaves it:
 
@@ -242,7 +243,7 @@ Where the snapshot has something and the slot is empty, so the original holds ba
 - `tests/from-other-zig`: write-if-empty-emptied-slot (3)
 <!-- end -->
 
-**This has been done.** `tests/zig-commits.txt` says which expected files come from `bd6abc3`. The prototype's prediction held
+**This has been done.** `tests/zig-commits.txt` says which expected files come from the fixes branch. The prototype's prediction held
 for every script. The fixtures have the first direction in these two scripts, and in no generated one, as `gen --port-safe` keeps
 off it:
 
@@ -288,6 +289,14 @@ variant:
 
 The other scripts in the list have the same bytes on `d6f3fee`, so nothing happens to them. That's measured, by
 `second-zig.sh`. I haven't gone through why for each of them.
+
+**`concat-stale-slot--port`** is `tests/undefined/concat-stale-slot` with what the port does (C1, brief conformance-10): two
+concats, appends, a slot read through a cursor from before the map moved, and in a later transaction an append to the list
+made from it. Its expected file is the fixes branch's, as the original at the pin rewrites in place a node the old header points
+at: at `274418f` that append raises `InvalidBTreeNode`, and at `89da8e7` it panicked, which stays the original's case in
+`tests/undefined`. With the freeze after the join nothing rewrites that node, so the append finishes, and the list reads as
+the fifteen elements its header held when it was read, then the one appended. It's the sequence of the issue drafted for
+upstream, and it comes back to the pin's bytes the day the original has the fix.
 
 **`gen` writes three scripts differently on `d6f3fee`**: `reads-101`, `reads-104` and `reads-110`. That has nothing to do
 with the concat, and their files are the same. On that branch a sorted pair's key cursor has no position (the fix for
@@ -571,6 +580,49 @@ touch it.
 copy is empty: it writes when the slot as it is now is empty, or when the cursor's own copy is empty and the slot now is a
 `none`, and it holds back whenever the slot holds a value, and whenever the cursor's copy holds something and the slot isn't
 empty. `write-if-empty-append` is the append case on both lists, the same on `89da8e7` and on the branch.
+
+## Upstream's 274418f: what it closes, and what becomes defined
+
+Upstream moved two commits past `89da8e7` on 2026-11-15, and the pin followed on 2026-11-17 (brief conformance-10, D56).
+`9e83ab5` caches a buffered file's length only after a write succeeds, and `274418f` checks a leaf's count in every descent
+by rank. `./follow.sh ../../xitdb 274418f` found that no fixture moves at either, and that nothing else moves at `9e83ab5`.
+
+| Entry | Finding | Upstream's change | What happens |
+|---|---|---|---|
+| `tests/port-differs/iterator-from-position-past-tree` | the director's ruling, 2026-11-15 | `274418f`: an iterator from a position its tree doesn't have raises `InvalidBTreeNode` at the `iterator`, from the same descent and leaf check as a read by position | Closes. The pair is gone, `run` no longer refuses it, and the eight scripts on the `sorted-*` and `linked-*` inputs start an iterator from each position that raises. The port already did this |
+| `tests/port-differs/iterator-from-key-past-size` | the same | none: an iterator from a key builds its stack by key, with no new check, and `next` still stops only at an index equal to the size | Leaves |
+| the three fixtures in `tests/zig-commits.txt` | 17, 22 | none of what they reach: no tree there disagrees with its header | Their expected files come from `fix-findings-v3` at `6b48d2d`, the branch carried onto `274418f`, with `concat-stale-slot--port` beside them |
+
+**What becomes defined.** Eleven of the 29 cases in `tests/undefined` ended the process at `89da8e7` and raise
+`InvalidBTreeNode` at `274418f`. Each is sorted by whether a port can be held to the original's answer:
+
+| Case | What happens to it |
+|---|---|
+| `frozen-clone-sorted-iterator-past-tree`, `frozen-clone-linked-iterator-past-tree` | A fixture, through the inputs: the starts the eight scripts left out. The linked one only read an input, so it's gone. The sorted one makes its clone in one transaction, which stays undefined, so it stays with its new answer |
+| `frozen-clone-linked-append`, and the wrappers `frozen_clone_append` and `frozen_clone_remove` | The making stays undefined, as it rests on nodes shared and rewritten within one transaction, so they stay. What they reach is what the linked inputs hold, and a write to one of those in a new transaction is defined now: `linked-header-above-tree-writes`, `linked-counts-above-leaves-writes` and `linked-counts-below-leaves-writes` |
+| `kept_across_transactions` | Zig's case only: a wrapper kept from an earlier transaction is finding 1, which the port refuses with `StaleCursor` before any leaf check, as `stale-cursors--port` holds |
+| `concat-stale-slot`, and the wrappers `concat_then_clone`, `concat_two_wrappers`, `concat_slot_read_before` and `concat_old_map_wrapper` | Not fixtures of the pin. The port freezes after a join (finding 22), and on the fixes branch all five finish. `concat-stale-slot--port` holds the port to that, from the branch |
+
+`sorted_frozen_clone_remove` and `counted_frozen_clone_remove` still panic at `274418f`, from a count that underflows
+(`lib.zig:1597` and `1469`), so they stay undefined against the pin. The fixes branch keeps the count checks that upstream
+didn't take, and raises there.
+
+**What a port must match** in the `-writes` scripts, on the three linked inputs where something changed (on
+`linked-header-below-tree` every rank lands inside a leaf):
+
+| Input | Raises `InvalidBTreeNode` | At `89da8e7` |
+|---|---|---|
+| `linked-header-above-tree` | an append; an insert at 32 to 40; a remove, a get in a write path, and a slice, at 31 to 40 | each panicked, except a get at 31 to 33, which wrote past the leaf and committed |
+| `linked-counts-above-leaves` | an insert and a slice at 23 and 24; a remove and a get at 22 and 23 | the same, the gets at 22 and 23 writing past the leaf |
+| `linked-counts-below-leaves` | an append; a remove, a get and a slice at 40 | the same, the get writing past the leaf |
+
+At the top level, the transaction fails and the file is as it was loaded, with no commit ID drawn. In a callback that
+handles the error, a port poisons the transaction only if the write had written before its leaf check, with the clone's
+header copied into the transaction first so that it's the write's own: only a slice has, on `linked-header-above-tree` and
+`linked-counts-below-leaves`, so those two are only for Zig, and their `--port` variants are the fixtures. Everywhere else the
+transaction commits, and the bytes must agree. The positions next to the ones that raise succeed, each in a database of its
+own, so a check made too early shows. That's work for the port only if its write descents lack the leaf check, which its
+reads already have.
 
 ## What this doesn't cover
 

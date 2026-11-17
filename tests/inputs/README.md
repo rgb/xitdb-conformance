@@ -24,7 +24,9 @@ In each, a moment holds the collections and their clones, made the README's way:
 cursor to it is frozen, and its init copies the header. Then, through the original, which isn't frozen, ten changes land in
 place in the nodes they share. Where the clone wrote first, its write copied its root and the nodes on its way, so its
 header and root agree, and the leaves they still share hold another number than the root counts for them. A valid script
-only reads these files; writing to such a clone can panic. The scripts in `tests/valid/` with the same names read them.
+reads these files, as the scripts in `tests/valid/` with the same names do. Since `274418f` it can write to a linked one
+too, as `linked-*-writes` do, where each write succeeds or raises `InvalidBTreeNode`; at `89da8e7` some writes there
+panicked. Writing to a sorted one stays an undefined use, as a remove can still underflow its count.
 
 | Input | Bytes | SHA-256 | Where it came from | What's in it |
 |---|---|---|---|---|

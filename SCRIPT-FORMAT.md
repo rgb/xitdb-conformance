@@ -364,8 +364,8 @@ hasn't committed in the script yet, which a `reopen` that creates the database a
 gets a version 1 file: the inputs called `v1-*` were written by the original at `6b93af1`, and `tests/inputs/README.md`
 says what's in each. It's also how a script gets a file only an undefined use makes: the inputs called `sorted-*` and
 `linked-*` are clones the freeze hazard left with a header that disagrees with its tree (section 10), each made once on the
-original at `89da8e7` by its maker in `tests/undefined/`, and a valid script only reads them. The manifest lists each
-script's inputs as `inputs`.
+original at `89da8e7` by its maker in `tests/undefined/`. A valid script reads them, and writes to the linked ones, where
+every write either succeeds or raises `InvalidBTreeNode` since `274418f`. The manifest lists each script's inputs as `inputs`.
 
 **`file_id` and `hash_id` on `reopen`** only matter when `Database.init` creates the database, which since `92a926e` it
 does for a file without a first commit that's no bigger than a new database: one cut off during its creation. It
@@ -605,7 +605,7 @@ Truncating is all a rollback does, so it doesn't undo a write that landed before
 | `StreamTooLong` | `read_bytes`, `read_bytes_into`: a value longer than `max_size` or `size` |
 | `TargetNotEmpty` | `compact`: a target with something in its root |
 | `InvalidRange` | `read_committed`: a `start` after `end`, an `end` past the committed size, or a `start` above 0 that's before the committed data. `apply_replicated`: a `start` that isn't 0 or the committed size, and at 0, fewer bytes than the database header and the root header after it |
-| `InvalidBTreeNode` | a read by position (`sorted_map_get_index`, `linked_array_list_get`) whose descent runs out of tree below the size its header gives. Only a tree whose header disagrees with it has such a position, which takes an undefined use to make (section 10), so a script meets one only in an input made that way |
+| `InvalidBTreeNode` | a descent by rank that runs past a leaf's count, below the size its header gives: a read by position (`sorted_map_get_index`, `linked_array_list_get`), an `iterator` with `from_index`, and since `274418f` a linked array list's append, insert, remove, slice and get in a write path. Only a tree whose header disagrees with it has such a position, which takes an undefined use to make (section 10), so a script meets one only in an input made that way |
 
 The engine has more errors than these, like `KeyOffsetExceeded`. Reaching them takes an undefined use, a corrupt file,
 or a call scripts can't make.
@@ -789,7 +789,7 @@ needn't handle them. They are kept out like this:
 | Reading, before the commit, a gap left by a `writer` that seeked past the end | zeros on `file` and `memory`. On `buffered_file`, `EndOfStream` until the gap has been flushed, and zeros after that. The committed bytes are the same on all three | `EndOfStream` can only be expected on `read_stream`, and `check.sh` runs every script on all three kinds. A read that gets zeros everywhere isn't caught |
 | On a read-only file, a transaction with a callback, or one that would fail anyway | `file` raises `WriteFailed` at the first write, without running the rest. `buffered_file` runs the rest and only fails at the commit, so it raises `KeyNotFound` for a path that fails by itself, runs the callback, and raises `ScriptAbort` for a callback that fails | `run` fails on the callback. `check.sh` runs every script on both kinds, which catches the rest |
 | A write into committed bytes (section 11) of something that points into the current transaction, if the transaction is then rolled back or the root header is later set back past it | committed data is left pointing past the end of the file. Reading it raises `EndOfStream`, or `OutOfMemory` for a wild length, and once more data has landed at that offset, the read succeeds and returns those bytes as if they were the value | `gen` doesn't let such a transaction fail. `run` can't see it, so a hand-written script has to take care: writing an inline value is fine, as `overwriting-committed-bytes` does |
-| **Two headers for one tree.** An init copies a linked list's or sorted map's header if it's old, and the copy shares the tree. That's only safe if the nodes are old too, or nothing can see the old header any more. There are three ways it goes wrong, all in one transaction. After `linked_array_list_concat`, the old header points at a node that's newer than the transaction's start, so it's rewritten in place, and the old header can still be reached through a slot read before or copied after, a cursor kept from before, or a stale snapshot. After a freeze on a cursor to a collection that a cursor that isn't frozen can also reach. And after a skipped init on a tree, followed by an init | the header disagrees with its tree. A read past the end raises `InvalidBTreeNode`, and some raise `InvalidEnumTag`. An append panics, or crashes in a release build | `gen` keeps away from all three. `run` can't see them, so a hand-written script has to take care. `tests/undefined/` shows them, and makes the inputs `sorted-*` and `linked-*`: committed files, with no byte damaged, that the second way left in each of its four shapes, on a sorted map, a sorted set and a linked list. A valid script can read one of those, and only read it, as the scripts of the same names in `tests/valid/` do. Two of those reads are ones the port corrects ([below](#what-the-port-corrects)), and an iterator from a position past the tree can panic (`frozen-clone-*-iterator-past-tree`) |
+| **Two headers for one tree.** An init copies a linked list's or sorted map's header if it's old, and the copy shares the tree. That's only safe if the nodes are old too, or nothing can see the old header any more. There are three ways it goes wrong, all in one transaction. After `linked_array_list_concat`, the old header points at a node that's newer than the transaction's start, so it's rewritten in place, and the old header can still be reached through a slot read before or copied after, a cursor kept from before, or a stale snapshot. After a freeze on a cursor to a collection that a cursor that isn't frozen can also reach. And after a skipped init on a tree, followed by an init | the header disagrees with its tree. A read past the end raises `InvalidBTreeNode`, and some raise `InvalidEnumTag`. Since `274418f` so does a linked array list's write whose rank runs past a leaf, where before it panicked, or a get wrote past the leaf. A remove from a sorted map, or a counted hash map, can still underflow the count, which panics | `gen` keeps away from all three. `run` can't see them, so a hand-written script has to take care. `tests/undefined/` shows them, and makes the inputs `sorted-*` and `linked-*`: committed files, with no byte damaged, that the second way left in each of its four shapes, on a sorted map, a sorted set and a linked list. A valid script can read one of those, as the scripts of the same names in `tests/valid/` do, and since `274418f` it can write to a linked one, as `<input>-writes` does, each write either succeeding or raising `InvalidBTreeNode`. A write to a sorted one stays an undefined use, as a remove can underflow the count. One of those reads is one the port corrects ([below](#what-the-port-corrects)). Making one stays an undefined use, as in `frozen-clone-linked-append`, which writes to the clone in the same transaction |
 | Using an iterator after a write in the transaction that made it. It holds copies of the blocks it's part way through, and reads the others when it gets to them | what's been rewritten in place shows up if the iterator hadn't read that block yet, and doesn't if it had | `run` fails. A hand-written script also has to take care with one kept past a write into committed bytes (section 11), which `run` can't see |
 | A trie 64 levels deep, at a hash size above 32. Two keys need to share their lowest 64 nibbles, which for real hashes would take a 256-bit collision | a depth counter overflows, which panics in a debug build | `run` is a debug build |
 
@@ -798,9 +798,9 @@ path API. What it does depends on the collection, since only the trees index a n
 
 | Collection | What a stale header leads to |
 |---|---|
-| `linked_array_list` | a read raises `InvalidBTreeNode`. An insert, an append or a remove panics, and crashes in a release build |
+| `linked_array_list` | a read raises `InvalidBTreeNode`, and since `274418f` so do an insert, an append and a remove, which panicked before. So do the concat cases, where at the fixes branch the freeze after the join keeps them from it, and they finish |
 | `sorted_map`, `sorted_set` | a read by index raises `InvalidBTreeNode`. A remove can underflow the count, which panics, and wraps in a release build |
-| `counted_hash_map`, `counted_hash_set` | a remove can underflow the count in the same way. Nothing else depends on the count |
+| `counted_hash_map`, `counted_hash_set` | a remove can underflow the count in the same way. Nothing else depends on the count. The fixes branch raises `InvalidCount` there, which the original doesn't |
 | `array_list`, `hash_map`, `hash_set` | no crash, only what's written to one showing up in the other |
 
 ### What the port corrects
@@ -817,15 +817,15 @@ scripts for each, one with what Zig does and one with what the port does.
 | `read_stream` on a `short_bytes` slot from a cursor with no position, which is a key from `{"sorted_map_get": {"key": ...}}`. Since `71ee0cf`, the key `read_key_value_pair` gives for a set's entry has the entry's position, and streams in both | `ExpectedSlotPosition` | it gives the value |
 | `read_stream` on a `short_bytes` slot that has since been overwritten | the length from the cursor and the bytes from the file, so neither value | it gives what the cursor holds |
 | `next` on an array list's iterator, when what it would give is past the end of the list. It stops after giving as many elements as the list has, it skips a slot that's truly empty, and a slice leaves what's past the new end in its blocks. Since `89da8e7` an append writes a `none` slot marked full, which isn't skipped, so only a version 1 file written before it can have this: `[unwritten, 1, 2, 3]` sliced to a size of 2 at `6b93af1` gives 1 and 2 | it gives what `{"array_list_get": 2}` says isn't there | it goes through the positions up to the list's size and no further, so here it gives 1 |
-| `iterator` with `from_index` on a sorted map or set, or a linked array list, at a position below its size where a read by position raises `InvalidBTreeNode` (`iterator-from-position-past-tree`) | it starts there without checking the index it lands on in the leaf (`lib.zig:3731`, and `3800` for a list), and gives nothing, or what comes after the leaf, or panics at the first `next` when the leaf is fuller (`tests/undefined/frozen-clone-*-iterator-past-tree`) | `iterator` raises `InvalidBTreeNode`, from its starting descent |
 | `iterator` with `from_key` on a sorted map or set, from a key whose place, its `rank`, is past the collection's `count` (`iterator-from-key-past-size`) | it stops only when its index equals the size, so it goes on to the tree's end | it gives nothing |
 
-The last two need a tree whose header disagrees with it, which only an undefined use makes (section 10: two headers for one
-tree), so a script meets them only on one of the inputs made that way. **Neither can happen on a tree whose header agrees
-with it.** There, every position below the size is in the tree, so a read by position can't run out of tree, and a key's
-place is the number of keys before it in the tree, which can't be more than the tree holds, and so not more than its size. `run`
-checks both at the `iterator` op, with a read at the position and a `rank` of the key, so a valid script that starts an
-iterator anywhere else isn't touched.
+The last needs a tree whose header disagrees with it, which only an undefined use makes (section 10: two headers for one
+tree), so a script meets it only on one of the inputs made that way. **It can't happen on a tree whose header agrees with
+it**, as a key's place is the number of keys before it in the tree, which can't be more than the tree holds, and so not more
+than its size. `run` checks it at the `iterator` op, with a `rank` of the key, so a valid script that starts an iterator
+anywhere else isn't touched. An iterator from a position its tree doesn't have was a difference too, until `274418f`, where
+the original raises `InvalidBTreeNode` at the `iterator` from the same descent and leaf check as a read by position, as the
+port does, so the eight scripts on those inputs start an iterator from every position now.
 
 **A full copy into a file** (D55). Here the port differs by storage kind, not by script, so unlike the reads above,
 valid scripts go on using it. In the original, and in the port's memory storage and a storage of the caller's own, a sync
@@ -917,14 +917,16 @@ All of these look like mistakes and all of them are what Zig does. `overwriting-
 
 ### What a later Zig changes
 
-Apart from what this says, all of this document is what Zig does at `89da8e7`. The manifest gives each fixture's
-`zig_commit`, and its expected file is what that commit does. These fixtures are from the fixes branch, `fix-findings-v2`
-at `bd6abc3`, on `89da8e7`, as they need its bytes:
+Apart from what this says, all of this document is what Zig does at `274418f`. The manifest gives each fixture's
+`zig_commit`, and its expected file is what that commit does. These fixtures are from the fixes branch, `fix-findings-v3`
+at `6b48d2d`, on `274418f` (https://github.com/rgb/xitdb/tree/fix-findings-v3), as they need its bytes. `tests/zig-commits.txt`
+names that commit for each, and `second-zig.sh` runs them against it:
 
 | Fixture | What it needs from there |
 |---|---|
 | `write-if-empty-emptied-slot`, `path-api-edges--port` | Finding 17: `write_if_empty` goes by the slot as it is now, not the snapshot. If the cursor has a position, it reads the slot there when it's called, and it writes if that slot is empty, or if the cursor's own slot is empty and the slot now is a `none`, as an append leaves it. Empty means the tag is `none` and `full` isn't set, so a slot written with `{"slot": null}` isn't empty. A root cursor is as it was. So section 4 and item 9 above don't hold for them |
 | `every-construct-linked--port` | Finding 22: a concat freezes after its join, so what comes after it in that transaction copies the joined nodes |
+| `concat-stale-slot--port` | Finding 22 as well, on the route `tests/undefined/concat-stale-slot` takes: a slot read through a cursor from before the map moved, after two concats, and an append to that list in a later transaction. With the freeze after the join, nothing rewrites a node the old header points at, so the append finishes. At `274418f` it raises `InvalidBTreeNode`, which stays the original's case in `tests/undefined/`. It's the sequence of the issue drafted for upstream, and it comes back to the pin the day the original has the fix |
 
 A runner's calls don't change for any of this, only what the engine under them does.
 
@@ -1184,3 +1186,21 @@ and its sidecar, which `check.sh` holds to `replicate-copy-cut-short`, `replicat
 that copies in place. The first half of `recover-without-first-commit--port`, `recover` on a file cut off during its
 creation, which no sync made, is `recover-cut-during-creation--port` now, so it runs on every storage. Nothing a script
 says changes meaning, and no other expected file moved.
+
+**The original moved to `274418f`** (2026-11-17, brief conformance-10). Upstream's two commits after `89da8e7` cache a
+buffered file's length only after a write succeeds, and check a leaf's count in every descent by rank. No fixture moved.
+- An iterator from a position its tree doesn't have raises `InvalidBTreeNode` at the `iterator` in the original now, as it
+  does in the port, so it's no longer something the port corrects. `iterator-from-position-past-tree` left
+  `tests/port-differs/`, and the eight scripts on the `sorted-*` and `linked-*` inputs start an iterator from every
+  position.
+- On a linked input, a write whose rank runs past a leaf raises `InvalidBTreeNode`, where it panicked, or a get wrote past
+  the leaf. `<input>-writes` holds each of those writes, once at the top level, where the file is left as it was, and once
+  in a callback, where a port poisons the transaction only if the write had written before its leaf check. Only a slice
+  has, so `linked-header-above-tree-writes` and `linked-counts-below-leaves-writes` have `--port` variants.
+- In `tests/undefined/`, eleven cases raise `InvalidBTreeNode` where they panicked. `frozen-clone-linked-iterator-past-tree`
+  is gone, as its read is a fixture's now, and no case there needs `--allow-port-differences` any more.
+- The fixes branch is `fix-findings-v3` at `6b48d2d`, on `274418f`. `concat-stale-slot--port` comes from it too.
+- `tests/upstream.txt` records each time the pin was held against upstream's HEAD, and `./upstream.sh`, which `check.sh`
+  runs, says how it stands now, without failing.
+
+To run the new scripts, a runner needs nothing new: `InvalidBTreeNode` from more ops, and the inputs it already reads.

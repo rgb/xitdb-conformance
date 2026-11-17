@@ -64,7 +64,8 @@ const ERROR_NAMES = [_][]const u8{
     "StreamTooLong",
     "TargetNotEmpty",
     "InvalidRange",
-    // only from a tree whose header disagrees with it, in an input made by an undefined use
+    // only from a tree whose header disagrees with it, in an input made by an undefined use:
+    // a read, an iterator from a position or a write whose descent runs past a leaf's count
     "InvalidBTreeNode",
 };
 
@@ -1827,7 +1828,6 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             }
             if (op.get("from_index")) |v| {
                 const index = parseIndex(v, "from_index");
-                try self.checkStartFromIndex(ro, index);
                 // each collection has its own call for this, and the others raise UnexpectedTag from any of them
                 return switch ((try cursor.slot()).tag) {
                     .array_list => Iter.initArrayListFromIndex(cursor, index),
@@ -1838,27 +1838,11 @@ fn Runner(comptime kind: xitdb.DatabaseKind, comptime HashInt: type) type {
             return cursor.iterator();
         }
 
-        /// a tree whose header disagrees with it, which only an undefined use makes, can have a
-        /// position below its size that its descent runs out of tree before reaching. Zig starts an
-        /// iterator there without looking, and gives nothing, or panics where the leaf's index
-        /// passes the end of its block (lib.zig:3731). The port raises InvalidBTreeNode, as a read
-        /// at that position does in both.
-        fn checkStartFromIndex(self: *Self, cursor: RO, index: i65) !void {
-            const tag = (try cursor.slot()).tag;
-            if (tag != .sorted_map and tag != .sorted_set and tag != .linked_array_list) return;
-            const size: i65 = @intCast(try cursor.count());
-            const resolved = if (index < 0) index + size else index;
-            if (resolved < 0 or resolved >= size) return;
-            const part: DB.PathPart(void) = if (tag == .linked_array_list) .{ .linked_array_list_get = resolved } else .{ .sorted_map_get_index = resolved };
-            _ = cursor.readPath(void, &.{part}) catch |err| switch (err) {
-                error.InvalidBTreeNode => self.portDiffers("an iterator starting at a position its tree doesn't have"),
-                else => {},
-            };
-        }
-
-        /// the same kind of tree, with fewer in its header than it holds. An iterator from a key
-        /// stops only when its index equals the size, so from a key whose place is past the size,
-        /// Zig goes on to the tree's end. The port gives nothing.
+        /// a tree whose header disagrees with it, which only an undefined use makes, can say fewer
+        /// in its header than it holds. An iterator from a key stops only when its index equals the
+        /// size, so from a key whose place is past the size, Zig goes on to the tree's end. The port
+        /// gives nothing. (From a position the tree doesn't have, Zig raises InvalidBTreeNode at the
+        /// iterator since 274418f, as the port does, so that's no longer a difference.)
         fn checkStartFromKey(self: *Self, cursor: RO, key: []const u8) !void {
             const tag = (try cursor.slot()).tag;
             if (tag != .sorted_map and tag != .sorted_set) return;

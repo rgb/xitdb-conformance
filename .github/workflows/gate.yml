@@ -74,7 +74,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: xit-vcs/xitdb
-          ref: 89da8e76f0dd82baefeadb656f0f734bf920be05
+          ref: 274418f6ac1c37bccbe7e8e6f212dc123bca4843
           path: xitdb
 
       - name: Check the original's commit

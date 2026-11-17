@@ -1,0 +1,6 @@
+# Each time the pin, the Zig commit the fixtures follow, was held against upstream's HEAD by hand: the date,
+# upstream's HEAD then, and what was decided. ./upstream.sh, which check.sh runs, compares the last line with
+# upstream's HEAD now and says how the pin stands, without failing.
+#
+#   date        upstream's HEAD                           what was decided
+2026-11-17 274418f6ac1c37bccbe7e8e6f212dc123bca4843 followed, from 89da8e7 (brief conformance-10)
