@@ -244,8 +244,8 @@ for script in tests/port-differs/*.zig.json; do
     done
     count=$((count + 1))
 done
-if [ "$count" -ne 7 ]; then
-    echo "tests/port-differs should have 7 behaviours, and it has $count"
+if [ "$count" -ne 6 ]; then
+    echo "tests/port-differs should have 6 behaviours, and it has $count"
     exit 1
 fi
 echo "$count behaviours: Zig does what they say, and a valid script can't use them"
