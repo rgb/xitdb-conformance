@@ -63,7 +63,7 @@ what Zig does hasn't changed. `tests/zig-only.txt` lists all 47, with the gate h
 script without the damage: for `recovery-open-errors`, that was compared with a script of only what came after, and only the
 last trailer's commit ID and checksum differ.
 
-**Six scripts only the port can run** are in `tests/port-variants` too. What they do is an undefined use in Zig, or the port's own
+**Seven scripts only the port can run** are in `tests/port-variants` too. What they do is an undefined use in Zig, or the port's own
 `recover`, so there's no Zig script to make a variant of, and their oracle is Zig on the same script without what the port refuses,
 or `run --port`'s recovery. That was compared on each kind, and each is the same bytes at `bd6abc3`. They're there so that `guard-mutants.sh` finds every guard it gets wrong
 noticed by two fixtures, at least:
@@ -74,7 +74,8 @@ noticed by two fixtures, at least:
 | `rolled-back-reads--port` | Every way to read through what a rolled-back transaction made: a cursor, a read-only cursor, a view made before or after the rollback, an iterator through one, and `next` on one made in it |
 | `stale-cursors--port` | Every way to write through each kind of stale cursor: from an earlier transaction, from before a `db_freeze`, from before a concat, and from a rolled-back transaction. And the reads, the init and the concat's result that stay valid |
 | `compact-sliced-history--port` | A list root sliced to nothing, as `gen` found, and a version 1 list root whose only element is truly empty (finding 28). One whose last element was appended in a callback that wrote nothing compacts since `89da8e7` |
-| `recover-without-first-commit--port` | `recover` on a database without a first commit, in both versions: a file cut off during its creation, and a full copy that didn't finish, which it scans as any other (the director's ruling on conformance-09) |
+| `recover-cut-during-creation--port` | `recover` on a file cut off during its creation, in both versions, made with raw ops: one whose empty root's trailer is whole becomes that new database with the file's own IDs, and one with that trailer cut short raises `InvalidDatabase`. It was the first half of `recover-without-first-commit--port`, and runs on every storage, as no sync made these files (D55) |
+| `recover-without-first-commit--port` | `recover` on a full copy that didn't finish, in both versions, which it scans as any other (the director's ruling on conformance-09). The manifest marks it `cut_short_copy`, as the port's file storages leave the database as it was after a failed copy (D55, below) |
 
 `every-construct-sorted--port` also tries the byte writer on a key through a pair, and `overwriting-committed-bytes--port` now
 ends with a write through a cursor from before a `db_freeze`. `body-write-after-freeze--port` is a variant of a script that's
@@ -504,6 +505,34 @@ at that trailer, with a root header that says so, and that's what the port's has
 the original opens, and the port does what the original does there (D31 item 4), so it's a plain fixture and its variant is
 gone. `recover` on such a database scans as on any other (`recover-without-first-commit--port`).
 
+## D55: a full copy into a file
+
+The port's file storages replace the file on a full copy (D55, 2026-11-17). A sync at 0 goes into a new file beside the
+old one, which takes the old one's name only once the copy's committed size has been written and synced, so a copy that
+fails, or a process that dies during it, leaves the old database in the file. The port's memory storage, and a storage of
+the caller's own, copy in place as the original does. A copy that succeeds leaves the same bytes either way.
+`SCRIPT-FORMAT.md` section 10 says what each does.
+
+This touches the scripts that go on from what a failed copy leaves. The manifest gives them the feature `cut_short_copy`,
+finding them from each script and its sidecar: a top-level `apply_replicated` that raised the error it expected, and left
+its database without a first commit, a committed size of `null`. `check.sh` holds the set to these three:
+
+| Script | What it goes on from | What happens |
+|---|---|---|
+| `replicate-copy-cut-short` | streams that stop after the database header, in both versions: what's left can't say its committed size, its replica state is zero and zero, a `reopen` creates it again or opens it as it is, and the next sync at 0 replaces it | Nothing to the script. A port's runner leaves it out on a storage that replaces, and runs it on one that copies in place |
+| `replicate-failed-first-sync` | bytes that don't end with a trailer: the same, and `left_behind`'s file is what the copy left | The same |
+| `recover-without-first-commit--port` | streams that stop, and then `recover`, which finds the last trailer that arrived whole, and a sync from there | The same. Its first half, `recover` on a file cut off during its creation, is `recover-cut-during-creation--port` now, unmarked, so it still runs on every storage |
+
+There's no variant for a storage that replaces, and no pair in `tests/port-differs`. What a failed copy leaves there is the
+database as it was, and every answer from that is already pinned by the fixtures that sync and read a database nothing
+went wrong in: `replicate-history`, `-interrupted`, `-earlier-commit`, `-wrong-requests` and the generated `replica-*`.
+What's left is that nothing changed, which the port's own tests hold with every file call failing in turn and a process
+that dies at four points, where a fixture would hold it at one. And the original can't produce such a script, so its
+expectations would be written by hand, with nothing to check them.
+
+A file without a first commit that raw ops made isn't marked (`recovery-cut-during-creation`,
+`recover-cut-during-creation--port`): what's tested there is opening it, which every storage has to do, whoever wrote it.
+
 ## Upstream's 89da8e7: what it closes, narrows or leaves
 
 Upstream moved six commits past `6b93af1` on 2026-11-10 (D31). Each of the port's differences was run again on `89da8e7`
@@ -519,7 +548,7 @@ touch it.
 | `tests/port-differs/stream-short-no-position` | 9 | `71ee0cf`: a key-only entry's key from `read_key_value_pair` has the entry's position | Narrows: the key from `{"sorted_map_get": {"key": ...}}` still has no position and still raises `ExpectedSlotPosition`, and the half through `read_key_value_pair` streams in both, which `stream-short-set-key` pins as a plain fixture |
 | `tests/port-differs/stream-short-overwritten` | 9 | none: a slot overwritten since the cursor was made is still read from the file | Leaves |
 | `tests/port-differs/iterator-past-slice` | 26 | `89da8e7`: an append writes a `none` slot marked full, which counts and which the iterator gives | Narrows to a version 1 file with a truly empty slot inside a list's size, where the original at `89da8e7` still skips it and gives what's past the end (1, then 2, and after an append 1, 9 and 3), and the port gives 1, and 1 and 9. It's remade on `inputs/v1-sliced-holes`. On a file the original writes now, the two agree (`unwritten-elements`), and so they do on a version 1 file with nothing past the end (`version-1-lists`) |
-| `replicate-failed-first-sync`, and its variant `--port` | D19 | `52c7283` and `92a926e`: a copy from 0 that fails leaves a database without a first commit, which opens, and `replica_state` gives zero and zero for it | Closes: the port does what the original does there (D31 item 4). The variant is gone and the script is a plain fixture |
+| `replicate-failed-first-sync`, and its variant `--port` | D19 | `52c7283` and `92a926e`: a copy from 0 that fails leaves a database without a first commit, which opens, and `replica_state` gives zero and zero for it | Closes: the port does what the original does there (D31 item 4). The variant is gone and the script is a plain fixture. Since D55 the port's file storages replace the file on a full copy, where a failed one leaves the database as it was, so it's marked `cut_short_copy` and runs only on a storage that copies in place (below) |
 | `recovery-open-errors`, `--port` | D19 | `bdaa55e`: version 2 opens | Leaves, as what can't be trusted is the same. `InvalidVersion` is tested at 0 and 3, and `recovery-open-errors-version-1` with its variant is the same on a version 1 file, whose committed size is at 29 |
 | `replicate-bad-trailer`, `--port` | D19 | none: a trailer whose checksum fails after a sync that succeeded isn't a database without a first commit | Leaves |
 | `compact-roots`, `--port` | 28 | `89da8e7`: a last moment appended and never written is a `none` slot marked full, a moment set to nothing | Narrows to a history with no moments and a last slot that's truly empty, which only a version 1 file has (`inputs/v1-unwritten-last`, a new case in both). A history whose last element was appended and never written now compacts in both |
@@ -535,7 +564,7 @@ touch it.
 | `rolled-back-reads--port`, `stale-cursors--port` | D16, D18 | none | Leave |
 | `write-if-empty-emptied-slot` | 17 | `89da8e7`: an append leaves a `none` marked full where the cursor's slot is empty | Leaves, with the rule refined (below): it writes now where a `none` was written behind a cursor made on an empty slot, as upstream does. From `bd6abc3` |
 | the 33 generated scripts in `tests/zig-only.txt` | 1, 16, D24 | none | Leave |
-| `recover` | D19 | `92a926e`: a database without a first commit is one the original opens | Leaves, as an explicit call that scans as it always did, on that state too (the director's ruling): `recover-without-first-commit--port` |
+| `recover` | D19 | `92a926e`: a database without a first commit is one the original opens | Leaves, as an explicit call that scans as it always did, on that state too (the director's ruling): `recover-without-first-commit--port`, and `recover-cut-during-creation--port` for a file cut off during its creation |
 
 **Finding 17's rule is refined** for the fixes branch and the port, on the `xitdb` session's finding that the branch's
 `writeIfEmpty` held back after an append or an insert, whose slot in the file is a `none` marked full while the cursor's own

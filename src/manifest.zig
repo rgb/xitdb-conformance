@@ -38,6 +38,8 @@ const Features = struct {
     disk_offsets: bool = false,
     replication: bool = false,
     inputs: bool = false,
+    // not from the ops alone, but from what the run did: cutShortCopy
+    cut_short_copy: bool = false,
 
     fn addOps(self: *Features, ops: Json) void {
         for (ops.array.items) |item| {
@@ -79,7 +81,7 @@ const Features = struct {
     fn print(self: Features, w: *Io.Writer) !void {
         var first = true;
         try w.writeAll("[");
-        inline for (.{ "reopen", "recover", "raw_file", "read_only", "iterators", "rank", "byte_stream", "byte_buffers", "several_databases", "compaction", "disk_offsets", "replication", "inputs" }) |name| {
+        inline for (.{ "reopen", "recover", "raw_file", "read_only", "iterators", "rank", "byte_stream", "byte_buffers", "several_databases", "compaction", "disk_offsets", "replication", "inputs", "cut_short_copy" }) |name| {
             if (@field(self, name)) {
                 try w.writeAll(if (first) "\"" else ", \"");
                 try w.writeAll(name);
@@ -107,13 +109,34 @@ fn inputsOf(arena: std.mem.Allocator, ops: Json) ![]const []const u8 {
     return names.items;
 }
 
+fn readSidecar(io: Io, arena: std.mem.Allocator, sidecar_path: []const u8) !std.json.ObjectMap {
+    const text = try Io.Dir.cwd().readFileAlloc(io, sidecar_path, arena, .unlimited);
+    return (try std.json.parseFromSliceLeaky(Json, arena, text, .{ .parse_numbers = false })).object;
+}
+
+/// whether a sync at 0 failed once it had begun to write: a top-level apply_replicated that raised the
+/// error the script expected, and left its database without a first commit, which the sidecar gives as a
+/// committed size of null. a failed apply changes nothing otherwise. it goes by what the run did and not by
+/// the script's text, as how far a copy gets depends on its start, which can be a name, and on how many
+/// bytes arrive. what comes after it goes by what a copy in place leaves, and a storage that replaces the
+/// file on a full copy leaves the database as it was instead (SCRIPT-FORMAT.md section 10).
+fn cutShortCopy(sidecar: std.json.ObjectMap, ops: Json, sidecar_path: []const u8) bool {
+    const entries = sidecar.get("ops").?.array.items;
+    if (entries.len != ops.array.items.len) fail("{s} has {d} entries for {d} ops", .{ sidecar_path, entries.len, ops.array.items.len });
+    for (ops.array.items, entries) |item, entry| {
+        const op = item.object;
+        if (!std.mem.eql(u8, op.get("op").?.string, "apply_replicated")) continue;
+        if (op.get("expect_error") == null) continue;
+        if (entry.object.get("committed_size").? == .null) return true;
+    }
+    return false;
+}
+
 /// the names of the other databases a script's run left, in the order it made them, from the
 /// sidecar, which lists every database the run has a file for. it goes by what was written and
 /// not by the script's text, as a compaction that fails can do so before it makes its target
 /// or after, depending on the error and on whether it's the port's guard.
-fn otherDatabases(io: Io, arena: std.mem.Allocator, sidecar_path: []const u8) ![]const []const u8 {
-    const text = try Io.Dir.cwd().readFileAlloc(io, sidecar_path, arena, .unlimited);
-    const sidecar = (try std.json.parseFromSliceLeaky(Json, arena, text, .{ .parse_numbers = false })).object;
+fn otherDatabases(arena: std.mem.Allocator, sidecar: std.json.ObjectMap) ![]const []const u8 {
     // a script with one database has no list
     const databases = sidecar.get("databases") orelse return &.{};
     var names: std.ArrayList([]const u8) = .empty;
@@ -242,13 +265,16 @@ pub fn main(init: std.process.Init) !void {
             other_commits.get(name) orelse args[2],
             path,
         });
+        var cut_short_copy = false;
         if (passes) {
             const db = try std.fmt.allocPrint(arena, "valid/{s}.db", .{name});
-            const sidecar = try std.fmt.allocPrint(arena, "valid/{s}.db.sidecar.json", .{name});
+            const sidecar_path = try std.fmt.allocPrint(arena, "valid/{s}.db.sidecar.json", .{name});
             mustExist(io, db);
-            mustExist(io, sidecar);
-            try w.print(", \"db\": \"{s}\", \"sidecar\": \"{s}\"", .{ db, sidecar });
-            const others = try otherDatabases(io, arena, sidecar);
+            mustExist(io, sidecar_path);
+            try w.print(", \"db\": \"{s}\", \"sidecar\": \"{s}\"", .{ db, sidecar_path });
+            const sidecar = try readSidecar(io, arena, sidecar_path);
+            cut_short_copy = cutShortCopy(sidecar, script.get("ops").?, sidecar_path);
+            const others = try otherDatabases(arena, sidecar);
             if (others.len > 0) {
                 try w.writeAll(", \"other_databases\": {");
                 for (others, 0..) |other, other_index| {
@@ -273,6 +299,7 @@ pub fn main(init: std.process.Init) !void {
         try collections.print(w);
         var features: Features = .{};
         features.addOps(script.get("ops").?);
+        features.cut_short_copy = cut_short_copy;
         try w.writeAll(", \"features\": ");
         try features.print(w);
         try w.writeAll("}");

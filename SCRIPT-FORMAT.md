@@ -497,7 +497,10 @@ reads and checks the database header that comes first in the bytes, raising `Inv
 are fewer bytes than that header and the root header after it. Then it empties the file and writes that database header
 with a root header of zeros, skips the root header that came with the bytes, and copies the rest, and only once all of
 it has arrived does it write the committed size. So one that fails leaves a database without a first commit
-([closing and reopening](#5-ops)), until a sync at 0 succeeds. `replicate-failed-first-sync` has this.
+([closing and reopening](#5-ops)), until a sync at 0 succeeds. `replicate-failed-first-sync` has this. That's a copy in
+place, which is what every storage kind of the original does. The port's file storages replace the file on a full copy
+instead, which leaves the database as it was after a failed one, and the manifest marks the scripts that go on from what
+a failed copy leaves as `cut_short_copy` ([section 10](#what-the-port-corrects)).
 
 **What's before the committed size isn't copied.** A `read_committed` from 0 gives the source's own bytes up to its
 committed size, the padding in version 2 and the copy of the root slot in version 1, as they are, and then the
@@ -786,7 +789,7 @@ needn't handle them. They are kept out like this:
 | Reading, before the commit, a gap left by a `writer` that seeked past the end | zeros on `file` and `memory`. On `buffered_file`, `EndOfStream` until the gap has been flushed, and zeros after that. The committed bytes are the same on all three | `EndOfStream` can only be expected on `read_stream`, and `check.sh` runs every script on all three kinds. A read that gets zeros everywhere isn't caught |
 | On a read-only file, a transaction with a callback, or one that would fail anyway | `file` raises `WriteFailed` at the first write, without running the rest. `buffered_file` runs the rest and only fails at the commit, so it raises `KeyNotFound` for a path that fails by itself, runs the callback, and raises `ScriptAbort` for a callback that fails | `run` fails on the callback. `check.sh` runs every script on both kinds, which catches the rest |
 | A write into committed bytes (section 11) of something that points into the current transaction, if the transaction is then rolled back or the root header is later set back past it | committed data is left pointing past the end of the file. Reading it raises `EndOfStream`, or `OutOfMemory` for a wild length, and once more data has landed at that offset, the read succeeds and returns those bytes as if they were the value | `gen` doesn't let such a transaction fail. `run` can't see it, so a hand-written script has to take care: writing an inline value is fine, as `overwriting-committed-bytes` does |
-| **Two headers for one tree.** An init copies a linked list's or sorted map's header if it's old, and the copy shares the tree. That's only safe if the nodes are old too, or nothing can see the old header any more. There are three ways it goes wrong, all in one transaction. After `linked_array_list_concat`, the old header points at a node that's newer than the transaction's start, so it's rewritten in place, and the old header can still be reached through a slot read before or copied after, a cursor kept from before, or a stale snapshot. After a freeze on a cursor to a collection that a cursor that isn't frozen can also reach. And after a skipped init on a tree, followed by an init | the header disagrees with its tree. A read past the end raises `InvalidBTreeNode`, and some raise `InvalidEnumTag`. An append panics, or crashes in a release build | `gen` keeps away from all three. `run` can't see them, so a hand-written script has to take care. `tests/undefined/` shows them, and makes the inputs `sorted-*` and `linked-*`: committed files, with no byte damaged, that the second way left in each of its four shapes, on a sorted map, a sorted set and a linked list. A valid script can read one of those, and only read it, as the scripts of the same names in `tests/valid/` do. Two of those reads are ones the port corrects (section 11), and an iterator from a position past the tree can panic (`frozen-clone-*-iterator-past-tree`) |
+| **Two headers for one tree.** An init copies a linked list's or sorted map's header if it's old, and the copy shares the tree. That's only safe if the nodes are old too, or nothing can see the old header any more. There are three ways it goes wrong, all in one transaction. After `linked_array_list_concat`, the old header points at a node that's newer than the transaction's start, so it's rewritten in place, and the old header can still be reached through a slot read before or copied after, a cursor kept from before, or a stale snapshot. After a freeze on a cursor to a collection that a cursor that isn't frozen can also reach. And after a skipped init on a tree, followed by an init | the header disagrees with its tree. A read past the end raises `InvalidBTreeNode`, and some raise `InvalidEnumTag`. An append panics, or crashes in a release build | `gen` keeps away from all three. `run` can't see them, so a hand-written script has to take care. `tests/undefined/` shows them, and makes the inputs `sorted-*` and `linked-*`: committed files, with no byte damaged, that the second way left in each of its four shapes, on a sorted map, a sorted set and a linked list. A valid script can read one of those, and only read it, as the scripts of the same names in `tests/valid/` do. Two of those reads are ones the port corrects ([below](#what-the-port-corrects)), and an iterator from a position past the tree can panic (`frozen-clone-*-iterator-past-tree`) |
 | Using an iterator after a write in the transaction that made it. It holds copies of the blocks it's part way through, and reads the others when it gets to them | what's been rewritten in place shows up if the iterator hadn't read that block yet, and doesn't if it had | `run` fails. A hand-written script also has to take care with one kept past a write into committed bytes (section 11), which `run` can't see |
 | A trie 64 levels deep, at a hash size above 32. Two keys need to share their lowest 64 nibbles, which for real hashes would take a 256-bit collision | a depth counter overflows, which panics in a debug build | `run` is a debug build |
 
@@ -823,6 +826,33 @@ with it.** There, every position below the size is in the tree, so a read by pos
 place is the number of keys before it in the tree, which can't be more than the tree holds, and so not more than its size. `run`
 checks both at the `iterator` op, with a read at the position and a `rank` of the key, so a valid script that starts an
 iterator anywhere else isn't touched.
+
+**A full copy into a file** (D55). Here the port differs by storage kind, not by script, so unlike the reads above,
+valid scripts go on using it. In the original, and in the port's memory storage and a storage of the caller's own, a sync
+at 0 copies in place. One that fails after it has read the database header and the root header after it, because its
+stream stops (`EndOfStream`) or its bytes don't end with a trailer (`InvalidDatabase`), leaves a database without a first
+commit: the source's database header, a root header of zeros, and every block of 4096 bytes that arrived whole. Its
+`committed_size`, and every read and write through the root, raise `InvalidDatabase`, and its replica state is zero and
+zero. A `reopen` creates it again if it's no bigger than a new database, and opens it as it is otherwise, and the port's
+`recover` cuts it back to the last trailer that arrived whole. In the port's file storages, the copy goes into a new file
+beside the old one, which takes the old one's name only once the copy's committed size has been written and synced. One
+that fails raises the same error, and leaves the database as it was before the sync, in every byte, and so does a process
+that dies during it: its committed size, its replica state and its reads are what they were. A copy that succeeds leaves
+the same bytes either way, and one given too few bytes for the two headers raises `InvalidRange` and changes nothing in
+both. A copy that replaces can also fail where the original's can't, when the new file can't be made or given the name,
+in a folder the process can't write to or with no room for a second file. That's the port's alone: it raises the
+system's error, and leaves the database as it was.
+
+The fixtures that go on from what a failed copy leaves are what the original does, and the manifest gives them the
+feature `cut_short_copy`. It finds them from each script and its sidecar: a top-level `apply_replicated` that raised the
+error it expected, and whose sidecar entry has a `committed_size` of `null`, as a failed apply changes nothing unless it's
+a copy at 0 that has begun to write, and that's what leaves a database without a first commit. A port's runner leaves
+them out on a storage that replaces, where the port's own tests hold what a failed copy leaves, with every file call
+failing in turn and a process that dies at four points. `run --port` does nothing about it, as each of `run`'s storage
+kinds copies in place, as the port's memory storage does, so the fixtures are what the port does there. There's no
+pair in `tests/port-differs/`, as its second script would need a runner whose storage replaces, which the original
+doesn't have. A file without a first commit that raw ops made isn't marked, as what's tested there is opening it, which
+every storage has to do, whoever wrote the file.
 
 **Storage kinds don't otherwise change the bytes.** `check.sh` holds every script in this repository to that, across
 all three kinds, in debug and release builds.
@@ -882,6 +912,8 @@ All of these look like mistakes and all of them are what Zig does. `overwriting-
    size, can't be read or written, and gives zero and zero as its replica state, until a sync at 0 succeeds. It still
    opens, as a full copy that didn't finish, and a file without a first commit that's no bigger than a new database is
    created again when it's opened (section 5). Zig's README says a caller who minds should write the copy to a new file.
+   The port's file storages do that themselves, so there a failed sync at 0 leaves the database as it was, and the
+   scripts that go on from what it leaves here are marked `cut_short_copy` ([section 10](#what-the-port-corrects)).
 
 ### What a later Zig changes
 
@@ -1139,7 +1171,16 @@ the original at `89da8e7` by its maker in `tests/undefined/`. The scripts in `te
 and pin what the original gives. To run those, a runner needs:
 
 - the error name `InvalidBTreeNode`, which a read by position raises where its descent runs out of tree (section 7);
-- nothing for the two reads the port corrects on them (section 11), which `run` keeps out of valid scripts.
+- nothing for the two reads the port corrects on them (section 10), which `run` keeps out of valid scripts.
 
 `run` takes `--allow-port-differences` for the scripts in `tests/undefined/` too, as two of them panic in reads the port
 corrects, and a case there that prints nothing has no text to look for in `expected.txt`.
+
+**The feature `cut_short_copy`** (2026-11-17, D55). The port's file storages replace the file on a full copy, so a sync
+at 0 that fails leaves the database as it was there, and not a database without a first commit (section 10). The
+manifest gives `cut_short_copy` to the scripts that go on from what a failed copy leaves, finding them from each script
+and its sidecar, which `check.sh` holds to `replicate-copy-cut-short`, `replicate-failed-first-sync` and
+`recover-without-first-commit--port`. A runner leaves them out on a storage that replaces, and runs them as before on one
+that copies in place. The first half of `recover-without-first-commit--port`, `recover` on a file cut off during its
+creation, which no sync made, is `recover-cut-during-creation--port` now, so it runs on every storage. Nothing a script
+says changes meaning, and no other expected file moved.

@@ -468,6 +468,14 @@ echo "coverage notices what's not on its list"
 
 echo "== the fixtures"
 ./fixtures.sh --check
+# the scripts that go on from what a failed copy at 0 leaves, which a storage that replaces the file on a full
+# copy leaves out (D55). the manifest finds them from what the run did, so a new one shows up here for review
+cut_short=$(grep '"cut_short_copy"' fixtures/manifest.json | sed 's/^ *{"name": "\([^"]*\)".*/\1/' | sort | tr '\n' ' ')
+if [ "$cut_short" != "recover-without-first-commit--port replicate-copy-cut-short replicate-failed-first-sync " ]; then
+    echo "the manifest marks these as cut_short_copy, and not the three it should: $cut_short"
+    exit 1
+fi
+echo "the manifest marks the three scripts that go on from a failed copy"
 
 echo "== the fixture check notices drift"
 COPY="$OUT/fixtures-copy"
