@@ -1286,6 +1286,16 @@ their process IDs, so whatever is left of a reader, and of what it started, is e
 well. `check.sh` shows it with a reader that says `open` and never answers, under an alarm of 8 seconds, and checks that
 none of it is left running.
 
+**On both systems.** The test has been run on macOS, where `check.sh` runs it, and on Linux, by
+`linux-two-processes.sh`. There, Zig on the Mac builds the writer and the original's reader for aarch64 Linux, static,
+with `zig build two-processes -Dtarget=aarch64-linux-musl -p out/linux`, and they run in the image the port's gate uses,
+`swift:6.4.2` by its digest, never pulled, with no network and this folder mounted read-only. The files lie on the
+container's overlay, or with `--on-volume` on a named volume of their own that it makes and removes, and it prints which
+kind of file system that is. On 2026-11-17 the original's reader held to the rule there, on both of its kinds, in all
+three runs, on `overlayfs` and on `btrfs`, in Ubuntu 26.04.1 on aarch64. A port's reader for Linux is given by
+`XITDB_READER`, as a path inside the container. One that maps the file only on a kind of volume it trusts should be run
+with `--on-volume`, as on the overlay it might never map, and pass for the wrong reason.
+
 None of this is a fixture. The answers to expect come from the writer as it commits, so a port's runner needs none of
 it, only its reader.
 

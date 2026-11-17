@@ -158,4 +158,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(two_processes_exe);
+
+    // only what two-processes.sh needs, the writer and the original's reader, for running it on another system:
+    // zig build two-processes -Dtarget=aarch64-linux-musl -p out/linux (linux-two-processes.sh does it)
+    const two_processes_step = b.step("two-processes", "Build only the writer and the original's reader, for two-processes.sh");
+    two_processes_step.dependOn(&b.addInstallArtifact(reader_exe, .{}).step);
+    two_processes_step.dependOn(&b.addInstallArtifact(two_processes_exe, .{}).step);
 }

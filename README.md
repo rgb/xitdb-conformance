@@ -60,6 +60,9 @@ independent of the Swift code.
   file kept open across a rename of a compacted copy over its name. The original's own reader, `src/reader.zig`, always
   runs; a port's is given as the argument or `XITDB_READER`. `SCRIPT-FORMAT.md` section 15 says what a reader prints.
   `check.sh` runs it.
+- `linux-two-processes.sh [--on-volume]`: the same on Linux, with the writer and the original's reader built for aarch64
+  Linux by Zig here and run in a container, the image the port's gate uses, which it never pulls. `--on-volume` puts the
+  files on a named volume of their own rather than the container's overlay, which matters to a reader that maps.
 - `tests/samples/`: databases that programs using the original wrote, which `fixtures.sh` copies to `fixtures/samples/`
   with `dump`'s listing of each, so that the port's reading can be compared with the original's.
 - `check.sh`: the gate. It builds everything and checks all of the above, in debug and release builds and across

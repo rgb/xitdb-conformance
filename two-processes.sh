@@ -14,12 +14,15 @@
 # set. If they run out, it says which reader on which kind gave no answer, and in which run, by the writer's words for
 # it. Whenever the writer doesn't end well, whatever is left of the readers it started is ended, each having a process
 # group of its own.
+#
+# TWO_PROCESSES_DRIVER and TWO_PROCESSES_OWN_READER say where the writer and the original's reader are, zig-out/bin
+# unless they're set, so that linux-two-processes.sh can run builds for another system.
 
 set -eu
 cd "$(dirname "$0")"
 
-DRIVER=$PWD/zig-out/bin/two-processes
-OWN=$PWD/zig-out/bin/reader
+DRIVER=${TWO_PROCESSES_DRIVER:-$PWD/zig-out/bin/two-processes}
+OWN=${TWO_PROCESSES_OWN_READER:-$PWD/zig-out/bin/reader}
 WORK=${TWO_PROCESSES_OUT:-out/two-processes}
 ALARM=${TWO_PROCESSES_ALARM:-300}
 [ -x "$DRIVER" ] && [ -x "$OWN" ] || { echo "run zig build first"; exit 2; }
@@ -36,7 +39,7 @@ try() { # a reader, what to call it
         perl -e 'alarm shift; exec @ARGV' "$ALARM" "$DRIVER" "$1" "$kind" "$folder" || status=$?
         [ "$status" -eq 0 ] && continue
         for pid in $(cat "$folder/readers" 2> /dev/null); do
-            kill -9 -- "-$pid" 2> /dev/null || true
+            kill -9 "-$pid" 2> /dev/null || true
         done
         # the alarm is SIGALRM, 14
         if [ "$status" -eq 142 ]; then
